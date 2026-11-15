@@ -9,6 +9,8 @@
 class UShopScannerComponent;
 class UShopATMComponent;
 class UShopTerminalWidget;
+class SWidget;
+class ULocalPlayer;
 
 UENUM(BlueprintType)
 enum class EShopScannerAction : uint8 { Save, RemoveItem, Clear, LockBill, Complete, CashCompensation, ProvideReplacement };
@@ -37,6 +39,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Shop") void RequestProductionAction(UShopProductionStationComponent* Station, FGuid SessionID, EShopProductionAction Action, int32 BottleISID, int32 OtherISID=0);
 	EShopCheckoutResult ExecuteSupplyPurchase(UShopProductionStationComponent* Station, FGuid SessionID, FName OfferID, int32 Quantity, FGuid OperationID, int64 Sequence);
 	EShopCheckoutResult ExecuteProductionAction(UShopProductionStationComponent* Station, FGuid SessionID, EShopProductionAction Action, int32 BottleISID, int32 OtherISID, int64 Sequence);
+	void ShowProductionResult(EShopCheckoutResult Result);
+	void ClearProductionNotice();
+	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 	bool IsStationReachable(const AActor* Station) const { return CanReach(Station); }
 	EShopCheckoutResult ExecuteATMWithdrawal(UShopATMComponent* ATM, const TArray<int32>& Denominations, FGuid OperationID, int64 Sequence);
 	/** Server/test entry uses the same access, ordering, session and case checks as the owned RPC. */
@@ -52,4 +57,7 @@ private:
 	UFUNCTION(Client, Reliable) void Client_OpenTerminal(AActor* Station);
 	UPROPERTY(Transient) TObjectPtr<UShopTerminalWidget> TerminalWidget;
 	bool CanReach(const AActor* Station) const;
+	TSharedPtr<SWidget> ProductionNotice;
+	TWeakObjectPtr<ULocalPlayer> NoticePlayer;
+	FTimerHandle NoticeTimer;
 };

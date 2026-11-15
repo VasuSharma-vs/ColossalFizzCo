@@ -26,10 +26,13 @@ void UShopPlayerInteractionComponent::RequestScannerAction(UShopScannerComponent
 
 void UShopPlayerInteractionComponent::Server_ScannerAction_Implementation(UShopScannerComponent* Scanner, FGuid ExpectedSession, EShopScannerAction Action, int32 ISID, FGuid CaseID, int64 Sequence)
 {
-	Client_ActionResult(Sequence, ExecuteScannerAction(Scanner, ExpectedSession, Action, ISID, CaseID, Sequence));
+	const auto Result=ExecuteScannerAction(Scanner, ExpectedSession, Action, ISID, CaseID, Sequence);
+	UE_LOG(LogTemp,Verbose,TEXT("SHOP_SCANNER_ACTION action=%d sequence=%lld result=%s reachable=%d owner=%s position=%s"),
+		int32(Action),Sequence,*UEnum::GetValueAsString(Result),IsValid(Scanner) && CanReach(Scanner->GetOwner()),*GetNameSafe(GetOwner()),*GetOwner()->GetActorLocation().ToString());
+	Client_ActionResult(Sequence,Result);
 }
 
-void UShopPlayerInteractionComponent::Client_ActionResult_Implementation(int64 Sequence, EShopCheckoutResult Result) { OnActionResult.Broadcast(Sequence, Result); }
+void UShopPlayerInteractionComponent::Client_ActionResult_Implementation(int64 Sequence, EShopCheckoutResult Result) { ShowProductionResult(Result); OnActionResult.Broadcast(Sequence, Result); }
 
 bool UShopPlayerInteractionComponent::CanReach(const AActor* Station) const
 {

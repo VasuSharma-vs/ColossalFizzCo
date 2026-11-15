@@ -1,5 +1,11 @@
 #include "Shop/NormalColaNavigationConfig.h"
 #include "NavMesh/RecastNavMesh.h"
+#include "NavAreas/NavArea_Obstacle.h"
+
+UNormalColaCustomerFilter::UNormalColaCustomerFilter()
+{
+	AddExcludedArea(UNavArea_Obstacle::StaticClass());
+}
 
 ANormalColaNavigationData::ANormalColaNavigationData()
 {

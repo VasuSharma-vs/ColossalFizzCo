@@ -1,4 +1,8 @@
 #include "Props/InteractablePropManager.h"
+#include "Props/PropProductCatalog.h"
+#include "Props/PropDeliveryChannel.h"
+#include "Props/PropAssemblyMesh.h"
+#include "Shop/ManualColaFillingMachine.h"
 #include "Props/InteractableProp.h"
 #include "Props/InteractablePropDataAsset.h"
 #include "Components/ASMComponent.h"
@@ -33,6 +37,7 @@
 
 APropManager::APropManager()
 {
+ ProductCatalog=TSoftObjectPtr<UPropProductCatalog>(FSoftObjectPath(TEXT("/Game/Props/Products/DA_ProductCatalog.DA_ProductCatalog")));
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.TickInterval = 0.0f;
 	bReplicates = true;
@@ -127,7 +132,7 @@ void APropManager::ApplyProductDefinitionToComponent(UInteractableISMComponent* 
 		return;
 	}
 
-	Comp->ApplyProductDefinition(Def);
+	Comp->ApplyProductDefinition(Comp->VisualBottlePID ? ResolveVisualDefinition(Def.ProductID,Comp->VisualBottlePID) : Def);
 	if (!Comp->IsRegistered() && GetWorld())
 	{
 		if (!Comp->GetAttachParent() && GetRootComponent())
@@ -202,6 +207,17 @@ void APropManager::Tick(float DeltaSeconds)
 	}
 	else
 	{
+		PromotionSendDelay -= DeltaSeconds;
+		if (!OutboundPromotions.IsEmpty() && LocalDeliveryChannel.IsValid() && PromotionSendDelay <= 0)
+		{
+			auto& Pending = OutboundPromotions[0];
+			const int32 Count = FMath::Min(32, Pending.IDs.Num() - Pending.Cursor);
+			TArray<int32> Chunk(Pending.IDs.GetData() + Pending.Cursor, Count);
+			LocalDeliveryChannel->RequestPromotion(Chunk, Pending.State, Pending.Reason, Pending.bSimulate);
+			Pending.Cursor += Count;
+			if (Pending.Cursor == Pending.IDs.Num()) OutboundPromotions.RemoveAt(0);
+			PromotionSendDelay = .05f;
+		}
 		if (QueuedPromotionISIDs.Num() > 0)
 		{
 			ProcessQueuedISMPromotions();
@@ -372,13 +388,14 @@ void APropManager::InitializePropManager()
 
 void APropManager::InitializeIISMDB()
 {
+ if(HasAuthority() && !ProductCatalog.IsNull() && ProductCatalog.LoadSynchronous()) InitializeProductCatalog();
 	int32 AutoPID = 1;
 	UE_LOG(LogTemp, Verbose, TEXT("[PropSenseSight] === InitializeIISMDB: Registering %d Default Product Data Assets ==="), DefaultProductDataAssets.Num());
 	for (UInteractablePropDataAsset* Asset : DefaultProductDataAssets)
 	{
 		if (Asset)
 		{
-			while (ProductDefinitions.Contains(AutoPID))
+			while (ProductDefinitions.Contains(AutoPID) || (ProductCatalog.Get() && ProductCatalog.Get()->Find(AutoPID)))
 			{
 				++AutoPID;
 			}
@@ -413,19 +430,83 @@ bool APropManager::RegisterProductDefinition(const FPropProductDefinition& InDef
 		return false;
 	}
 	FPropProductDefinition Validated = InDefinition;
+	const auto* PreviousDefinition=FindProductDefinition(InDefinition.ProductID);
+	const int32 PreviousCapacity=PreviousDefinition ? PreviousDefinition->ConsumableProfile.NumOfPortions : 0;
+ // Legacy authored SKUs keep their saved PID and initial liquid defaults, but
+ // their physical capacity and shell come from the canonical bottle definition.
+ if(const int32 Canonical=Validated.CatalogPID ? 0 : FindCatalogAssetPID(Validated.SourceDataAsset))
+  if(const auto* Shared=FindProductDefinition(Canonical);Shared && Canonical!=Validated.ProductID)
+  {
+   if(Shared->Category==EPropProductCategory::Bottle)
+   {
+    const auto Defaults=Validated.DefaultUniqueData;const auto* Legacy=Validated.SourceDataAsset.Get();
+    Validated=*Shared;Validated.ProductID=InDefinition.ProductID;Validated.StaticMeshID=InDefinition.ProductID;
+    Validated.SourceDataAsset=const_cast<UInteractablePropDataAsset*>(Legacy);Validated.DefaultUniqueData=Defaults;
+   }
+   else if(Shared->Category==EPropProductCategory::Cap)
+   {Validated=*Shared;Validated.ProductID=InDefinition.ProductID;Validated.StaticMeshID=InDefinition.ProductID;Validated.SourceDataAsset=InDefinition.SourceDataAsset;
+    Validated.bUseBottlePIDCompatibility=false;Validated.SupportedBottleMaterials={EBottleMaterialType::Plastic};}
+  }
+	// Saved definitions retain their identities and content/economy state, but
+	// migrated source assets supply the current plastic shell and physical profile.
+	const auto* Source=Validated.SourceDataAsset.Get();
+	if (Source && !Validated.CatalogPID && Source->BottleMaterialType==EBottleMaterialType::Plastic && Source->StaticMesh
+		&& Source->StaticMesh->GetPathName()==TEXT("/Game/Assest/meshs/PlasticBottle/SM_PlasticBottle.SM_PlasticBottle")
+		&& (Validated.StaticMesh!=Source->StaticMesh || Validated.SkeletalMesh!=Source->SkeletalMesh || Validated.BottleMaterialType!=EBottleMaterialType::Plastic
+			|| Validated.FragmentAssembly || !Validated.FractureFragments.IsEmpty() || Validated.MaterialOverrides.Num()>Source->MaterialOverrides.Num()))
+	{
+		const auto Fresh=FPropProductDefinition::FromDataAsset(Source,Validated.ProductID,Validated.StaticMeshID);
+		Validated.StaticMesh=Fresh.StaticMesh; Validated.SkeletalMesh=Fresh.SkeletalMesh;
+		Validated.MaterialOverrides=Fresh.MaterialOverrides; Validated.BottleMaterialType=Fresh.BottleMaterialType;
+		Validated.FragmentAssembly=nullptr; Validated.FractureFragments.Reset();
+		Validated.BottleMass=Fresh.BottleMass; Validated.GameplayMassKg=Fresh.GameplayMassKg;
+		Validated.bCanInflate=Fresh.bCanInflate; Validated.bCanBend=Fresh.bCanBend; Validated.bCanDent=Fresh.bCanDent;
+		Validated.bCanCrack=Fresh.bCanCrack; Validated.bCanRecover=Fresh.bCanRecover;
+		Validated.PressureResistanceMultiplier=Fresh.PressureResistanceMultiplier;
+		Validated.PressureDamageThreshold=Fresh.PressureDamageThreshold; Validated.PressureFailureThreshold=Fresh.PressureFailureThreshold;
+		Validated.StrengthDamageRate=Fresh.StrengthDamageRate; Validated.BreakageFailureThreshold=Fresh.BreakageFailureThreshold;
+		if (HasAuthority() && Source->LiquidMaterial && Validated.DefaultUniqueData.EventData.ContentID>0)
+			if (const auto* Existing=FindContentDefinition(Validated.DefaultUniqueData.EventData.ContentID))
+			{ auto Content=*Existing; Content.LiquidMaterial=Source->LiquidMaterial; Content.SupportedBottleMaterials.AddUnique(EBottleMaterialType::Plastic); RegisterContentDefinition(Content); }
+	}
 	if (HasAuthority()) { Validated.FilledContentIDs.Empty(); Validated.FilledProductIDs.Empty(); for (const auto& Mapping : Validated.FilledProductIDByContentID) { Validated.FilledContentIDs.Add(Mapping.Key); Validated.FilledProductIDs.Add(Mapping.Value); } }
 	else { Validated.FilledProductIDByContentID.Empty(); for (int32 I=0; I<FMath::Min(Validated.FilledContentIDs.Num(), Validated.FilledProductIDs.Num()); ++I) Validated.FilledProductIDByContentID.Add(Validated.FilledContentIDs[I],Validated.FilledProductIDs[I]); }
 	Validated.bEnableInstanceUniqueData |= Validated.bEnableContinuousUpdateData;
-	if (HasAuthority() && Validated.ConsumableProfile.NumOfPortions > 0 && Validated.DefaultUniqueData.EventData.ContentLevel > 0 && Validated.DefaultUniqueData.EventData.ContentID == 0) { FPropContentDefinition Content; Content.ContentID = Validated.ProductID; Content.DisplayName = Validated.DisplayName; Content.BasePortionPrice = Validated.ConsumableProfile.Price; Content.IdealServingTemperature = Validated.TemperatureProfile.ConsumableTemperature; Content.StimulusProfile = Validated.StimulusProfile; Content.TasteProfile = Validated.TasteProfile; Content.ExpiredTasteProfile = Validated.ExpiredTasteProfile; Content.ExpiryProfile = Validated.ExpiryProfile; if (!ContentDefinitions.Contains(Content.ContentID)) RegisterContentDefinition(Content); Validated.DefaultUniqueData.EventData.ContentID = Content.ContentID; }
+	if (HasAuthority() && Validated.ConsumableProfile.NumOfPortions > 0 && Validated.DefaultUniqueData.EventData.ContentLevel > 0 && Validated.DefaultUniqueData.EventData.ContentID == 0) { FPropContentDefinition Content; Content.ContentID = Validated.ProductID; Content.DisplayName = Validated.DisplayName; Content.BasePortionPrice = Validated.ConsumableProfile.Price; Content.IdealServingTemperature = Validated.TemperatureProfile.ConsumableTemperature; Content.StimulusProfile = Validated.StimulusProfile; Content.TasteProfile = Validated.TasteProfile; Content.ExpiredTasteProfile = Validated.ExpiredTasteProfile; Content.ExpiryProfile = Validated.ExpiryProfile; if (Validated.SourceDataAsset) Content.LiquidMaterial=Validated.SourceDataAsset->LiquidMaterial; if (!ContentDefinitions.Contains(Content.ContentID)) RegisterContentDefinition(Content); Validated.DefaultUniqueData.EventData.ContentID = Content.ContentID; }
 	ProductDefinitions.Add(InDefinition.ProductID, Validated);
-	if (HasAuthority()) Multicast_RegisterProductDefinition(Validated);
+	if (HasAuthority()) for (const auto& Peer : DeliveryChannels) if (Peer.Value) Peer.Value->QueueProduct(Validated.ProductID);
 
+	TArray<int32> AffectedInstances;
+	for(const auto& Pair:ISIDData)if(Pair.Value.ProductID==Validated.ProductID)AffectedInstances.Add(Pair.Key);
+	for (int32 InstanceID : AffectedInstances)
+	{
+		const bool Resize=PreviousCapacity>0 && Validated.ConsumableProfile.NumOfPortions>0 && PreviousCapacity!=Validated.ConsumableProfile.NumOfPortions;
+		if(Resize)
+		{
+			auto* Unique=UniqueDataByISID.Find(InstanceID);
+			// Capacity is shared; the amount of existing liquid is instance state.
+			if(Unique)Unique->EventData.ContentLevel=float(double(Unique->EventData.ContentLevel)*PreviousCapacity/Validated.ConsumableProfile.NumOfPortions);
+			else Unique=FindUniqueData(InstanceID); // Legacy packed amounts already use actual portions.
+			if(Unique && HasAuthority())
+			{
+				++Unique->EventData.EventSequence;IncrementInstanceVersion(InstanceID);
+				if(auto* Record=FindISIDData(InstanceID))Record->LastDiscreteEventTime=WorldElapsedSeconds;
+				MarkInstanceDirty(InstanceID,EPropDirtyFlags::RuntimeData);
+			}
+		}
+		if (auto* Actor = GetActiveActorFromISID(InstanceID))
+		{
+			Actor->ApplyProductDefinition(Validated);
+			Actor->OnApplySharedDefinitions(&Validated,FindContentDefinition(Actor->GetContentID()));
+		}
+		if(Resize)RefreshUniqueRepresentation(InstanceID,0);
+	}
 	// Ensure any existing IISM component for this ProductID immediately receives its mesh and materials
 	for (const TPair<int32, TObjectPtr<UInteractableISMComponent>>& Pair : ComponentsByICID)
 	{
 		if (Pair.Value && Pair.Value->ProductID == InDefinition.ProductID)
 		{
-			ApplyProductDefinitionToComponent(Pair.Value, InDefinition);
+			ApplyProductDefinitionToComponent(Pair.Value, Validated);
 		}
 	}
 
@@ -437,7 +518,7 @@ int32 APropManager::AllocateProductID()
 	int32 CandidatePID = 1;
 	while (true)
 	{
-		bool bInUse = ProductDefinitions.Contains(CandidatePID);
+		bool bInUse = ProductDefinitions.Contains(CandidatePID) || (ProductCatalog.Get() && ProductCatalog.Get()->Find(CandidatePID));
 		if (!bInUse)
 		{
 			for (const TPair<int32, TObjectPtr<UInteractableISMComponent>>& Pair : ComponentsByICID)
@@ -468,20 +549,16 @@ int32 APropManager::FindProductIDByDataAsset(const UInteractablePropDataAsset* I
 	{
 		return 0;
 	}
-	const FString TargetName = InAsset->GetName();
+	if(const auto* C=ProductCatalog.Get())if(const auto* E=C->FindByAsset(InAsset))return E->PID;
+	// Empty-bottle and cap offers now create canonical products. Filled legacy
+	// assets remain initial-content presets so old authored stock keeps its PID.
+	if(InAsset->bIsBottleCap || (InAsset->DefaultContentID==0 && InAsset->DefaultContentLevel==0))
+		if(const int32 PID=FindCatalogAssetPID(InAsset))if(FindProductDefinition(PID))return PID;
 	for (const TPair<int32, FPropProductDefinition>& Pair : ProductDefinitions)
 	{
 		if (Pair.Value.SourceDataAsset == InAsset)
 		{
 			return Pair.Key;
-		}
-		if (Pair.Value.SourceDataAsset)
-		{
-			if (Pair.Value.SourceDataAsset->GetFName() == InAsset->GetFName() ||
-				Pair.Value.SourceDataAsset->GetName() == TargetName)
-			{
-				return Pair.Key;
-			}
 		}
 	}
 	return 0;
@@ -1096,19 +1173,16 @@ int32 APropManager::RegisterIISMComponent(UInteractableISMComponent* InComponent
 	return AssignedICID;
 }
 
-UInteractableISMComponent* APropManager::GetOrCreateIISMComponent(int32 InProductID)
+UInteractableISMComponent* APropManager::GetOrCreateIISMComponent(int32 InProductID, int32 VisualBottlePID)
 {
 	const FPropProductDefinition* Def = ProductDefinitions.Find(InProductID);
 
 	// 1. Search existing registered components matching InProductID
 	for (const TPair<int32, TObjectPtr<UInteractableISMComponent>>& Pair : ComponentsByICID)
 	{
-		if (Pair.Value && Pair.Value->ProductID == InProductID)
+		if (Pair.Value && Pair.Value->ProductID == InProductID && Pair.Value->VisualBottlePID == VisualBottlePID)
 		{
-			if (Def)
-			{
-				ApplyProductDefinitionToComponent(Pair.Value, *Def);
-			}
+			// Registration and edits to the shared definition configure the entire batch once.
 			return Pair.Value;
 		}
 	}
@@ -1117,7 +1191,7 @@ UInteractableISMComponent* APropManager::GetOrCreateIISMComponent(int32 InProduc
 	TInlineComponentArray<UInteractableISMComponent*> AttachedComps(this);
 	for (UInteractableISMComponent* AttachedComp : AttachedComps)
 	{
-		if (AttachedComp && (AttachedComp->ProductID == InProductID || ProductDefinitions.FindRef(AttachedComp->ProductID).ProductID == InProductID))
+		if (AttachedComp && AttachedComp->VisualBottlePID==VisualBottlePID && (AttachedComp->ProductID == InProductID || ProductDefinitions.FindRef(AttachedComp->ProductID).ProductID == InProductID))
 		{
 			AttachedComp->ProductID = InProductID;
 			if (Def)
@@ -1135,6 +1209,7 @@ UInteractableISMComponent* APropManager::GetOrCreateIISMComponent(int32 InProduc
 		if (Pair.Value && Pair.Value->ProductID <= 0 && CanComponentReuseForProduct(Pair.Value, InProductID))
 		{
 			Pair.Value->ProductID = InProductID;
+            Pair.Value->VisualBottlePID=VisualBottlePID;
 			if (Def)
 			{
 				ApplyProductDefinitionToComponent(Pair.Value, *Def);
@@ -1145,12 +1220,13 @@ UInteractableISMComponent* APropManager::GetOrCreateIISMComponent(int32 InProduc
 
 	// 3. Create a new UInteractableISMComponent attached to this manager
 	// Disable component subobject replication on dynamically spawned manager batches because APropManager
-	// deterministically creates and synchronizes client IISM batches via Multicast_ReceivePropInitializationBatch / Multicast_ReceiveBulkBatch.
+	// rebuilds each client batch from its owner-only prop delivery stream.
 	UInteractableISMComponent* NewComp = NewObject<UInteractableISMComponent>(this);
 	if (!NewComp) return nullptr;
 
 	NewComp->SetIsReplicated(false);
 	NewComp->ProductID = InProductID;
+ NewComp->VisualBottlePID=VisualBottlePID;
 	NewComp->ResetTransform = DefaultResetTransform;
 	NewComp->bDebugPrintInstanceHit = bDebugPrintInstanceHit;
 
@@ -1341,6 +1417,7 @@ void APropManager::InitializeIISMComponents()
 
 void APropManager::ClearLevelRuntimeState()
 {
+	ClearAssemblyComponents();
 	ResetFragmentRuntime(true);
 	ReleasedLiquids.Empty();
 	// Return any active ASMs to pool via ASMComponent
@@ -1367,6 +1444,9 @@ void APropManager::ClearLevelRuntimeState()
 	PendingReleasedToEmptyISIDs.Empty();
 	PendingDeletedISIDs.Empty();
 	PendingTasks.Empty();
+	QueuedPromotionISIDs.Reset();
+	QueuedPromotionOptions.Reset();
+	OutboundPromotions.Reset();
 
 	// Section 47: Reset ISID allocator when a new level/session starts so new ISIDs are created
 	NextISID = 10001;
@@ -1420,8 +1500,7 @@ void APropManager::PrepareClientPropSync()
 {
 	if (!HasAuthority()) return;
 
-	// Send initial snapshot batches to clients
-	SendInitialPropSnapshot(nullptr);
+	// ProcessBulkReplication opens a private stream when each remote finishes map load.
 
 	// In standalone or listen-server host, mark local client sync ready immediately
 	PropSyncReady = true;
@@ -1782,6 +1861,11 @@ void APropManager::RequestAddProp(int32 InProductID, int32 Quantity, const FTran
 void APropManager::RequestAddPropByQuantity(int32 InProductID, int32 Quantity, const FTransform& BaseTransform, AActor* RequestingActor)
 {
 	if (Quantity <= 0 || InProductID <= 0) return;
+	if (!HasAuthority())
+	{
+		if (Quantity <= 2048) Server_RequestGenerateQuantity(InProductID, Quantity, BaseTransform);
+		return;
+	}
 
 	TArray<FTransform> Transforms;
 	Transforms.Reserve(Quantity);
@@ -1795,14 +1879,17 @@ void APropManager::RequestAddPropByQuantity(int32 InProductID, int32 Quantity, c
 		Transforms.Add(OffsetTransform);
 	}
 
-	if (HasAuthority())
-	{
-		GenerateProductInstances(InProductID, Transforms);
-	}
-	else
-	{
-		Server_RequestGenerateProducts(InProductID, Transforms);
-	}
+	GenerateProductInstances(InProductID, Transforms);
+}
+
+bool APropManager::Server_RequestGenerateQuantity_Validate(int32 PID, int32 Quantity, const FTransform& Transform)
+{
+	return PID > 0 && Quantity > 0 && Quantity <= 2048 && Transform.IsValid();
+}
+
+void APropManager::Server_RequestGenerateQuantity_Implementation(int32 PID, int32 Quantity, const FTransform& Transform)
+{
+	if (IsProductRegistered(PID)) RequestAddPropByQuantity(PID, Quantity, Transform);
 }
 
 void APropManager::RequestAdd(int32 InProductID, const FTransform& InTransform, AActor* RequestingActor)
@@ -1817,7 +1904,7 @@ void APropManager::Server_RequestGenerateProducts_Implementation(int32 InProduct
 
 bool APropManager::Server_RequestGenerateProducts_Validate(int32 InProductID, const TArray<FTransform>& InTransforms)
 {
-	return InProductID > 0 && InTransforms.Num() <= 2048;
+	return InProductID > 0 && InTransforms.Num() > 0 && InTransforms.Num() <= 16 && !InTransforms.ContainsByPredicate([](const FTransform& T) { return !T.IsValid(); });
 }
 
 int32 APropManager::AddPropInstance(int32 InProductID, const FTransform& InTransform)
@@ -2009,7 +2096,7 @@ TArray<int32> APropManager::GenerateNewISMInstances(int32 InProductID, int32 Qua
 	// references. Representation changes must never create logical identities.
 	CreatedISIDs.RemoveAll([this](int32 ID)
 	{
-		if (EnsureDefaultPhysicalCap(ID)) return false;
+		if (EnsureLiquidChild(ID) && EnsureDefaultPhysicalCap(ID)) return false;
 		UE_LOG(LogTemp,Error,TEXT("Cannot initialize factory cap for newly created prop %d"),ID);
 		ReleaseInstanceToEmpty(ID); return true;
 	});
@@ -2147,6 +2234,9 @@ bool APropManager::InitializeInstanceTransform(int32 InISID, const FTransform& I
 	if (!Record) return false;
 
 	Record->ActiveTransform = InTransform;
+	if (auto* Part = GetAssemblyComponent(InISID)) Part->SetWorldTransform(InTransform);
+	if (Record->Attachment.OwnerISID)
+		Record->Attachment.RelativeTransform = InTransform.GetRelativeTransform(GetTransform(Record->Attachment.OwnerISID));
 	if (UStaticMeshComponent* Fragment = GetOriginalFragmentComponent(InISID))
 	{
 		Fragment->SetWorldTransform(InTransform, false, nullptr, ETeleportType::TeleportPhysics);
@@ -2163,6 +2253,7 @@ bool APropManager::InitializeInstanceTransform(int32 InISID, const FTransform& I
 	{
 		Record->ActiveActor->SetActorTransform(InTransform, false, nullptr, ETeleportType::TeleportPhysics);
 	}
+	RefreshAssembly(InISID);
 	return true;
 }
 
@@ -2292,7 +2383,7 @@ int32 APropManager::ReuseEmptyInstance(int32 InProductID, int32 InICID, int32 In
 	Comp->ReuseOrAddInstanceWithISID(NewISID, InTransform, InitialPacked, InISMI, true);
 	InitializeGeneratedInstance(NewISID, InProductID, InICID, InISMI, InTransform);
 
-	if (!EnsureDefaultPhysicalCap(NewISID)) { ReleaseInstanceToEmpty(NewISID); return 0; }
+	if (!EnsureLiquidChild(NewISID) || !EnsureDefaultPhysicalCap(NewISID)) { ReleaseInstanceToEmpty(NewISID); return 0; }
 	return NewISID;
 }
 
@@ -2306,6 +2397,8 @@ bool APropManager::ReleaseInstanceToEmpty(int32 InISID)
 		return false;
 	}
 
+	for (int32 Child : GetChildISIDs(InISID)) ReleaseInstanceToEmpty(Child);
+	ForgetAssembly(InISID);
 	const int32 CompICID = Record->IISMComponentID;
 	const int32 SlotISMI = Record->ISMI;
 
@@ -2322,8 +2415,11 @@ bool APropManager::ReleaseInstanceToEmpty(int32 InISID)
 	AddEmptyInstance(CompICID, SlotISMI);
 
 	// Queue for client synchronization so clients also release their slot to EmptyInstances
-	PendingReleasedToEmptyISIDs.AddUnique(InISID);
-	WorldSaveData.DestroyedISIDs.AddUnique(InISID);
+	if (HasAuthority())
+	{
+		PendingReleasedToEmptyISIDs.AddUnique(InISID);
+		WorldSaveData.DestroyedISIDs.AddUnique(InISID);
+	}
 
 	return true;
 }
@@ -2650,6 +2746,8 @@ bool APropManager::DestroyPropInstance(int32 InISID)
 		return false;
 	}
 
+	for (int32 Child : GetChildISIDs(InISID)) DestroyPropInstance(Child);
+	ForgetAssembly(InISID);
 	const int32 CompICID = Record->IISMComponentID;
 
 	// 23 & 24. Check whether an ASM is active; if ASM exists, disable/return it to the pool.
@@ -2664,11 +2762,11 @@ bool APropManager::DestroyPropInstance(int32 InISID)
 	// 27 & 28. Remove ISID from authoritative database and ActiveActorByISID.
 	UnregisterInstance(InISID);
 
-	// 29. Mark deletion for replication.
-	PendingDeletedISIDs.AddUnique(InISID);
-
-	// 30. Persist deletion if save/load is enabled.
-	WorldSaveData.DestroyedISIDs.AddUnique(InISID);
+	if (HasAuthority())
+	{
+		PendingDeletedISIDs.AddUnique(InISID);
+		WorldSaveData.DestroyedISIDs.AddUnique(InISID);
+	}
 
 	return true;
 }
@@ -2720,7 +2818,7 @@ bool APropManager::ConvertISMToASM(
 		return false;
 	}
 
-	const int32 SignedISID = static_cast<int32>(ISID);
+	const int32 SignedISID = ResolveRootISID(static_cast<int32>(ISID));
 	FISIDRuntimeIndex* Record = FindISIDData(SignedISID);
 	if (!Record)
 	{
@@ -2856,6 +2954,7 @@ bool APropManager::ConvertISMToASM(
 
 	PendingConversionISIDs.Remove(SignedISID);
 	QueuedPromotionISIDs.Remove(SignedISID);
+	QueuedPromotionOptions.Remove(SignedISID);
 
 	if (HasAuthority())
 	{
@@ -2932,7 +3031,7 @@ bool APropManager::ConvertASMToISM(
 	}
 
 	const int32 SignedISID = static_cast<int32>(ISID);
-	if (IsInstanceKeptActive(SignedISID)) return false;
+	if (ResolveRootISID(SignedISID) != SignedISID || IsInstanceKeptActive(SignedISID)) return false;
 	FISIDRuntimeIndex* Record = FindISIDData(SignedISID);
 	if (!Record)
 	{
@@ -2971,7 +3070,8 @@ bool APropManager::ConvertASMToISM(
 
 	AActivePropActor* ActiveActor = Record->ActiveActor.Get() ? Record->ActiveActor.Get() : GetActiveActorFromISID(SignedISID);
 	if (ActiveActor && !ActiveActor->CanDemoteToISM()) return false;
-	if (!PrepareCapForBottleRest(SignedISID)) return false;
+	CaptureAssembly(SignedISID);
+	SynchronizingCapBottles.Add(SignedISID);
 	if (ActiveActor)
 	{
 		if (ActiveActor->PropDataAsset)
@@ -3077,6 +3177,7 @@ bool APropManager::ConvertASMToISM(
 
 	PendingConversionISIDs.Remove(SignedISID);
 	QueuedPromotionISIDs.Remove(SignedISID);
+	QueuedPromotionOptions.Remove(SignedISID);
 
 	const FTransform FinalTransform = Record->ActiveTransform;
 
@@ -3109,9 +3210,9 @@ bool APropManager::ConvertASMToISM(
 			AuthoritativeMaterials.SetNum(NumSlots);
 
 			const TArray<TObjectPtr<UMaterialInterface>>* DefOverrides = ProductDefPtr ? &ProductDefPtr->MaterialOverrides : nullptr;
-			const TArray<TObjectPtr<UMaterialInterface>>* AssetOverrides = (ProductDefPtr && ProductDefPtr->SourceDataAsset)
+			const TArray<TObjectPtr<UMaterialInterface>>* AssetOverrides = (ProductDefPtr && !ProductDefPtr->LiquidVisualPID && !ProductDefPtr->bIsBottleCap && ProductDefPtr->SourceDataAsset)
 				? &ProductDefPtr->SourceDataAsset->MaterialOverrides
-				: (ActiveActor && ActiveActor->PropDataAsset ? &ActiveActor->PropDataAsset->MaterialOverrides : nullptr);
+				: (!ProductDefPtr && ActiveActor && ActiveActor->PropDataAsset ? &ActiveActor->PropDataAsset->MaterialOverrides : nullptr);
 
 			for (int32 MatIdx = 0; MatIdx < NumSlots; ++MatIdx)
 			{
@@ -3208,6 +3309,8 @@ bool APropManager::ConvertASMToISM(
 		Multicast_NotifyASMConvertedToISM(SignedISID, PID, SavedASMID, FinalTransform, NewState);
 		MarkInstanceDirty(SignedISID, EPropDirtyFlags::Representation | EPropDirtyFlags::Transform | EPropDirtyFlags::State | EPropDirtyFlags::RuntimeData);
 	}
+	SynchronizingCapBottles.Remove(SignedISID);
+	RefreshAssembly(SignedISID);
 	OnPropRepresentationChanged.Broadcast(SignedISID, EPropRepresentation::ISM, nullptr);
 	return true;
 }
@@ -3322,9 +3425,9 @@ int32 APropManager::ConvertPlacedActorToISM(AActivePropActor* InActor, bool bFor
 		AuthoritativeMaterials.SetNum(NumSlots);
 
 		const TArray<TObjectPtr<UMaterialInterface>>* DefOverrides = ProductDefPtr ? &ProductDefPtr->MaterialOverrides : nullptr;
-		const TArray<TObjectPtr<UMaterialInterface>>* AssetOverrides = (ProductDefPtr && ProductDefPtr->SourceDataAsset)
+		const TArray<TObjectPtr<UMaterialInterface>>* AssetOverrides = (ProductDefPtr && !ProductDefPtr->LiquidVisualPID && !ProductDefPtr->bIsBottleCap && ProductDefPtr->SourceDataAsset)
 			? &ProductDefPtr->SourceDataAsset->MaterialOverrides
-			: (InActor->PropDataAsset ? &InActor->PropDataAsset->MaterialOverrides : nullptr);
+			: (!ProductDefPtr && InActor->PropDataAsset ? &InActor->PropDataAsset->MaterialOverrides : nullptr);
 
 		for (int32 MatIdx = 0; MatIdx < NumSlots; ++MatIdx)
 		{
@@ -3388,7 +3491,8 @@ int32 APropManager::ConvertPlacedActorToISM(AActivePropActor* InActor, bool bFor
 		return InActor->ISID;
 	}
 
-	const int32 NewISID = (InActor->ISID > 0) ? InActor->ISID : AllocateISID();
+	const int32 PreviousISID = InActor->ISID;
+	const int32 NewISID = (PreviousISID > 0) ? PreviousISID : AllocateISID();
 	const float InitialContentLevel = ProductDefPtr ? InActor->ResolveRegistrationContentLevel(ProductDefPtr->DefaultUniqueData.EventData.ContentLevel) : 0;
 	if (!FMath::IsFinite(InitialContentLevel) || InitialContentLevel < 0)
 	{
@@ -3434,7 +3538,14 @@ int32 APropManager::ConvertPlacedActorToISM(AActivePropActor* InActor, bool bFor
 	}
 
 	// Deactivate the placed actor and park it into the ASMComponent pool at ResetTransform
-	if (!EnsureDefaultPhysicalCap(NewISID)) { ReleaseInstanceToEmpty(NewISID); return 0; }
+	if (!EnsureLiquidChild(NewISID) || !EnsureDefaultPhysicalCap(NewISID))
+	{
+		ReleaseInstanceToEmpty(NewISID);
+		// A failed first registration must not leave the placed actor claiming an
+		// identity that has just been retired. Keep it available for a clean retry.
+		if (PreviousISID <= 0) InActor->ISID = PreviousISID;
+		return 0;
+	}
 	if (bAuthoredShopStock && ShopCheckout)
 	{
 		FShopStockEntry Existing;
@@ -3469,6 +3580,7 @@ AActivePropActor* APropManager::MakeISMToASM(
 	EPropActivationReason Reason,
 	bool bSimulatePhysics)
 {
+	InISID = ResolveRootISID(InISID);
 	if (InISID <= 0)
 	{
 		return nullptr;
@@ -3770,15 +3882,15 @@ void APropManager::ProcessPendingASMConversions(int32 MaxPerFrame)
 		return;
 	}
 
-	const int32 CountToSend = FMath::Clamp(PendingASMConversions.Num(), 0, FMath::Max(1, MaxPerFrame));
+	const int32 CountToSend = FMath::Min(PendingASMConversions.Num(), FMath::Clamp(MaxPerFrame, 1, 32));
 	TArray<FPropASMConversionEntry> Batch;
 	Batch.Reserve(CountToSend);
 
 	for (int32 i = 0; i < CountToSend; ++i)
 	{
-		Batch.Add(PendingASMConversions[0]);
-		PendingASMConversions.RemoveAt(0, EAllowShrinking::No);
+		Batch.Add(PendingASMConversions[i]);
 	}
+	PendingASMConversions.RemoveAt(0, CountToSend, EAllowShrinking::No);
 
 	if (Batch.Num() > 0)
 	{
@@ -3980,7 +4092,8 @@ void APropManager::Multicast_NotifyBatchISMConvertedToASM_Implementation(const T
 		UE_LOG(LogTemp, Warning, TEXT("[PropManager] Multicast_NotifyBatchISMConvertedToASM: Converted ISID %d to ASM '%s' (ASMID %d) on client at %s"),
 			InISID, *ASM->GetName(), ASM->ASMID, *InstTransform.GetLocation().ToString());
 
-		OnPropRepresentationChanged.Broadcast(InISID, EPropRepresentation::ASM, ASM);
+		RefreshAssembly(InISID);
+	OnPropRepresentationChanged.Broadcast(InISID, EPropRepresentation::ASM, ASM);
 	}
 }
 
@@ -4255,6 +4368,7 @@ void APropManager::Multicast_NotifyASMConvertedToISM_Implementation(
 		Comp->MarkRenderStateDirty();
 	}
 
+	RefreshAssembly(InISID);
 	OnPropRepresentationChanged.Broadcast(InISID, EPropRepresentation::ISM, nullptr);
 }
 
@@ -4301,7 +4415,7 @@ void APropManager::ProcessQueuedPlacedConversions(int32 BatchSize)
 	}
 
 	const int32 CountToProcess = (BatchSize > 0)
-		? FMath::Min(BatchSize, QueuedPlacedASMIDs.Num())
+		? FMath::Min3(BatchSize, QueuedPlacedASMIDs.Num(), 32)
 		: FMath::Clamp(PlacedConversionsPerFrame, 10, 20);
 
 	TArray<int32> ConvertedASMIDs;
@@ -4343,29 +4457,19 @@ void APropManager::BatchMakeISMToASM(
 
 	if (!HasAuthority())
 	{
-		if (GetNetConnection() != nullptr)
-		{
-			Server_BatchMakeISMToASM(InISIDs, TargetState, Reason, bSimulatePhysics);
-		}
-		// Also fast-promote the first batch locally on client for immediate responsiveness
-		const int32 ImmediateCount = FMath::Min(PromotionsPerFrame, InISIDs.Num());
-		for (int32 i = 0; i < ImmediateCount; ++i)
-		{
-			MakeISMToASM(InISIDs[i], TargetState, Reason, bSimulatePhysics);
-		}
-		// Queue remainder on client
-		for (int32 i = ImmediateCount; i < InISIDs.Num(); ++i)
-		{
-			QueuedPromotionISIDs.AddUnique(InISIDs[i]);
-		}
+		OutboundPromotions.Add({InISIDs, TargetState, Reason, bSimulatePhysics});
+		// Predicted per-item promotion would also send a reliable state RPC for each member.
+		// The server promotes each root once and the owner stream delivers authoritative state.
 		return;
 	}
 
-	for (const int32 ISIDToQueue : InISIDs)
+	for (int32 ID : InISIDs)
 	{
-		if (ISIDToQueue > 0 && !IsISIDConvertingOrConvertedToASM(ISIDToQueue))
+		const int32 Root = ResolveRootISID(ID);
+		if (Root && !IsISIDConvertingOrConvertedToASM(Root))
 		{
-			QueuedPromotionISIDs.AddUnique(ISIDToQueue);
+			QueuedPromotionISIDs.Add(Root);
+			QueuedPromotionOptions.Add(Root, {TargetState, Reason, bSimulatePhysics});
 		}
 	}
 }
@@ -4376,13 +4480,7 @@ void APropManager::Server_BatchMakeISMToASM_Implementation(
 	EPropActivationReason Reason,
 	bool bSimulatePhysics)
 {
-	for (const int32 ISIDToQueue : InISIDs)
-	{
-		if (ISIDToQueue > 0 && !IsISIDConvertingOrConvertedToASM(ISIDToQueue))
-		{
-			QueuedPromotionISIDs.AddUnique(ISIDToQueue);
-		}
-	}
+	BatchMakeISMToASM(InISIDs, TargetState, Reason, bSimulatePhysics);
 }
 
 bool APropManager::Server_BatchMakeISMToASM_Validate(
@@ -4391,7 +4489,7 @@ bool APropManager::Server_BatchMakeISMToASM_Validate(
 	EPropActivationReason Reason,
 	bool bSimulatePhysics)
 {
-	return InISIDs.Num() > 0;
+	return InISIDs.Num() > 0 && InISIDs.Num() <= 32;
 }
 
 void APropManager::ProcessQueuedISMPromotions(int32 BatchSize)
@@ -4405,13 +4503,15 @@ void APropManager::ProcessQueuedISMPromotions(int32 BatchSize)
 		? FMath::Min(BatchSize, QueuedPromotionISIDs.Num())
 		: FMath::Clamp(PromotionsPerFrame, 10, 30);
 
-	const int32 ActualCount = FMath::Min(CountToProcess, QueuedPromotionISIDs.Num());
-	for (int32 i = 0; i < ActualCount; ++i)
+	const int32 ActualCount = FMath::Min3(CountToProcess, QueuedPromotionISIDs.Num(), 32);
+	for (int32 i = 0; i < ActualCount && !QueuedPromotionISIDs.IsEmpty(); ++i)
 	{
 		const int32 TargetISID = QueuedPromotionISIDs[0];
 		QueuedPromotionISIDs.RemoveAt(0);
 
-		MakeISMToASM(TargetISID, EPropState::Unsettled, EPropActivationReason::Interaction, true);
+		FPromotionOptions Options{EPropState::Unsettled, EPropActivationReason::Interaction, true};
+		QueuedPromotionOptions.RemoveAndCopyValue(TargetISID, Options);
+		MakeISMToASM(TargetISID, Options.State, Options.Reason, Options.bSimulate);
 	}
 }
 
@@ -4469,6 +4569,7 @@ bool APropManager::GetInteractionData(int32 InISID, FPropInteractionRuntimeData&
 
 void APropManager::GetInteractionOptions(int32 InISID, AActor* InstigatorActor, TArray<EPropInteractionType>& OutOptions) const
 {
+	InISID = ResolveRootISID(InISID);
 	OutOptions.Empty();
 	const FISIDRuntimeIndex* Record = FindISIDData(InISID);
 	if (!Record) return;
@@ -4504,6 +4605,7 @@ void APropManager::GetInteractionOptions(int32 InISID, AActor* InstigatorActor, 
 
 void APropManager::RequestInteraction(int32 InISID, EPropInteractionType InteractionType, AActor* InstigatorActor, FVector OptionalVector, float OptionalFloat)
 {
+	InISID = ResolveRootISID(InISID);
 	const int32 CurrentVer = GetVersion(InISID);
 	if (HasAuthority())
 	{
@@ -4525,6 +4627,7 @@ void APropManager::RequestInteract(int32 InISID, EPropInteractionType Interactio
 
 void APropManager::Server_RequestInteraction_Implementation(int32 InISID, EPropInteractionType InteractionType, AActor* InstigatorActor, FVector OptionalVector, float OptionalFloat, int32 ExpectedVersion)
 {
+	InISID = ResolveRootISID(InISID);
 	if (ValidateInteraction(InISID, InteractionType, InstigatorActor, ExpectedVersion))
 	{
 		ExecuteInteraction(InISID, InteractionType, InstigatorActor, OptionalVector, OptionalFloat);
@@ -4538,6 +4641,7 @@ bool APropManager::Server_RequestInteraction_Validate(int32 InISID, EPropInterac
 
 bool APropManager::ValidateInteraction(int32 InISID, EPropInteractionType InteractionType, AActor* InstigatorActor, int32 ExpectedVersion) const
 {
+	InISID = ResolveRootISID(InISID);
 	// Exact 10-step Validation Checklist from Section 25 (Steps 31-40):
 	// 31. ISID exists?
 	const FISIDRuntimeIndex* Record = FindISIDData(InISID);
@@ -4617,6 +4721,7 @@ bool APropManager::ValidateInteraction(int32 InISID, EPropInteractionType Intera
 
 bool APropManager::BeginInteraction(int32 InISID, EPropInteractionType InteractionType, AActor* InstigatorActor)
 {
+	InISID = ResolveRootISID(InISID);
 	FISIDRuntimeIndex* Record = FindISIDData(InISID);
 	if (!Record) return false;
 
@@ -4643,6 +4748,7 @@ bool APropManager::BeginInteraction(int32 InISID, EPropInteractionType Interacti
 
 bool APropManager::ExecuteInteraction(int32 InISID, EPropInteractionType InteractionType, AActor* InstigatorActor, FVector OptionalVector, float OptionalFloat)
 {
+	InISID = ResolveRootISID(InISID);
 	if (!BeginInteraction(InISID, InteractionType, InstigatorActor))
 	{
 		return false;
@@ -4774,6 +4880,7 @@ bool APropManager::ExecuteInteraction(int32 InISID, EPropInteractionType Interac
 
 bool APropManager::EndInteraction(int32 InISID, AActor* InstigatorActor)
 {
+	InISID = ResolveRootISID(InISID);
 	FISIDRuntimeIndex* Record = FindISIDData(InISID);
 	if (!Record) return false;
 
@@ -4788,6 +4895,7 @@ bool APropManager::EndInteraction(int32 InISID, AActor* InstigatorActor)
 
 bool APropManager::CancelInteraction(int32 InISID, AActor* InstigatorActor)
 {
+	InISID = ResolveRootISID(InISID);
 	FISIDRuntimeIndex* Record = FindISIDData(InISID);
 	if (!Record) return false;
 
@@ -4808,11 +4916,12 @@ bool APropManager::CancelInteraction(int32 InISID, AActor* InstigatorActor)
 // =========================================================================
 bool APropManager::CanGrab(int32 InISID, AActor* InstigatorActor) const
 {
-	return ValidateGrab(InISID, InstigatorActor);
+	return ValidateGrab(ResolveRootISID(InISID), InstigatorActor);
 }
 
 void APropManager::RequestGrab(int32 InISID, AActor* InstigatorActor, USceneComponent* AttachParent, FName SocketName)
 {
+	InISID = ResolveRootISID(InISID);
 	if (HasAuthority())
 	{
 		if (ValidateGrab(InISID, InstigatorActor))
@@ -4828,6 +4937,7 @@ void APropManager::RequestGrab(int32 InISID, AActor* InstigatorActor, USceneComp
 
 void APropManager::Server_RequestGrab_Implementation(int32 InISID, AActor* InstigatorActor, USceneComponent* AttachParent, FName SocketName)
 {
+	InISID = ResolveRootISID(InISID);
 	if (ValidateGrab(InISID, InstigatorActor))
 	{
 		ExecuteGrab(InISID, InstigatorActor, AttachParent, SocketName);
@@ -4841,9 +4951,10 @@ bool APropManager::Server_RequestGrab_Validate(int32 InISID, AActor* InstigatorA
 
 bool APropManager::ValidateGrab(int32 InISID, AActor* InstigatorActor) const
 {
-	if (const auto* Unique=FindUniqueData(InISID)) if (Unique->EventData.AttachedBottleISID>0) return false;
+	if (ResolveRootISID(InISID) != InISID) return false;
 	const FISIDRuntimeIndex* Record = FindISIDData(InISID);
 	if (!Record) return false;
+	if (const auto* Active=Record->ActiveActor.Get()) if (const auto* Flight=Active->FindComponentByClass<URocketProjectileComponent>()) if (Flight->IsPoweredFlight()) return false;
 	if (!Record->PackedRuntimeData.bIsGrabbable) return false;
 	if (Record->Representation == EPropRepresentation::CompositeFragment) return false;
 
@@ -4866,9 +4977,11 @@ bool APropManager::BeginGrab(int32 InISID, AActor* InstigatorActor, USceneCompon
 
 bool APropManager::ExecuteGrab(int32 InISID, AActor* InstigatorActor, USceneComponent* AttachParent, FName SocketName)
 {
+	InISID = ResolveRootISID(InISID);
 	// Section 11 Flow: Validate -> Promote ISM -> ASM -> Set State = Held -> Set interaction owner
 	FISIDRuntimeIndex* Record = FindISIDData(InISID);
 	if (!Record) return false;
+	if (const auto* Active=Record->ActiveActor.Get()) if (const auto* Flight=Active->FindComponentByClass<URocketProjectileComponent>()) if (Flight->IsPoweredFlight()) return false;
 
 	AActivePropActor* ASM = nullptr;
 	if (!PromoteInstanceToASM(InISID, EPropActivationReason::Grab, false, ASM) || !ASM)
@@ -4876,6 +4989,7 @@ bool APropManager::ExecuteGrab(int32 InISID, AActor* InstigatorActor, USceneComp
 		return false;
 	}
 
+	ASM->SetSeatedInFiller(false);
 	SetGrabber(InISID, InstigatorActor);
 	SetPropState(InISID, EPropState::Held);
 
@@ -5536,6 +5650,7 @@ bool APropManager::SetAngularVelocity(int32 InISID, FVector NewAngularVelocityDe
 
 FVector APropManager::GetLinearVelocity(int32 InISID) const
 {
+	if (const auto* Part = GetAssemblyComponent(InISID)) return Part->GetComponentVelocity();
 	if (const UStaticMeshComponent* Mesh = GetOriginalFragmentComponent(InISID)) return Mesh->GetComponentVelocity();
 	if (const AActivePropActor* ASM = GetActiveActorFromISID(InISID))
 	{
@@ -6096,6 +6211,7 @@ bool APropManager::SetPropState(int32 InISID, EPropState NewState)
 
 FTransform APropManager::GetTransform(int32 InISID) const
 {
+	if (const auto* Part = GetAssemblyComponent(InISID)) return Part->GetComponentTransform();
 	if (const UStaticMeshComponent* Mesh = GetOriginalFragmentComponent(InISID)) return Mesh->GetComponentTransform();
 	if (const FISIDRuntimeIndex* Record = FindISIDData(InISID))
 	{
@@ -6137,6 +6253,7 @@ int32 APropManager::GetInteractionFlags(int32 InISID) const
 int32 APropManager::GetISID(UPrimitiveComponent* TargetComponent, int32 InstanceIndex) const
 {
 	if (!TargetComponent) return 0;
+	if (const auto* Piece = Cast<UPropAssemblyMesh>(TargetComponent)) return Piece->ISID;
 	if (const auto* Fragments = Cast<AFragmentDestructionActor>(TargetComponent->GetOwner())) return Fragments->FindISID(TargetComponent);
 
 	if (const UInteractableISMComponent* ISMComp = Cast<UInteractableISMComponent>(TargetComponent))
@@ -6300,6 +6417,7 @@ bool APropManager::SetMeshInstanceToInMotion(
 
 bool APropManager::SetInstanceToRest(int32 InISID)
 {
+	InISID = ResolveRootISID(InISID);
 	if (InISID <= 0) return false;
 
 	if (!HasAuthority())
@@ -6320,6 +6438,7 @@ bool APropManager::SetInstanceToUnsettled(
 	FVector ImpactPoint,
 	float UnsettledDelay)
 {
+	InISID = ResolveRootISID(InISID);
 	if (InISID <= 0) return false;
 
 	FISIDRuntimeIndex* Record = FindISIDData(InISID);
@@ -6427,6 +6546,7 @@ bool APropManager::SetInstanceToUnsettled(
 
 bool APropManager::SetInstanceToSettling(int32 InISID, float VelocityTolerance)
 {
+	InISID = ResolveRootISID(InISID);
 	if (InISID <= 0) return false;
 	if (IsInstanceKeptActive(InISID)) return false;
 
@@ -6509,6 +6629,7 @@ bool APropManager::SetInstanceToHeld(
 	USceneComponent* AttachParent,
 	FName SocketName)
 {
+	InISID = ResolveRootISID(InISID);
 	if (InISID <= 0) return false;
 
 	if (!HasAuthority())
@@ -6547,6 +6668,7 @@ bool APropManager::SetInstanceToInMotion(
 	FVector HitImpulse,
 	FVector ImpactPoint)
 {
+	InISID = ResolveRootISID(InISID);
 	if (InISID <= 0) return false;
 
 	FISIDRuntimeIndex* Record = FindISIDData(InISID);
@@ -6927,11 +7049,6 @@ void APropManager::UpdateClientISM(int32 InISID)
 			Record->IISMComponentID = Comp->IISMComponentID;
 		}
 
-		if (const FPropProductDefinition* Def = ProductDefinitions.Find(Record->ProductID))
-		{
-			ApplyProductDefinitionToComponent(Comp, *Def);
-		}
-
 		const FTransform TargetTransform = (Record->Representation != EPropRepresentation::ISM)
 			? Comp->GetEffectiveResetTransform()
 			: Record->ActiveTransform;
@@ -7134,6 +7251,12 @@ FPropInstanceDelta APropManager::BuildDeltaForRecord(const FISIDRuntimeIndex& Re
 {
 	FPropInstanceDelta Delta;
 	if (const FPropInstanceUniqueData* U = FindUniqueData(Record.ISID)) { Delta.bHasUniqueData = true; Delta.UniqueData = *U; }
+	Delta.Attachment = Record.Attachment;
+ Delta.VisualBottlePID=Record.VisualBottlePID;
+	if (const auto* Part = GetAssemblyComponent(Record.ISID))
+	{
+		Delta.Attachment.RelativeTransform = Part->GetRelativeTransform();
+	}
 	Delta.ISID = Record.ISID;
 	Delta.ProductID = Record.ProductID;
 	Delta.IISMComponentID = Record.IISMComponentID;
@@ -7166,7 +7289,7 @@ bool APropManager::BuildBulkUpdateBatch(int32 MaxRecords, FPropBulkUpdateBatch& 
 	}
 
 	OutBatch.BatchSequence = NextBatchSequence++;
-	const int32 BoundedMax = FMath::Clamp(MaxRecords, 1, FMath::Min(MaxRecordsPerBatch, MaxInstancesPerFrame));
+	const int32 BoundedMax = FMath::Clamp(MaxRecords, 1, FMath::Clamp(FMath::Min(MaxRecordsPerBatch, MaxInstancesPerFrame), 1, 2));
 
 	// Include pending deleted ISIDs
 	while (PendingDeletedISIDs.Num() > 0 && OutBatch.DeletedISIDs.Num() < BoundedMax)
@@ -7180,12 +7303,10 @@ bool APropManager::BuildBulkUpdateBatch(int32 MaxRecords, FPropBulkUpdateBatch& 
 		OutBatch.ReleasedToEmptyISIDs.Add(PendingReleasedToEmptyISIDs.Pop(EAllowShrinking::No));
 	}
 
-	TSet<int32> IncludedProductIDs;
-
 	// Build compact delta records within MaxBytesPerFrame & MaxRecordsPerBatch budget
 	while (DirtyISIDs.Num() > 0 && OutBatch.Records.Num() < BoundedMax)
 	{
-		if (OutBatch.GetEstimatedByteSize() + static_cast<int32>(sizeof(FPropInstanceDelta)) > MaxBytesPerFrame)
+		if (!OutBatch.Records.IsEmpty() && OutBatch.GetEstimatedByteSize() + static_cast<int32>(sizeof(FPropInstanceDelta)) > MaxBytesPerFrame)
 		{
 			break;
 		}
@@ -7195,14 +7316,6 @@ bool APropManager::BuildBulkUpdateBatch(int32 MaxRecords, FPropBulkUpdateBatch& 
 
 		if (FISIDRuntimeIndex* Record = FindISIDData(DirtyISID))
 		{
-			if (Record->ProductID > 0 && !IncludedProductIDs.Contains(Record->ProductID))
-			{
-				if (const FPropProductDefinition* Def = ProductDefinitions.Find(Record->ProductID))
-				{
-					// Definitions are synchronized on registration and in initial snapshots.
-					IncludedProductIDs.Add(Record->ProductID);
-				}
-			}
 			OutBatch.Records.Add(BuildDeltaForRecord(*Record));
 			Record->DirtyFlags = EPropDirtyFlags::Clean;
 		}
@@ -7213,13 +7326,10 @@ bool APropManager::BuildBulkUpdateBatch(int32 MaxRecords, FPropBulkUpdateBatch& 
 
 void APropManager::QueueClientSync(APlayerController* ClientController, const TArray<int32>& ISIDsToSync)
 {
-	if (!ClientController) return;
-	FPropClientSyncState& Stream = ClientDeliveryStreams.FindOrAdd(ClientController);
-	Stream.ClientController = ClientController;
-	for (int32 ID : ISIDsToSync)
-	{
-		Stream.QueuedISIDs.AddUnique(ID);
-	}
+	if (!HasAuthority() || !ClientController || !ClientController->GetNetConnection()) return;
+	if (!DeliveryChannels.Contains(ClientController)) SendInitialPropSnapshot(ClientController);
+	if (APropDeliveryChannel* Peer = DeliveryChannels.FindRef(ClientController))
+		for (int32 ID : ISIDsToSync) if (FindISIDData(ID)) Peer->QueueRecord(ID);
 }
 
 void APropManager::SendInstanceDelta(int32 InISID)
@@ -7227,20 +7337,7 @@ void APropManager::SendInstanceDelta(int32 InISID)
 	FISIDRuntimeIndex* Record = FindISIDData(InISID);
 	if (!Record) return;
 
-	DirtyISIDs.Remove(InISID);
-	Record->DirtyFlags = EPropDirtyFlags::Clean;
-
-	FPropBulkUpdateBatch SingleBatch;
-	SingleBatch.BatchSequence = NextBatchSequence++;
-	if (Record->ProductID > 0)
-	{
-		if (const FPropProductDefinition* Def = ProductDefinitions.Find(Record->ProductID))
-		{
-			// Definitions are synchronized on registration and in initial snapshots.
-		}
-	}
-	SingleBatch.Records.Add(BuildDeltaForRecord(*Record));
-	Multicast_ReceiveBulkBatch(SingleBatch);
+	MarkInstanceDirty(InISID, EPropDirtyFlags::All);
 }
 
 void APropManager::SendFullSnapshot(APlayerController* ClientController)
@@ -7264,13 +7361,13 @@ int32 APropManager::GenerateClientProductInstance(const FPropInstanceDelta& Delt
 	{
 		Comp = GetComponentFromISID(Delta.ISID);
 	}
-	if (Comp && Comp->ProductID > 0 && Delta.ProductID > 0 && Comp->ProductID != Delta.ProductID)
+	if (Comp && Comp->ProductID > 0 && Delta.ProductID > 0 && (Comp->ProductID != Delta.ProductID || Comp->VisualBottlePID!=Delta.VisualBottlePID))
 	{
 		Comp = nullptr;
 	}
 	if (!Comp && Delta.ProductID > 0)
 	{
-		Comp = GetOrCreateIISMComponent(Delta.ProductID);
+		Comp = GetOrCreateIISMComponent(Delta.ProductID,Delta.VisualBottlePID);
 		if (Comp && Delta.IISMComponentID > 0 && Comp->IISMComponentID != Delta.IISMComponentID)
 		{
 			ComponentsByICID.Remove(Comp->IISMComponentID);
@@ -7285,11 +7382,6 @@ int32 APropManager::GenerateClientProductInstance(const FPropInstanceDelta& Delt
 	}
 
 	const int32 EffectiveProductID = Delta.ProductID > 0 ? Delta.ProductID : Comp->ProductID;
-
-	if (const FPropProductDefinition* Def = ProductDefinitions.Find(EffectiveProductID))
-	{
-		ApplyProductDefinitionToComponent(Comp, *Def);
-	}
 
 	const FTransform TargetTransform = (Delta.Representation != EPropRepresentation::ISM)
 		? Comp->GetEffectiveResetTransform()
@@ -7330,8 +7422,16 @@ void APropManager::ApplyInstanceDelta(const FPropInstanceDelta& Delta)
 
 	if (!Existing) return;
 	if (Delta.Version < Existing->Version) return;
+	if(Existing->VisualBottlePID!=Delta.VisualBottlePID || Existing->IISMComponentID!=Delta.IISMComponentID)
+	{
+		if(auto* Old=GetComponentFromISID(Delta.ISID))Old->ReleaseInstanceByISIDToEmpty(Delta.ISID);
+		if(!GenerateClientProductInstance(Delta))return;
+		Existing=FindISIDData(Delta.ISID);
+	}
 	const bool bKeepNewerFragmentPose = Existing->Representation == EPropRepresentation::CompositeFragment && Delta.Representation == EPropRepresentation::CompositeFragment && Existing->FragmentGroupID == Delta.FragmentGroupID && Existing->FragmentPoseTime > Delta.FragmentPoseTime;
 	if (Delta.Representation != EPropRepresentation::CompositeFragment || Existing->FragmentGroupID != Delta.FragmentGroupID) ReleaseOriginalFragment(Delta.ISID);
+	if (Existing->ProductID != Delta.ProductID && Delta.ProductID > 0 && FindProductDefinition(Delta.ProductID))
+		ChangePropProduct(Delta.ISID, Delta.ProductID, false);
 	if (Delta.bHasUniqueData) { const auto* Local = UniqueDataByISID.Find(Delta.ISID); if (!Local || static_cast<int32>(Delta.UniqueData.EventData.EventSequence - Local->EventData.EventSequence) >= 0) UniqueDataByISID.Add(Delta.ISID, Delta.UniqueData); }
 
 	const int32 UnpackedASMID = (Delta.CustomFlags >> 16) & 0xFFFF;
@@ -7370,14 +7470,11 @@ void APropManager::ApplyInstanceDelta(const FPropInstanceDelta& Delta)
 	{
 		Existing->ProductID = Delta.ProductID;
 	}
-	if (Delta.IISMComponentID > 0)
-	{
-		Existing->IISMComponentID = Delta.IISMComponentID;
-	}
-	if (Delta.ISMI != INDEX_NONE)
-	{
-		Existing->ISMI = Delta.ISMI;
-	}
+	// The server slot is a placement hint. Keep the actual local mapping if a
+	// late join/reused slot required repair; logical identity is always the ISID.
+	if(auto* Local=GetComponentFromISID(Delta.ISID))Existing->ISMI=Local->FindISMI(Delta.ISID);
+	SetAssemblyEdge(Delta.ISID, Delta.Attachment);
+ if(auto* R=FindISIDData(Delta.ISID))R->VisualBottlePID=Delta.VisualBottlePID;
 	Existing->Version = Delta.Version;
 	Existing->State = Delta.State;
 	Existing->Representation = Delta.Representation;
@@ -7402,6 +7499,7 @@ void APropManager::ApplyInstanceDelta(const FPropInstanceDelta& Delta)
 	if (Delta.Representation == EPropRepresentation::CompositeFragment) RestoreOriginalFragmentRepresentation(Delta.ISID);
 
 	RefreshUniqueRepresentation(Delta.ISID);
+	RefreshAssembly(Delta.ISID);
 }
 
 void APropManager::AcknowledgeBulkBatch_Implementation(int32 BatchSequence)
@@ -7431,7 +7529,7 @@ void APropManager::RetryBulkBatch(int32 BatchSequence, APlayerController* Client
 			{
 				if (Pending.BatchSequence == BatchSequence)
 				{
-					Multicast_ReceiveBulkBatch(Pending);
+					SendPropInitializationBatch(Pending, Pair.Key);
 					return;
 				}
 			}
@@ -7486,41 +7584,43 @@ void APropManager::Multicast_ReceiveBulkBatch_Implementation(const FPropBulkUpda
 
 void APropManager::ProcessBulkReplication(float DeltaSeconds)
 {
-	// Ensure any newly connected or map-loaded remote clients receive the initial prop snapshot
-	if (UWorld* World = GetWorld())
+	for (auto It = DeliveryChannels.CreateIterator(); It; ++It)
 	{
-		const float Now = World->GetTimeSeconds();
-		for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+		if (!IsValid(It.Key()) || !It.Key()->GetNetConnection() || !IsValid(It.Value()))
 		{
-			APlayerController* PC = It->Get();
-			if (PC && !PC->IsLocalController() && PC->HasClientLoadedCurrentWorld())
-			{
-				if (GetOwner() == nullptr)
-				{
-					SetOwner(PC);
-				}
-				FPropClientSyncState& Stream = ClientDeliveryStreams.FindOrAdd(PC);
-				Stream.ClientController = PC;
-				if (!Stream.bClientSyncReady && Stream.SnapshotSendCount < 3 && (Now - Stream.LastSnapshotSendTime) >= 0.35f)
-				{
-					Stream.LastSnapshotSendTime = Now;
-					++Stream.SnapshotSendCount;
-					SendInitialPropSnapshot(PC);
-				}
-			}
+			if (IsValid(It.Value())) It.Value()->Destroy();
+			It.RemoveCurrent();
 		}
 	}
-
-	if (DirtyISIDs.Num() == 0 && PendingDeletedISIDs.Num() == 0 && PendingReleasedToEmptyISIDs.Num() == 0)
+	for (auto It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
 	{
-		return;
+		APlayerController* PC = It->Get();
+		if (PC && PC->GetNetConnection() && PC->HasClientLoadedCurrentWorld() && !DeliveryChannels.Contains(PC))
+			SendInitialPropSnapshot(PC);
 	}
-
-	FPropBulkUpdateBatch OutBatch;
-	if (BuildBulkUpdateBatch(MaxRecordsPerBatch, OutBatch))
+	const int32 Budget = FMath::Max(1, FMath::Min(MaxRecordsPerBatch, MaxInstancesPerFrame));
+	const int32 DirtyCount = FMath::Min(Budget, DirtyISIDs.Num());
+	for (int32 Index = 0; Index < DirtyCount; ++Index)
 	{
-		Multicast_ReceiveBulkBatch(OutBatch);
+		const int32 ID = DirtyISIDs[Index];
+		if (auto* Record = FindISIDData(ID))
+		{
+			for (const auto& Peer : DeliveryChannels) Peer.Value->QueueRecord(ID);
+			Record->DirtyFlags = EPropDirtyFlags::Clean;
+		}
 	}
+	DirtyISIDs.RemoveAt(0, DirtyCount, EAllowShrinking::No);
+	for (int32 Count = 0; Count < Budget && !PendingDeletedISIDs.IsEmpty(); ++Count)
+	{
+		const int32 ID = PendingDeletedISIDs.Pop(EAllowShrinking::No);
+		for (const auto& Peer : DeliveryChannels) Peer.Value->QueueRemoval(ID, true);
+	}
+	for (int32 Count = 0; Count < Budget && !PendingReleasedToEmptyISIDs.IsEmpty(); ++Count)
+	{
+		const int32 ID = PendingReleasedToEmptyISIDs.Pop(EAllowShrinking::No);
+		for (const auto& Peer : DeliveryChannels) Peer.Value->QueueRemoval(ID, false);
+	}
+	for (const auto& Peer : DeliveryChannels) Peer.Value->Pump();
 }
 
 // =========================================================================
@@ -7534,11 +7634,17 @@ void APropManager::BuildInitialPropSnapshot(TArray<FPropBulkUpdateBatch>& OutBat
 	CurrentBatch.BatchSequence = NextBatchSequence++;
 	CurrentBatch.bIsFullSnapshot = true;
 	CurrentBatch.bIsFirstInitBatch = true;
-	ProductDefinitions.GenerateValueArray(CurrentBatch.ProductDefinitions);
-	ContentDefinitions.GenerateValueArray(CurrentBatch.ContentDefinitions);
 	CurrentBatch.SnapshotWorldElapsedSeconds = WorldElapsedSeconds;
-
-	const int32 BoundedMax = FMath::Clamp(MaxRecordsPerBatch, 1, MaxInstancesPerFrame);
+	auto Flush = [&]()
+	{
+		OutBatches.Add(MoveTemp(CurrentBatch));
+		CurrentBatch = FPropBulkUpdateBatch();
+		CurrentBatch.BatchSequence = NextBatchSequence++;
+		CurrentBatch.bIsFullSnapshot = true;
+	};
+	for (const auto& Pair : ContentDefinitions) { CurrentBatch.ContentDefinitions.Add(Pair.Value); Flush(); }
+	for (const auto& Pair : ProductDefinitions) { CurrentBatch.ProductDefinitions.Add(Pair.Value); Flush(); }
+	const int32 BoundedMax = FMath::Clamp(FMath::Min(MaxRecordsPerBatch, MaxInstancesPerFrame), 1, 2);
 
 	for (const TPair<int32, FISIDRuntimeIndex>& Pair : ISIDData)
 	{
@@ -7566,25 +7672,38 @@ void APropManager::BuildInitialPropSnapshot(TArray<FPropBulkUpdateBatch>& OutBat
 
 void APropManager::SendInitialPropSnapshot(APlayerController* ClientController)
 {
-	TArray<FPropBulkUpdateBatch> InitBatches;
-	BuildInitialPropSnapshot(InitBatches);
-
-	if (ClientController)
+	if (!HasAuthority() || !GetWorld()) return;
+	if (!ClientController)
 	{
-		FPropClientSyncState& Stream = ClientDeliveryStreams.FindOrAdd(ClientController);
-		Stream.ClientController = ClientController;
-		Stream.PendingBatches.Append(InitBatches);
+		for (auto It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+			if (auto* PC = It->Get(); PC && PC->GetNetConnection() && PC->HasClientLoadedCurrentWorld()) SendInitialPropSnapshot(PC);
+		return;
 	}
-
-	for (const FPropBulkUpdateBatch& Batch : InitBatches)
+	if (!ClientController->GetNetConnection()) return;
+	if (!IsValid(GetOwner())) SetOwner(ClientController);
+	auto& Channel = DeliveryChannels.FindOrAdd(ClientController);
+	if (!IsValid(Channel))
 	{
-		SendPropInitializationBatch(Batch, ClientController);
+		FActorSpawnParameters Params;
+		Params.Owner = ClientController;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		Channel = GetWorld()->SpawnActor<APropDeliveryChannel>(APropDeliveryChannel::StaticClass(), FTransform::Identity, Params);
 	}
+	if (Channel) Channel->Start(this);
 }
 
 void APropManager::SendPropInitializationBatch(const FPropBulkUpdateBatch& Batch, APlayerController* ClientController)
 {
-	Multicast_ReceivePropInitializationBatch(Batch);
+	if (!HasAuthority()) return;
+	for (const auto& Peer : DeliveryChannels)
+	{
+		if (ClientController && Peer.Key != ClientController) continue;
+		for (const auto& Def : Batch.ProductDefinitions) Peer.Value->QueueProduct(Def.ProductID);
+		for (const auto& Def : Batch.ContentDefinitions) Peer.Value->QueueContent(Def.ContentID);
+		for (const auto& Delta : Batch.Records) Peer.Value->QueueRecord(Delta.ISID);
+		for (int32 ID : Batch.DeletedISIDs) Peer.Value->QueueRemoval(ID, true);
+		for (int32 ID : Batch.ReleasedToEmptyISIDs) Peer.Value->QueueRemoval(ID, false);
+	}
 }
 
 void APropManager::Multicast_ReceivePropInitializationBatch_Implementation(const FPropBulkUpdateBatch& Batch)
@@ -7604,6 +7723,9 @@ void APropManager::ApplyPropInitializationBatch(const FPropBulkUpdateBatch& Batc
 	if (Batch.bIsFirstInitBatch)
 	{
 		SetLoadState(EPropManagerLoadState::SynchronizingClients);
+		PropSyncReady = false;
+		SnapshotObsoleteIDs.Reset();
+		for (const auto& Pair : ISIDData) SnapshotObsoleteIDs.Add(Pair.Key);
 	}
 
 	WorldElapsedSeconds = FMath::Max(WorldElapsedSeconds, Batch.SnapshotWorldElapsedSeconds);
@@ -7619,16 +7741,24 @@ void APropManager::ApplyPropInitializationBatch(const FPropBulkUpdateBatch& Batc
 
 	for (const FPropInstanceDelta& RecordDelta : Batch.Records)
 	{
+		if (SnapshotObsoleteIDs.Remove(RecordDelta.ISID) && Batch.bIsFullSnapshot)
+		{
+			// Loading an earlier save can legitimately rewind an existing ISID.
+			if (auto* Prior = FindISIDData(RecordDelta.ISID))
+			{
+				Prior->Version = RecordDelta.Version;
+				Prior->FragmentPoseTime = RecordDelta.FragmentPoseTime;
+			}
+			UniqueDataByISID.Remove(RecordDelta.ISID);
+		}
 		ApplyInstanceDelta(RecordDelta);
 	}
 
-	if (GetNetConnection() != nullptr)
-	{
-		AcknowledgePropInitialization(Batch.BatchSequence, Batch.bIsFinalInitBatch);
-	}
 
 	if (Batch.bIsFinalInitBatch)
 	{
+		for (int32 ID : SnapshotObsoleteIDs) if (FindISIDData(ID)) ReleaseInstanceToEmpty(ID);
+		SnapshotObsoleteIDs.Reset();
 		CompleteClientPropSync();
 	}
 }
@@ -7661,12 +7791,8 @@ bool APropManager::IsClientPropSyncReady(APlayerController* ClientController) co
 		return PropSyncReady;
 	}
 
-	if (const FPropClientSyncState* Stream = ClientDeliveryStreams.Find(ClientController))
-	{
-		return Stream->bClientSyncReady;
-	}
-
-	return PropSyncReady;
+	const auto* Channel = DeliveryChannels.Find(ClientController);
+	return Channel && IsValid(*Channel) && (*Channel)->IsSnapshotReady();
 }
 
 void APropManager::CompleteClientPropSync()
@@ -7884,10 +8010,26 @@ bool APropManager::LoadPropDatabase(const FString& SlotName, int32 UserIndex)
 		return false;
 	}
 
-	UPropDatabaseSaveGame* LoadedObj = Cast<UPropDatabaseSaveGame>(UGameplayStatics::LoadGameFromSlot(SlotName, UserIndex));
+	UPropDatabaseSaveGame* LoadedObj = UPropDatabaseSaveGame::LoadCompatibleSlot(SlotName, UserIndex);
 	if (!LoadedObj) return false;
 
-	if (LoadedObj->WorldSaveData.SchemaVersion != SchemaVersion || !USharedTeamWalletComponent::ValidateSaveData(LoadedObj->WorldSaveData.SharedWallet) || !UShopCheckoutComponent::ValidateSaveData(LoadedObj->WorldSaveData.ShopCheckout) || !FMath::IsFinite(LoadedObj->WorldSaveData.WorldElapsedSeconds) || LoadedObj->WorldSaveData.WorldElapsedSeconds < 0) return false;
+	if (LoadedObj->WorldSaveData.SchemaVersion < 5 || LoadedObj->WorldSaveData.SchemaVersion > SchemaVersion || !USharedTeamWalletComponent::ValidateSaveData(LoadedObj->WorldSaveData.SharedWallet) || !UShopCheckoutComponent::ValidateSaveData(LoadedObj->WorldSaveData.ShopCheckout) || !FMath::IsFinite(LoadedObj->WorldSaveData.WorldElapsedSeconds) || LoadedObj->WorldSaveData.WorldElapsedSeconds < 0) return false;
+	TMap<int32,int32> SavedParents;
+	for (const auto& Item : LoadedObj->WorldSaveData.SavedInstances)
+	{
+		if (Item.ISID <= 0 || SavedParents.Contains(Item.ISID) || !Item.Attachment.RelativeTransform.IsValid()) return false;
+		SavedParents.Add(Item.ISID, Item.Attachment.OwnerISID);
+	}
+	for (const auto& Pair : SavedParents)
+	{
+		int32 ID = Pair.Key;
+		for (int32 Depth = 0; ID; ++Depth)
+		{
+			const int32* Parent = SavedParents.Find(ID);
+			if (!Parent || Depth >= 64) return false;
+			ID = *Parent;
+		}
+	}
 	if (!ValidateReleasedLiquids(LoadedObj->WorldSaveData.ReleasedLiquids, LoadedObj->WorldSaveData.WorldElapsedSeconds)) return false;
 	if (!UShopCheckoutComponent::ValidateCashWorldSaveData(LoadedObj->WorldSaveData)) return false;
 	if (ShopCheckout) ShopCheckout->CancelAllCheckouts();
@@ -7896,6 +8038,7 @@ bool APropManager::LoadPropDatabase(const FString& SlotName, int32 UserIndex)
 	ResetFragmentRuntime();
 	WorldElapsedSeconds = WorldSaveData.WorldElapsedSeconds;
 	ReleasedLiquids = WorldSaveData.ReleasedLiquids; OnRep_ReleasedLiquids();
+	ClearAssemblyComponents();
 	UniqueDataByISID.Empty();
 
 	// Return all current active ASMs to pool
@@ -7930,10 +8073,17 @@ bool APropManager::LoadPropDatabase(const FString& SlotName, int32 UserIndex)
 	ProductDefinitions.Empty(); ContentDefinitions.Empty();
 	for (const FPropContentDefinition& Definition : WorldSaveData.ContentDefinitions) RegisterContentDefinition(Definition);
 	for (const FPropProductDefinition& Definition : WorldSaveData.ProductDefinitions) RegisterProductDefinition(Definition);
+ if(ProductCatalog.LoadSynchronous() && !InitializeProductCatalog())return false;
 	if (SharedWallet && !SharedWallet->RestoreCommittedState(WorldSaveData.SharedWallet)) return false;
 	if (ShopCheckout && !ShopCheckout->RestoreCommittedState(WorldSaveData.ShopCheckout)) return false;
 
 	// Deserialize each saved logical prop by ISID (reusing EmptyInstances or creating ISM instances via RepairLoadedISMI)
+	NextISID=FMath::Max(10001,WorldSaveData.NextISID);
+	for(const auto& Saved:WorldSaveData.SavedInstances)
+	{
+		if(Saved.ISID>=MAX_int32)return false;
+		NextISID=FMath::Max(NextISID,Saved.ISID+1);
+	}
 	for (const FPropSerializedInstance& SavedInst : WorldSaveData.SavedInstances)
 	{
 		int32 RestoredISID = 0;
@@ -7944,11 +8094,50 @@ bool APropManager::LoadPropDatabase(const FString& SlotName, int32 UserIndex)
 
 	RebuildLevelMappings();
 	RebuildLevelEmptyInstances();
+	// Rebase authored mesh/mount changes after the saved edges exist. Doing this
+	// before DeserializeInstance left old cap offsets untouched on every load.
+	if (ShopSupplies && !ShopSupplies->RefreshLoadedCatalog()) return false;
 	TArray<int32> RestoredUniqueIDs;
 	UniqueDataByISID.GetKeys(RestoredUniqueIDs);
-	for (int32 ID:RestoredUniqueIDs) if (!EnsureDefaultPhysicalCap(ID)) return false;
+	for (int32 ID : RestoredUniqueIDs)
+	{
+		const auto* Data = FindUniqueData(ID);
+		if (Data && Data->EventData.AttachedBottleISID && !FindISIDData(ID)->Attachment.OwnerISID)
+		{
+			const int32 Parent = Data->EventData.AttachedBottleISID;
+			const auto* RootRecord = FindISIDData(Parent);
+			const auto* Bottle = RootRecord ? FindProductDefinition(RootRecord->ProductID) : nullptr;
+			const auto* Cap=FindProductDefinition(FindISIDData(ID)->ProductID);
+			if (!Bottle || !Cap) return false;
+			FTransform Mount=Cap->CapMountOffset*Bottle->CapAttachmentTransform;
+			Mount.SetRotation(GetTransform(ID).GetRelativeTransform(GetTransform(Parent)).GetRotation());
+			if (!InstallAssemblyEdge(Parent, ID, Mount)) return false;
+		}
+	}
+	// Older saves can already contain a migrated mesh and identity mount, while
+	// the cap edge still contains the former 170 cm offset. Mount location/scale
+	// belong to the recipe; retain the independently stored manual twist angle.
+	for (auto& Pair:ISIDData)
+	{
+		const auto* Cap=FindProductDefinition(Pair.Value.ProductID);
+		const auto* Parent=FindISIDData(Pair.Value.Attachment.OwnerISID);
+		const auto* Bottle=Parent ? FindProductDefinition(Parent->ProductID) : nullptr;
+		if (!Cap || !Cap->bIsBottleCap || !Bottle || WorldSaveData.SchemaVersion>=6 || Bottle->ConsumableProfile.NumOfPortions<=0) continue;
+		const FTransform Mount=Cap->CapMountOffset*Bottle->CapAttachmentTransform;
+		auto Edge=Pair.Value.Attachment;
+		Edge.RelativeTransform.SetLocation(Mount.GetLocation());
+		Edge.RelativeTransform.SetScale3D(Mount.GetScale3D());
+		if (!Edge.RelativeTransform.Equals(Pair.Value.Attachment.RelativeTransform))
+		{
+			SetAssemblyEdge(Pair.Key,Edge);
+			IncrementInstanceVersion(Pair.Key);
+			MarkInstanceDirty(Pair.Key,EPropDirtyFlags::Transform);
+		}
+	}
+	for (int32 ID : RestoredUniqueIDs) if (!EnsureLiquidChild(ID) || !EnsureDefaultPhysicalCap(ID)) return false;
 	RestoreActiveActors();
-
+	for (const auto& Pair : ISIDData) if (!Pair.Value.Attachment.OwnerISID) RefreshAssembly(Pair.Key);
+	for (const auto& Peer : DeliveryChannels) if (IsValid(Peer.Value)) Peer.Value->Start(this);
 	return true;
 }
 
@@ -8002,7 +8191,16 @@ int32 APropManager::SaveDirtyInstances(const FString& SlotName, int32 UserIndex)
 	// Normalize cached companions too: an unchanged cap may not be in DirtyISIDs
 	// when its bottle's incomplete checkout needs to return to the stock location.
 	for (FPropSerializedInstance& Serialized:WorldSaveData.SavedInstances)
+	{
+		// Continuous channels do not enqueue full network records. Refresh their
+		// canonical values even when the cached instance has no discrete changes.
+		if (const auto* Current=UniqueDataByISID.Find(Serialized.ISID))
+		{
+			Serialized.bHasUniqueData=true;
+			Serialized.UniqueData.ContinuousData=Current->ContinuousData;
+		}
 		if (ShopCheckout && ShopCheckout->GetCanceledStockTransform(Serialized.ISID,Serialized.ActiveTransform)) Serialized.State=EPropState::AtRest;
+	}
 
 	UPropDatabaseSaveGame* SaveObj = Cast<UPropDatabaseSaveGame>(UGameplayStatics::CreateSaveGameObject(UPropDatabaseSaveGame::StaticClass()));
 	if (!SaveObj)
@@ -8079,6 +8277,9 @@ bool APropManager::SerializeInstance(int32 InISID, FPropSerializedInstance& OutS
 	}
 
 	if (const FPropInstanceUniqueData* Unique = FindUniqueData(InISID)) { OutSerialized.bHasUniqueData = true; OutSerialized.UniqueData = *Unique; }
+	OutSerialized.Attachment = Record->Attachment;
+ OutSerialized.VisualBottlePID=Record->VisualBottlePID;
+	if (auto* Part = GetAssemblyComponent(InISID)) OutSerialized.Attachment.RelativeTransform = Part->GetRelativeTransform();
 	OutSerialized.ISID = Record->ISID;
 	OutSerialized.ProductID = Record->ProductID;
 	OutSerialized.IISMComponentID = Record->IISMComponentID;
@@ -8109,9 +8310,9 @@ bool APropManager::DeserializeInstance(const FPropSerializedInstance& InSerializ
 	}
 
 	UInteractableISMComponent* Comp = FindIISMComponent(InSerialized.IISMComponentID);
-	if (!Comp || Comp->ProductID != InSerialized.ProductID)
+	if (!Comp || (Comp->ProductID != InSerialized.ProductID || Comp->VisualBottlePID!=InSerialized.VisualBottlePID))
 	{
-		Comp = GetOrCreateIISMComponent(InSerialized.ProductID);
+		Comp = GetOrCreateIISMComponent(InSerialized.ProductID,InSerialized.VisualBottlePID);
 	}
 	if (!Comp) return false;
 
@@ -8129,6 +8330,7 @@ bool APropManager::DeserializeInstance(const FPropSerializedInstance& InSerializ
 
 	FISIDRuntimeIndex Record;
 	Record.ISID = InSerialized.ISID;
+ Record.VisualBottlePID=InSerialized.VisualBottlePID;
 	Record.ProductID = InSerialized.ProductID;
 	Record.IISMComponentID = Comp->IISMComponentID;
 	Record.ISMI = NewISMI;
@@ -8147,7 +8349,18 @@ bool APropManager::DeserializeInstance(const FPropSerializedInstance& InSerializ
 	Record.RuntimeData.Temperature = RestoredPacked.Temperature;
 
 	RegisterISID(Record);
-	if (InSerialized.bHasUniqueData) { UniqueDataByISID.Add(InSerialized.ISID, InSerialized.UniqueData); RefreshUniqueRepresentation(InSerialized.ISID); }
+	SetAssemblyEdge(Record.ISID, InSerialized.Attachment);
+	// Restore the whole saved graph before creating missing factory children.
+	// Otherwise an early root can allocate an ID belonging to a later saved row.
+	if (InSerialized.bHasUniqueData)
+	{
+		auto Unique=InSerialized.UniqueData;
+		const auto* SavedDefinition=WorldSaveData.ProductDefinitions.FindByPredicate([&](const auto& D){return D.ProductID==InSerialized.ProductID;});
+		const auto* CurrentDefinition=FindProductDefinition(InSerialized.ProductID);
+		if(SavedDefinition && CurrentDefinition && SavedDefinition->ConsumableProfile.NumOfPortions>0 && CurrentDefinition->ConsumableProfile.NumOfPortions>0)
+			Unique.EventData.ContentLevel=float(double(Unique.EventData.ContentLevel)*SavedDefinition->ConsumableProfile.NumOfPortions/CurrentDefinition->ConsumableProfile.NumOfPortions);
+		UniqueDataByISID.Add(InSerialized.ISID,Unique);RefreshUniqueRepresentation(InSerialized.ISID,0);
+	}
 	OutISID = InSerialized.ISID;
 	return true;
 }
@@ -8181,10 +8394,14 @@ void APropManager::RestoreActiveActors()
 	// Section 36: Activate ASMs only for props that require active representation
 	for (TPair<int32, FISIDRuntimeIndex>& Pair : ISIDData)
 	{
+		if (Pair.Value.Attachment.OwnerISID) continue;
 		const EPropState PropState = Pair.Value.State;
 		const FPropInstanceUniqueData* Unique = FindUniqueData(Pair.Key);
-		const bool bOpenFilled = Unique && Unique->EventData.ContentLevel > 0 && Unique->EventData.CapSealed < 1;
-		if (bOpenFilled || PropState == EPropState::InMotion ||
+		const auto* Product=FindProductDefinition(Pair.Value.ProductID);
+		const bool bOpenFilled = Unique && Unique->EventData.ContentLevel > 0 && Unique->EventData.CapSealed < 1
+			&& (!Product || !Product->bAllowUncappedFilledISMDemotion || Unique->EventData.AttachedCapISID>0);
+		const bool ManualMachine=Product && Product->CustomActiveActorClass && Product->CustomActiveActorClass->IsChildOf(AManualColaFillingMachine::StaticClass());
+		if (ManualMachine || bOpenFilled || PropState == EPropState::InMotion ||
 			PropState == EPropState::Held ||
 			PropState == EPropState::Settling ||
 			PropState == EPropState::Unsettled)
@@ -8298,7 +8515,7 @@ bool APropManager::CanInteractWithMesh(UPrimitiveComponent* TargetComponent, int
 	bOutIsGrabbable = false;
 	if (!TargetComponent) return false;
 
-	const int32 FoundISID = GetISID(TargetComponent, InstanceIndex);
+	const int32 FoundISID = ResolveRootISID(GetISID(TargetComponent, InstanceIndex));
 	if (FoundISID > 0 && GetPropData(FoundISID, OutData))
 	{
 		bOutIsGrabbable = GetIsGrabbable(FoundISID);
@@ -8357,7 +8574,7 @@ bool APropManager::InteractWithMesh(UPrimitiveComponent* TargetComponent, int32 
 {
 	if (!TargetComponent || !InstigatorActor) return false;
 
-	const int32 FoundISID = GetISID(TargetComponent, InstanceIndex);
+	const int32 FoundISID = ResolveRootISID(GetISID(TargetComponent, InstanceIndex));
 	if (FoundISID > 0)
 	{
 		if (ActionName == FName("Grab") || ActionName == FName("PickUp"))
@@ -8462,7 +8679,7 @@ void APropManager::ProcessActivePhysicsReplication(float DeltaSeconds)
 		return;
 	}
 
-	const int32 Budget = FMath::Clamp(PhysicsSyncPropsPerFrame, 1, 30);
+	const int32 Budget = FMath::Clamp(PhysicsSyncPropsPerFrame, 1, 8);
 	const int32 CountToSend = FMath::Min(Budget, TotalSimulating);
 
 	TArray<FActivePropPhysicsSync> Batch;
@@ -8520,7 +8737,7 @@ void APropManager::ProcessTimestampedThermalUpdates(float DeltaSeconds)
 
 	const int32 CurrentMinutes = GetCurrentWorldMinutes();
 	const int32 TotalISIDs = AllActiveISIDs.Num();
-	const int32 CountToProcess = FMath::Clamp(ThermalUpdatesPerFrame, 5, 50);
+	const int32 CountToProcess = FMath::Clamp(ThermalUpdatesPerFrame, 5, 24);
 
 	TArray<FPropRuntimeSyncItem> SyncBatch;
 

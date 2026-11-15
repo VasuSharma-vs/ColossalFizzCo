@@ -1,0 +1,9 @@
+# Local build folders
+/Binaries/Win64/
+/Intermediate/
+/Saved/
+# The runtime is shipped separately under Binaries/ThirdParty and mirrored in ThirdParty/EOSSDK.
+# Never put service credentials in this plugin; project private profiles must be ignored separately.
+
+__pycache__/
+*.pyc

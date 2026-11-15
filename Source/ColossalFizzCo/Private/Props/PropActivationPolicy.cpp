@@ -14,7 +14,7 @@ void APropManager::UnregisterActivationVolume(UPropActivationVolumeComponent* Vo
 
 bool APropManager::IsInstanceKeptActive(int32 ISID) const
 {
-	if (!HasAuthority() || GetNetMode()==NM_Client || ISID<=0) return false;
+	if (!HasAuthority() || GetNetMode()==NM_Client || ISID<=0 || ISID==ChildJoiningAssembly) return false;
 	for (const auto& WeakVolume:ActivationVolumes)
 		if (const auto* Volume=WeakVolume.Get())
 			if (Volume->ContainsActiveInstance(this,ISID)) return true;

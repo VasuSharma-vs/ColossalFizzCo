@@ -1,4 +1,19 @@
+> Modular product update (15 November 2026): Bottle / Content / Cap databases, stable named PID catalog, bottle-owned capacity, per-instance assemblies and compatible filling/capping are installed. Set **Maximum Portions** in `/Game/Props/Products/DA_Bottle_Plastic`; old flavor assets are initial-stock presets. **72/72 native checks pass**, both real save copies and local-IP host/client/late join pass, and Editor/Development game builds pass. Six existing warning-bearing tests remain; rendered/manual and new packaged acceptance are pending. See [the implementation and checkpoint](Modular_Product_Databases_Implementation_2026-11-15.md) and [the approved specification](Modular_Product_Databases_2026-11-15.md). Historical status entries below are retained.
+
+> Dedicated prototype menu update (15 November 2026): native C++ login, host/join, ready/start, Epic friends/invites, offline solo and Escape session controls installed. Launch `Play_ColossalFizzCo.cmd` from the project root. Game67/67 (same six warning tests), plugin5/5 and installed menu1/1 pass; real two-account menu run passed 30 host/26 client assertions. The older packaged14120 build is unchanged. See [menu implementation and usage](Prototype_Menu_Implementation_2026-11-15.md).
+
+> Multiplayer integration update (14 November 2026): updated UniversalCrossplay Editor runtime and private Epic prototype profile installed. Installed native 4/4; IP peers 5/5; game regression 66/66 (same six warning tests). Current-project two-Epic Editor run passed 29 host and 25 client assertions, including character movement, reconnect, private invite/kick/cleanup/logout. Audible voice, packaged/different-network tests and Steam remain pending. See [current report](Multiplayer_Game_Integration_2026-11-14.md).
+
 # Implementation handoff
+
+**Current integration — UniversalCrossplay 0.1.0, 14 November 2026.** The reusable plugin is installed at Plugins/UniversalCrossplay and enabled in the editor, with online mode explicitly disabled until service configuration. EOS runtime1.19.2.1 is loaded through the engine-owned SDK lifecycle. Game module14120, game source and backed-up saves are unchanged. Standalone Editor/Development/Shipping packaging passes; native plugin4/4, game66/66 (the same six warning tests as before) and independent IP host/client5/5 pass. The installed-copy native4/4 also passes. Real Steam/Epic authentication, invitations, EOS P2P and RTC acceptance are PENDING accounts/portal settings. See [the implementation report](UniversalCrossplay_Implementation_2026-11-14.md) and [setup guide](../Plugins/UniversalCrossplay/Docs/SETUP.md).
+
+The existing packaged game14120 below is the preserved bottle-gameplay baseline and does **not** include this new plugin. The portable compiled plugin archive is Saved/CrossplayIntegration/Release_0_1_0/UniversalCrossplay_0.1.0_UE5.8_Win64.zip. No online-configured game package or dedicated server is claimed.
+
+**Preserved gameplay baseline — 14 November 2026: native14120 / Game78.** Saved cap mounts, resting bottle restoration and held-motion pressure sampling are repaired. Native66/66, packaged restored lifecycle14/14 and late join13/13 pass. Three-sale gameplay completed; its older harness exit-budget limitation is recorded in [the bottle lifecycle report](Bottle_Lifecycle_Repair_2026-11-14.md). Use Saved/Builds/NormalColaPrototype_14120/Windows/ColossalFizzCo.exe. Older build numbers below are historical.
+
+
+**Previous bottle prototype checkpoint 14 November 2026:** Read [the saved progress and questions document](Bottle_Prototype_Progress_and_Questions_2026-11-14.docx) for the installed build, verified tests and remaining acceptance work. The current repair uses artist-aligned cap pivots, paired shell and liquid morphs, compact continuous pressure updates and Rocket Projectile Component flight. Keep the dated entries below as historical evidence.
 
 ## Bottle/checkout updates — 12–13 November 2026
 

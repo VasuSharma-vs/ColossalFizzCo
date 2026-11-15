@@ -26,6 +26,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Supplies|Delivery", meta=(ClampMin="1",ClampMax="16")) int32 DeliveryRows=16;
 	bool Quote(FName OfferID, int32 Quantity, int64& TotalCents) const;
 	bool InitializeCatalog();
+	/** Lazily applies the existing plastic assembly recipe to a migrated product. */
+	bool EnsureBottleAssemblyConfigured(int32 ProductID);
+	bool RefreshLoadedCatalog();
 	bool IsNormalContent(int32 ContentID) const;
 	bool IsCylinderProduct(int32 ProductID) const;
 	bool IsNormalPrototypeActive() const { return bCatalogInitialized; }

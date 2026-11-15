@@ -87,6 +87,7 @@ void UPropBatchUpdateComponent::ProcessBatchUpdate(float DeltaSeconds)
 		}
 
 		const FPropProductDefinition* ProductDef = Manager->FindProductDefinition(Record->ProductID);
+		if (ProductDef && ProductDef->bLiquidVisualOnly) continue; // Parent drives visual data on changes.
 		FPropInstanceUniqueData* UniqueData = Manager->FindUniqueData(CheckISID);
 		const FPropContentDefinition* ContentDef = (UniqueData && UniqueData->EventData.ContentID > 0)
 			? Manager->FindContentDefinition(UniqueData->EventData.ContentID)

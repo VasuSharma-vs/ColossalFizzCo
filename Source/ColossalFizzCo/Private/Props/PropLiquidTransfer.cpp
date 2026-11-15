@@ -23,9 +23,19 @@ FGuid APropManager::BeginLiquidTransfer(int32 SourceID, int32 TargetID)
 	const FPropProductDefinition* TargetDef = TargetRecord ? FindProductDefinition(TargetRecord->ProductID) : nullptr;
 	const FPropContentDefinition* Content = Source ? FindContentDefinition(Source->EventData.ContentID) : nullptr;
 	if (!SourceDef || !TargetDef || !Source || !Target || !Content || SourceDef->ConsumableProfile.NumOfPortions <= 0 || TargetDef->ConsumableProfile.NumOfPortions <= 0
-		|| Source->EventData.ContentLevel <= 0 || Target->EventData.CapSealed > 0 || Target->EventData.AttachedCapISID>0 || !UColaPricingLibrary::CanReuseBottle(Target->EventData.Strength, Target->EventData.bClean, Target->EventData.ContentLevel)
-		|| IsExpiredSupply(*Source, *Content, WorldElapsedSeconds) || (!TargetDef->SupportedContentIDs.IsEmpty() && !TargetDef->SupportedContentIDs.Contains(Content->ContentID))) return FGuid();
-	for (const auto& Pair : FillSessions) if (Pair.Value.TargetISID == TargetID) return FGuid();
+		|| !FMath::IsFinite(Source->EventData.ContentLevel) || !FMath::IsFinite(Target->EventData.ContentLevel)
+		|| !FMath::IsFinite(Source->ContinuousData.Temperature) || !FMath::IsFinite(Target->ContinuousData.Temperature)
+		|| Source->EventData.ContentLevel <= 0 || Target->EventData.ContentLevel < 0
+		|| (Target->EventData.ContentLevel > 0 && Target->EventData.ContentID != Content->ContentID)
+		|| Target->EventData.CapSealed > 0 || Target->EventData.AttachedCapISID>0 || Target->EventData.TemporarySealUntil>WorldElapsedSeconds
+		|| !UColaPricingLibrary::CanReuseBottle(Target->EventData.Strength, Target->EventData.bClean, 0.f)
+		|| IsExpiredSupply(*Source, *Content, WorldElapsedSeconds) || !IsAssemblyCompatible(TargetRecord->ProductID, Content->ContentID, 0)) return FGuid();
+	// An interrupted same-content fill can resume without emptying the bottle or
+	// resetting its liquid age. The original cleanliness/strength rules still apply.
+	const bool Deforms = TargetDef->BottleMaterialType == EBottleMaterialType::Plastic || TargetDef->BottleMaterialType == EBottleMaterialType::HeavyMetal;
+	const float Capacity = TargetDef->MaxOverfillLevel * (Deforms ? FMath::Clamp(Target->EventData.Strength, 0.f, 1.f) : 1.f);
+	if (!FMath::IsFinite(Capacity) || Target->EventData.ContentLevel >= Capacity) return FGuid();
+	for (const auto& Pair : FillSessions) if (Pair.Value.TargetISID == TargetID || Pair.Value.SourceISID == TargetID || Pair.Value.TargetISID == SourceID) return FGuid();
 	if (ShopCheckout)
 	{
 		FShopStockEntry Entry;
@@ -51,8 +61,10 @@ float APropManager::TransferLiquid(FGuid SessionID, float RequestedPortions)
 	const FPropProductDefinition* SourceDef = SourceRecord ? FindProductDefinition(SourceRecord->ProductID) : nullptr;
 	const FPropProductDefinition* TargetDef = TargetRecord ? FindProductDefinition(TargetRecord->ProductID) : nullptr;
 	const FPropContentDefinition* Content = FindContentDefinition(Session.ContentID);
-	if (!Source || !Target || !SourceDef || !TargetDef || !Content || Source->EventData.ContentID != Session.ContentID
-		|| (Target->EventData.ContentID && Target->EventData.ContentID != Session.ContentID) || Target->EventData.CapSealed > 0 || Target->EventData.AttachedCapISID>0
+	if (!Source || !Target || !SourceDef || !TargetDef || !Content || !IsAssemblyCompatible(TargetRecord->ProductID,Session.ContentID,0) || Source->EventData.ContentID != Session.ContentID
+		|| (Target->EventData.ContentLevel > 0 && Target->EventData.ContentID != Session.ContentID) || Target->EventData.CapSealed > 0 || Target->EventData.AttachedCapISID>0 || Target->EventData.TemporarySealUntil>WorldElapsedSeconds
+		|| !FMath::IsFinite(Source->EventData.ContentLevel) || !FMath::IsFinite(Target->EventData.ContentLevel)
+		|| !FMath::IsFinite(Source->ContinuousData.Temperature) || !FMath::IsFinite(Target->ContinuousData.Temperature)
 		|| Target->EventData.Strength <= 0.70f || !Target->EventData.bClean || IsExpiredSupply(*Source, *Content, WorldElapsedSeconds))
 	{
 		EndLiquidTransfer(SessionID); return 0;
@@ -73,13 +85,7 @@ float APropManager::TransferLiquid(FGuid SessionID, float RequestedPortions)
 	const double Accepted = FMath::Min3(static_cast<double>(RequestedPortions) * Flow, Available, Room);
 	if (Accepted <= 0 || !FMath::IsFinite(Accepted)) return 0;
 	const bool StartsContent = Target->EventData.ContentLevel == 0;
-	const int32* FilledPID = TargetDef->FilledProductIDByContentID.Find(Session.ContentID);
-	if (StartsContent && FilledPID && *FilledPID != TargetRecord->ProductID)
-	{
-		const FPropProductDefinition* FilledDef = FindProductDefinition(*FilledPID);
-		if (!FilledDef || FilledDef->ConsumableProfile.NumOfPortions != TargetPortions || FilledDef->BottleMaterialType != TargetDef->BottleMaterialType || !FMath::IsNearlyEqual(FilledDef->MaxOverfillLevel, TargetDef->MaxOverfillLevel)) return 0;
-		if (!ChangePropProductWithMode(Session.TargetISID, *FilledPID, EPropProductResetMode::PreserveUniqueState)) return 0;
-	}
+	// Filling changes the content child and amount, never the physical bottle PID.
 	TargetRecord = FindISIDData(Session.TargetISID);
 	if (!TargetRecord) return 0;
 	if (TargetRecord->Representation == EPropRepresentation::ISM)
@@ -97,7 +103,22 @@ float APropManager::TransferLiquid(FGuid SessionID, float RequestedPortions)
 	TargetDelta.ContentLevel = FMath::Min(Capacity, Target->EventData.ContentLevel + static_cast<float>(Accepted / TargetPortions));
 	TargetDelta.ContentID = Session.ContentID;
 	if (StartsContent) { TargetDelta.ExtendedDirtyMask = EPropExtendedEventMask::ContentCreationTime; TargetDelta.ContentCreationTime = WorldElapsedSeconds; }
-	return SubmitAtomicInstanceEventUpdates({SourceDelta, TargetDelta}) ? static_cast<float>(Accepted) : 0;
+	const double ExistingPortions = double(Target->EventData.ContentLevel) * TargetPortions;
+	const float MixedTemperature = float((ExistingPortions * Target->ContinuousData.Temperature
+		+ Accepted * Source->ContinuousData.Temperature) / (ExistingPortions + Accepted));
+	if (!SubmitAtomicInstanceEventUpdates({SourceDelta, TargetDelta})) return 0;
+	// Use the existing canonical temperature path so active mass/visuals and resting
+	// instance data remain derived from the same state. An empty bottle takes the
+	// supply temperature; a resumed fill mixes the retained and incoming cola.
+	SetTemperature(Session.TargetISID, MixedTemperature);
+	if (const auto* Updated = FindUniqueData(Session.TargetISID))
+	{
+		FPropContinuousSyncItem Item; Item.ISID = Session.TargetISID;
+		Item.Temperature = Updated->ContinuousData.Temperature;
+		Item.SealedPressure = Updated->ContinuousData.SealedPressure;
+		Multicast_SyncContinuousBatch(WorldElapsedSeconds, {Item});
+	}
+	return static_cast<float>(Accepted);
 }
 
 void APropManager::EndLiquidTransfer(FGuid SessionID) { if (HasAuthority()) FillSessions.Remove(SessionID); }

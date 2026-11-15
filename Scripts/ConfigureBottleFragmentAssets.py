@@ -1,7 +1,7 @@
 """Run with UE's PythonScript commandlet after building the native fragment types.
 
 Creates product assets and an assembly from the supplied showcase, then assigns
-the assembly to the existing Cola1 bottle products. Source meshes/showcase are
+the assembly to eligible glass bottle products. Source meshes/showcase are
 read-only. Existing product packages are backed up under Saved before saving.
 """
 import hashlib
@@ -57,8 +57,11 @@ targets = []
 for name in BOTTLES:
     package = '/Game/Assest/DataAssets/' + name
     asset = unreal.EditorAssetLibrary.load_asset(package)
-    if not asset or asset.get_editor_property('StaticMesh').get_path_name() != '/Game/Assest/meshs/Cola1.Cola1':
-        raise RuntimeError('Bottle mesh differs from the inspected product: ' + package)
+    if not asset:
+        raise RuntimeError('Missing bottle product: ' + package)
+    # Plastic pressure/rocket bottles must never acquire the glass fracture recipe.
+    if asset.get_editor_property('BottleMaterialType') != unreal.BottleMaterialType.GLASS:
+        continue
     current = asset.get_editor_property('FragmentAssembly')
     if current and current.get_path_name().split('.')[0] != ASSEMBLY:
         raise RuntimeError('Preserving a different existing assembly on ' + package)
@@ -115,7 +118,7 @@ for _, asset in targets:
     asset.set_editor_property('FragmentAssembly', assembly)
     asset.set_editor_property('bEnableInstanceUniqueData', True)
     if asset.get_name() == 'DA_EmptyBottel':
-        # This is the same physical Cola1 container; zero content does not mean zero capacity.
+        # The matching empty container retains the filled bottle's nominal capacity.
         filled_reference = next(value for package, value in targets if package.endswith('/DA_Cola'))
         asset.set_editor_property('NumOfPortions', filled_reference.get_editor_property('NumOfPortions'))
         asset.set_editor_property('DefaultContentLevel', 0.0)

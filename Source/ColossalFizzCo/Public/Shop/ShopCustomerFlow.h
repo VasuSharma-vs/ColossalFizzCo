@@ -43,8 +43,10 @@ public:
 	void ReleaseClaims(UShopCustomerVisitComponent* Visit);
 	void ReturnBucket(AActor* Bucket,UShopCustomerVisitComponent* Visit);
 	void ReleaseVisit(UShopCustomerVisitComponent* Visit);
+	void PrepareCustomerMovement(ACharacter* Customer);
 private:
 	FTimerHandle ArrivalTimer;
+	UPROPERTY(Transient) TArray<TObjectPtr<AActor>> NavigationBlockers;
 	UPROPERTY(Transient) TArray<TObjectPtr<ACharacter>> Customers;
 	TArray<TWeakObjectPtr<UShopCustomerVisitComponent>> Queue;
 	TMap<int32,TWeakObjectPtr<UShopCustomerVisitComponent>> StockClaims;

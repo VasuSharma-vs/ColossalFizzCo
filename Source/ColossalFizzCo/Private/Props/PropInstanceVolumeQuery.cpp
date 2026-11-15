@@ -19,7 +19,7 @@ TSet<int32> PropInstanceVolumeQuery::Query(const UBoxComponent* Box, APropManage
 		FCollisionQueryParams(SCENE_QUERY_STAT(PropInstanceVolume),false,Box->GetOwner()));
 	for (const auto& Hit:Hits)
 	{
-		const int32 ID=Manager->GetISID(Hit.GetComponent(),Hit.GetItemIndex());
+		const int32 ID=Manager->ResolveRootISID(Manager->GetISID(Hit.GetComponent(),Hit.GetItemIndex()));
 		if (ID>0) IDs.Add(ID);
 	}
 	return IDs;

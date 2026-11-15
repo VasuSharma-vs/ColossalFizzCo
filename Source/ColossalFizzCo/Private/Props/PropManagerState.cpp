@@ -1,4 +1,5 @@
 #include "Props/InteractablePropManager.h"
+#include "Props/PropDeliveryChannel.h"
 #include "Props/InteractableProp.h"
 #include "Components/ASMComponent.h"
 #include "Components/InteractableInstancedStaticMeshComponent.h"
@@ -13,7 +14,7 @@ bool APropManager::RegisterContentDefinition(const FPropContentDefinition& Defin
 	if (!HasAuthority() || !Definition.IsValidDefinition() || !FMath::IsFinite(Definition.BasePortionPrice) || Definition.BasePortionPrice < 0
 		|| !FMath::IsFinite(Definition.DensityGPerMl) || Definition.DensityGPerMl<=0) return false;
 	ContentDefinitions.Add(Definition.ContentID, Definition);
-	Multicast_RegisterContentDefinition(Definition);
+	for (const auto& Peer : DeliveryChannels) if (Peer.Value) Peer.Value->QueueContent(Definition.ContentID);
 	return true;
 }
 
@@ -60,6 +61,13 @@ void APropManager::RefreshUniqueRepresentation(int32 InISID, uint8 DirtyMask)
 		Actor->OnApplyEventData(Unique->EventData, DirtyMask);
 		Actor->OnApplyContinuousData(Unique->ContinuousData, Unique->EventData.Strength, true);
 	}
+	// Only content-identity/amount changes can create or replace a child. Settled
+ // temperature updates do not allocate or tick another visual.
+ if(HasAuthority() && (DirtyMask & (uint8(EPropEventDirtyMask::ContentID)|uint8(EPropEventDirtyMask::ContentLevel))))EnsureLiquidChild(InISID);
+ Record=FindISIDData(InISID);Unique=UniqueDataByISID.Find(InISID);
+ if(!Record || !Unique)return;
+ Def=FindProductDefinition(Record->ProductID);
+ RefreshAssembly(InISID);
 	if (UInteractableISMComponent* Comp = FindIISMComponent(Record->IISMComponentID))
 	{
 		if (Comp->PackedInstanceData.IsValidIndex(Record->ISMI)) Comp->PackedInstanceData[Record->ISMI] = Record->PackedRuntimeData;
@@ -77,7 +85,9 @@ namespace
 			&& (!D.HasFlag(EPropEventDirtyMask::CreationTime) || (FMath::IsFinite(D.CreationTime) && D.CreationTime >= 0))
 			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::ContentCreationTime) || (FMath::IsFinite(D.ContentCreationTime) && D.ContentCreationTime >= 0))
 			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::AttachedCap) || D.AttachedCapISID >= 0)
-			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::AttachedBottle) || D.AttachedBottleISID >= 0);
+			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::AttachedBottle) || D.AttachedBottleISID >= 0)
+			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal) || (FMath::IsFinite(D.TemporarySealUntil) && D.TemporarySealUntil >= 0))
+			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::LinkedSupply) || D.LinkedSupplyISID >= 0);
 	}
 	void ApplyEvent(FPropEventUpdateData& E, const FPropEventSyncDelta& D)
 	{
@@ -92,6 +102,8 @@ namespace
 		if (D.ExtendedDirtyMask & EPropExtendedEventMask::Clean) E.bClean = D.bClean;
 		if (D.ExtendedDirtyMask & EPropExtendedEventMask::AttachedCap) E.AttachedCapISID = D.AttachedCapISID;
 		if (D.ExtendedDirtyMask & EPropExtendedEventMask::AttachedBottle) E.AttachedBottleISID = D.AttachedBottleISID;
+		if (D.ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal) { E.TemporarySealUntil=D.TemporarySealUntil; E.bTemporarySealUsed=D.bTemporarySealUsed; E.bManualFillPressure=D.bManualFillPressure; }
+		if (D.ExtendedDirtyMask & EPropExtendedEventMask::LinkedSupply) E.LinkedSupplyISID=D.LinkedSupplyISID;
 		E.EventSequence = D.EventSequence;
 	}
 }
@@ -102,7 +114,11 @@ bool APropManager::SubmitInstanceEventUpdate(int32 InISID, const FPropEventSyncD
 	FISIDRuntimeIndex* Record = FindISIDData(InISID);
 	FPropInstanceUniqueData* Unique = FindUniqueData(InISID);
 	if (!Record || !Unique) return false;
-	if (Delta.HasFlag(EPropEventDirtyMask::ContentID) && Delta.ContentID != 0 && !FindContentDefinition(Delta.ContentID)) return false;
+	if (Delta.HasFlag(EPropEventDirtyMask::ContentID) && Delta.ContentID != 0)
+	{
+		const auto* Cap = FindISIDData(Unique->EventData.AttachedCapISID);
+		if (!IsAssemblyCompatible(Record->ProductID, Delta.ContentID, Cap ? Cap->ProductID : 0)) return false;
+	}
 	FPropEventSyncDelta Applied = Delta;
 	Applied.ISID = InISID;
 	Applied.EventSequence = Unique->EventData.EventSequence + 1;
@@ -185,6 +201,7 @@ bool APropManager::ChangePropProductWithMode(int32 InISID, int32 NewProductID, E
 		Preserved.EventData.ContentID = 0;
 		Preserved.EventData.CapType = 0;
 		Preserved.EventData.CapSealed = 0;
+		Preserved.EventData.TemporarySealUntil=0; Preserved.EventData.bTemporarySealUsed=false; Preserved.EventData.bManualFillPressure=false;
 	}
 	Preserved.EventData.EventSequence = NextEventSequence;
 	if (NewDef->bEnableInstanceUniqueData) UniqueDataByISID.Add(InISID, Preserved);
@@ -194,7 +211,7 @@ bool APropManager::ChangePropProductWithMode(int32 InISID, int32 NewProductID, E
 	Record->LastDiscreteEventTime = WorldElapsedSeconds;
 	RefreshUniqueRepresentation(InISID);
 	MarkInstanceDirty(InISID, EPropDirtyFlags::RuntimeData | EPropDirtyFlags::Representation);
-	return true;
+	return EnsureLiquidChild(InISID);
 }
 
 bool APropManager::SubmitAtomicInstanceEventUpdates(const TArray<FPropEventSyncDelta>& Deltas)
@@ -204,7 +221,11 @@ bool APropManager::SubmitAtomicInstanceEventUpdates(const TArray<FPropEventSyncD
 	for (const FPropEventSyncDelta& D : Deltas)
 	{
 		if (IDs.Contains(D.ISID) || !ValidEvent(D) || D.HasFlag(EPropEventDirtyMask::ProductID) || !FindISIDData(D.ISID) || !FindUniqueData(D.ISID)) return false;
-		if (D.HasFlag(EPropEventDirtyMask::ContentID) && D.ContentID && !FindContentDefinition(D.ContentID)) return false;
+		if (D.HasFlag(EPropEventDirtyMask::ContentID) && D.ContentID)
+		{
+			const auto* Cap = FindISIDData(FindUniqueData(D.ISID)->EventData.AttachedCapISID);
+			if (!IsAssemblyCompatible(FindISIDData(D.ISID)->ProductID, D.ContentID, Cap ? Cap->ProductID : 0)) return false;
+		}
 		IDs.Add(D.ISID);
 	}
 	TArray<FPropEventSyncDelta> Applied = Deltas;
@@ -219,6 +240,6 @@ bool APropManager::SubmitAtomicInstanceEventUpdates(const TArray<FPropEventSyncD
 	}
 	// Commit every canonical record before updating any visual representation.
 	for (const FPropEventSyncDelta& D : Applied) RefreshUniqueRepresentation(D.ISID, D.DirtyMask);
-	Multicast_SyncEventDeltaBatch(WorldElapsedSeconds, Applied);
+	if (Applied.Num() <= 2) Multicast_SyncEventDeltaBatch(WorldElapsedSeconds, Applied);
 	return true;
 }

@@ -2,6 +2,7 @@
 #include "Misc/ScopeExit.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "Engine/StaticMesh.h"
 #include "GameFramework/WorldSettings.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/InteractableInstancedStaticMeshComponent.h"
@@ -25,29 +26,33 @@ bool FColaLiquidIntegrationTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("Real Normal bottle product"),Source)) return false;
 	auto* Product=DuplicateObject<UInteractablePropDataAsset>(Source,Manager); Product->DefaultContentLevel=.25f;
 	const int32 ID=Manager->GenerateProductInstance(Manager->RegisterProductFromDataAsset(Product),FTransform(FRotator(65,0,0),FVector(0,0,500)));
-	auto* ISM=Manager->GetComponentFromISID(ID);
+	auto* RootISM=Manager->GetComponentFromISID(ID);
+	int32 LiquidID=0;
+	for (int32 Child:Manager->GetChildISIDs(ID))
+		if (Manager->FindProductDefinition(Manager->FindISIDData(Child)->ProductID)->bLiquidVisualOnly) LiquidID=Child;
+	auto* ISM=Manager->GetComponentFromISID(LiquidID);
 	if (!TestNotNull(TEXT("Resting liquid ISM"),ISM)) return false;
-	const int32 Index=ISM->FindISMI(ID), Slots=ISM->GetInstanceCount();
+	const int32 Index=ISM->FindISMI(LiquidID), Slots=ISM->GetInstanceCount();
 	if (!TestTrue(TEXT("Core instance slots remain with appended visual channels"),ISM->NumCustomDataFloats>=6 && Index>=0)) return false;
 	const float RestOffset=ISM->PerInstanceSMCustomData[Index*ISM->NumCustomDataFloats+4];
 	TestEqual(TEXT("Resting volume solution is valid"),ISM->PerInstanceSMCustomData[Index*ISM->NumCustomDataFloats+5],1.f);
 	float InstanceMode=0,PreviewLevel=0,InstanceHeight=0;
-	auto* InstanceMID=Cast<UMaterialInstanceDynamic>(ISM->GetMaterial(1));
+	auto* InstanceMID=Cast<UMaterialInstanceDynamic>(ISM->GetMaterial(0));
 	if (!TestNotNull(TEXT("One shared runtime liquid MID per ISM component"),InstanceMID)) return false;
 	InstanceMID->GetScalarParameterValue(FMaterialParameterInfo(TEXT("Use Instance Liquid Data")),InstanceMode);
 	InstanceMID->GetScalarParameterValue(FMaterialParameterInfo(TEXT("Liquid Level")),PreviewLevel);
 	InstanceMID->GetScalarParameterValue(FMaterialParameterInfo(TEXT("Liquid Container Height")),InstanceHeight);
 	TestEqual(TEXT("Runtime ISM explicitly selects its own instance data"),InstanceMode,1.f);
 	float AuthoredPreviewLevel=0;
-	if (UMaterialInterface* SourceLiquid=ISM->GetProductMaterial(1))
+	if (UMaterialInterface* SourceLiquid=ISM->GetProductMaterial(0))
 		SourceLiquid->GetScalarParameterValue(FMaterialParameterInfo(TEXT("Liquid Level")),AuthoredPreviewLevel);
 	TestEqual(TEXT("Runtime wrapper preserves the artist's configurable preview value"),PreviewLevel,AuthoredPreviewLevel);
 	TestEqual(TEXT("Preview never replaces the actual quarter-full contents"),ISM->PerInstanceSMCustomData[Index*ISM->NumCustomDataFloats],.25f);
 	auto* Compatible=DuplicateObject<UInteractablePropDataAsset>(Source,Manager,TEXT("LiquidCompatibleProduct"));
 	const int32 CompatiblePID=Manager->RegisterProductFromDataAsset(Compatible);
 	TestNotEqual(TEXT("Compatibility test uses a distinct product"),CompatiblePID,ISM->ProductID);
-	TestTrue(TEXT("Shared liquid MID preserves compatible cross-product reuse"),Manager->CanComponentReuseForProduct(ISM,CompatiblePID));
-	TestTrue(TEXT("Product identity retains the original material asset"),ISM->GetProductMaterial(1)!=InstanceMID);
+	TestTrue(TEXT("Shared liquid MID preserves compatible cross-product reuse"),Manager->CanComponentReuseForProduct(RootISM,CompatiblePID));
+	TestTrue(TEXT("Product identity retains the original material asset"),ISM->GetProductMaterial(0)!=InstanceMID);
 	if (!TestTrue(TEXT("Same ISID promotes"),Manager->SetInstanceToUnsettled(ID,FVector::ZeroVector,FVector::ZeroVector,60))) return false;
 	auto* Bottle=Cast<AColaPropActor>(Manager->GetActiveActorFromISID(ID));
 	if (!TestNotNull(TEXT("Bottle ASM"),Bottle)) return false;
@@ -65,7 +70,10 @@ bool FColaLiquidIntegrationTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("ASM explicitly selects dynamic material contents"),ActiveSource,0.f);
 	TestEqual(TEXT("Native cached plane is stamped with the same fill"),CachedFill,.25f);
 	TestEqual(TEXT("Both representations use identical body dimensions"),ActiveHeight,InstanceHeight);
-	TestTrue(TEXT("Body height replaces the old 150cm proxy"),FMath::IsNearlyEqual(ActiveHeight,186.58856f,.01f));
+	float AuthoredHeight=0;
+	auto* AuthoredMaterial=ISM->GetProductMaterial(0);
+	TestTrue(TEXT("Authored material supplies a valid container height"),AuthoredMaterial && AuthoredMaterial->GetScalarParameterValue(FMaterialParameterInfo(TEXT("Liquid Container Height")),AuthoredHeight) && AuthoredHeight>1.f);
+	TestTrue(TEXT("Active liquid uses the supplied inner mesh dimensions"),FMath::IsNearlyEqual(ActiveHeight,ISM->GetStaticMesh()->GetBoundingBox().GetSize().Z,.01f));
 	TestEqual(TEXT("Actual bottle content reaches the material"),Level,.25f);
 	TestTrue(TEXT("Static and newly promoted clipping planes agree"),FMath::IsNearlyEqual(RestOffset,ActiveOffset,.02f));
 	Bottle->LiquidMotion.Tilt=FVector2D(.3,0); Bottle->LiquidMotion.WaveEnergy=.3f;
@@ -73,10 +81,10 @@ bool FColaLiquidIntegrationTest::RunTest(const FString& Parameters)
 	Bottle->LiquidMotion.Reset();
 	TestTrue(TEXT("Settled fluid can return to the existing ISM slot"),Manager->SetInstanceToRest(ID));
 	TestEqual(TEXT("Promotion/demotion never removes the ISM"),ISM->GetInstanceCount(),Slots);
-	TestEqual(TEXT("Original instance identity is retained"),ISM->FindISMI(ID),Index);
+	TestEqual(TEXT("Original liquid instance identity is retained"),ISM->FindISMI(LiquidID),Index);
 	TestTrue(TEXT("Resting plane remains continuous"),FMath::IsNearlyEqual(ISM->PerInstanceSMCustomData[Index*ISM->NumCustomDataFloats+4],RestOffset,.02f));
 	TestTrue(TEXT("Pool reset clears previous occupant's fluid state"),Bottle->LiquidMotion.IsSettled() && !Bottle->LiquidMotion.bHasHistory);
-	TestEqual(TEXT("Demotion retains the shared ISM material instead of the actor MID"),ISM->GetMaterial(1),static_cast<UMaterialInterface*>(InstanceMID));
+	TestEqual(TEXT("Demotion retains the shared ISM material instead of the actor MID"),ISM->GetMaterial(0),static_cast<UMaterialInterface*>(InstanceMID));
 	return true;
 }
 #endif

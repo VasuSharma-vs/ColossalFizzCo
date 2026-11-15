@@ -2,13 +2,17 @@
 #include "Props/InteractablePropManager.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "GameFramework/Pawn.h"
 #include "Curves/CurveFloat.h"
 #include "Props/ColaPricingLibrary.h"
 #include "Props/FragmentAssemblyDataAsset.h"
 
 bool AColaPropActor::CanDemoteToISM() const
 {
-	return Super::CanDemoteToISM() && LiquidMotion.IsSettled() && !(GetContentLevel() > UE_SMALL_NUMBER && GetCapSealed() < 1.0f)
+	const auto* Def=ResolveProductDefinition();
+	return Super::CanDemoteToISM() && LiquidMotion.IsSettled()
+		&& !(GetContentLevel()>UE_SMALL_NUMBER && GetCapSealed()<1.f
+			&& (!Def || !Def->bAllowUncappedFilledISMDemotion || LocalUniqueData.EventData.AttachedCapISID>0))
 		&& SmoothedPressureExpansion<=.001f
 		&& (UsesPlasticPressure() ? LocalUniqueData.ContinuousData.SealedPressure : InteractionPressure) <= UE_KINDA_SMALL_NUMBER
 		&& AcceptedFailureType == EContainmentFailureType::None;
@@ -23,6 +27,9 @@ void AColaPropActor::ResetTransientPoolState()
 	AcceptedFailureType = EContainmentFailureType::None;
 	ProcessedImpactIDs.Empty(); LastImpactTime = -1;
 	bDebugBottleImpacts=false;
+	AssemblyLiquidMesh = nullptr;
+	AssemblyLiquidSkeletalMesh = nullptr;
+	bHasAgitationHistory = false;
 	DynamicMaterialInstance = nullptr;
 	if (CapMeshComponent) { CapMeshComponent->DestroyComponent(); CapMeshComponent = nullptr; }
 	if (RocketComp) RocketComp->ResetRocketSimulation();
@@ -60,7 +67,8 @@ bool AColaPropActor::SetBottleContentType(int32 NewContentID)
 	if (!HasAuthority() || !UColaPricingLibrary::CanReuseBottle(GetStrength(), LocalUniqueData.EventData.bClean, GetContentLevel()) || !PropManagerReference) return false;
 	const FPropProductDefinition* Def = ResolveProductDefinition();
 	const FPropContentDefinition* Content = PropManagerReference->FindContentDefinition(NewContentID);
-	if (!Def || !Content || (!Def->SupportedContentIDs.IsEmpty() && !Def->SupportedContentIDs.Contains(NewContentID))) return false;
+	const auto* Cap=PropManagerReference->FindISIDData(LocalUniqueData.EventData.AttachedCapISID);
+	if (!Def || !Content || !PropManagerReference->IsAssemblyCompatible(Def->ProductID, NewContentID, Cap ? Cap->ProductID : 0)) return false;
 	LocalUniqueData.EventData.ContentID = NewContentID;
 	bHasValidUniqueData = true;
 	OnApplySharedDefinitions(Def, Content);
@@ -101,10 +109,16 @@ void AColaPropActor::ApplyBottleImpact(const FVector& Impulse, int32 EventID)
 	const FPropProductDefinition* Def = ResolveProductDefinition();
 	if (!Def || Def->BottleMaterialType == EBottleMaterialType::Diamond) return;
 	const float Severity = FMath::Max(0.0f, Impulse.Size() - DropImpactThreshold) / FMath::Max(1.0f, DropImpactThreshold);
+	if (UsesPlasticPressure())
+	{
+		const float EquivalentSpeed = Impulse.Size()/FMath::Max(.001f,ImpactReferenceMassKg);
+		const float Excitation = FMath::Max(0.f,EquivalentSpeed-ImpactAgitationSpeedThreshold)/FMath::Max(1.f,ImpactAgitationSpeedThreshold);
+		AddAgitationPressure(Excitation*FMath::Max(0.f,ImpactPressureGain));
+	}
 	if (Severity <= 0) return;
 	LocalUniqueData.EventData.Strength = FMath::Clamp(GetStrength() - Severity * Def->StrengthDamageRate, 0.0f, 1.0f);
 	EmitPropEventUpdate(EPropEventDirtyMask::Strength);
-	if (UsesPlasticPressure()) AddAgitationPressure(Severity*FMath::Max(0.f,ImpactPressureGain));
+
 	if (GetStrength() <= 0 && (Def->BottleMaterialType == EBottleMaterialType::Glass || Def->BottleMaterialType == EBottleMaterialType::Concrete))
 	{
 		FContainmentFailureRequest Failure; Failure.FailureType = EContainmentFailureType::BottleBreakage;
@@ -114,8 +128,15 @@ void AColaPropActor::ApplyBottleImpact(const FVector& Impulse, int32 EventID)
 }
 void AColaPropActor::ApplyInitialImpactFromPromotion(FVector Location, const FVector& Impulse, AActor* InstigatorActor, int32 EventID)
 {
-	// Promotion uses momentum too; calibrate agitation to the same reference mass as body hits.
-	ApplyBottleImpact(NormalizePhysicalContactImpulse(Impulse), EventID);
+	FVector ContactMomentum = Impulse;
+	if (const auto* Pawn = Cast<APawn>(InstigatorActor); Pawn && Impulse.Size() < DropImpactThreshold)
+	{
+		// Legacy character overlaps report a fixed kick. Limit passive contacts to measured motion.
+		const float Mass = PropMesh ? PropMesh->BodyInstance.GetBodyMass() : BottleMass+ContentMass;
+		const float ClosingSpeed = FMath::Max(0.f,float(FVector::DotProduct(Pawn->GetVelocity()-LinearVelocity,Impulse.GetSafeNormal())));
+		ContactMomentum = Impulse.GetClampedToMaxSize(FMath::Max(.001f,Mass)*ClosingSpeed);
+	}
+	ApplyBottleImpact(NormalizePhysicalContactImpulse(ContactMomentum), EventID);
 }
 bool AColaPropActor::SubmitFailureRequest(const FContainmentFailureRequest& Request)
 {
@@ -150,6 +171,7 @@ bool AColaPropActor::SubmitFailureRequest(const FContainmentFailureRequest& Requ
 			Detach.AttachedBottleISID = 0;
 			Manager->SubmitAtomicInstanceEventUpdates({Detach});
 			if (AActivePropActor* Cap = Manager->GetActiveActorFromISID(CapISID)) if (Cap->GetAttachParentActor() == this) Cap->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+			Manager->SetAssemblyEdge(CapISID, FPropAttachment());
 			Manager->InitializeInstanceTransform(CapISID, CapTransform);
 			Manager->ApplyImpulse(CapISID, SourceVelocity, true);
 		}

@@ -161,12 +161,23 @@ EShopCheckoutResult UShopScannerComponent::BeginCheckout()
 	if (bNotifying) return EShopCheckoutResult::Unavailable;
 	if (ScannerState.Phase == EShopScannerPhase::Completed) return SetResult(EShopCheckoutResult::AlreadyCompleted);
 	if (ScannerState.Phase == EShopScannerPhase::Checkout) return SetResult(EShopCheckoutResult::Success);
-	if (!ScannerState.Checkout.CustomerID.IsValid() || ScannerState.Checkout.Items.IsEmpty()) return SetResult(EShopCheckoutResult::InvalidRequest);
+	if (!ScannerState.Checkout.CustomerID.IsValid() || ScannerState.Checkout.Items.IsEmpty())
+	{ UE_LOG(LogTemp,Verbose,TEXT("SHOP_BILL_REJECT customer=%s items=%d"),*ScannerState.Checkout.CustomerID.ToString(),ScannerState.Checkout.Items.Num()); return SetResult(EShopCheckoutResult::InvalidRequest); }
 	for (const auto& Item : ScannerState.Checkout.Items) if (!Item.bAvailable) return SetResult(EShopCheckoutResult::Unavailable);
 	for (TObjectIterator<UShopCustomerCashComponent> It; It; ++It)
 		if (It->GetWorld()==GetWorld() && It->CustomerID==ScannerState.Checkout.CustomerID)
 			if (const auto* Visit=It->GetOwner()->FindComponentByClass<UShopCustomerVisitComponent>())
-				if (!Visit->AcceptsInvoiceItems(ScannerState.Checkout.Items)) return SetResult(EShopCheckoutResult::InvalidRequest);
+				if (!Visit->AcceptsInvoiceItems(ScannerState.Checkout.Items))
+				{
+					UE_LOG(LogTemp,Verbose,TEXT("SHOP_BILL_REJECT visitor=%s expected=%d cart=%d"),*GetNameSafe(It->GetOwner()),Visit->GetCollectedISIDs().Num(),ScannerState.Checkout.Items.Num());
+					if (auto* AuditManager=APropManager::Get(this)) for (int32 ID:Visit->GetCollectedISIDs())
+					{
+						const auto* Data=AuditManager->FindUniqueData(ID);
+						UE_LOG(LogTemp,Verbose,TEXT("SHOP_BILL_EXPECTED id=%d content=%d level=%.3f seal=%.3f position=%s"),ID,Data ? Data->EventData.ContentID : -1,Data ? Data->EventData.ContentLevel : -1,Data ? Data->EventData.CapSealed : -1,*AuditManager->GetTransform(ID).GetLocation().ToString());
+					}
+					for (const auto& Item:ScannerState.Checkout.Items) UE_LOG(LogTemp,Verbose,TEXT("SHOP_BILL_ACTUAL id=%d content=%d portions=%d"),Item.ISID,Item.ContentID,Item.Snapshot.NominalPortions);
+					return SetResult(EShopCheckoutResult::InvalidRequest);
+				}
 	UShopCheckoutComponent* Checkout = ResolveCheckout();
 	if (!Checkout) return SetResult(EShopCheckoutResult::Unavailable);
 	TArray<int32> IDs;

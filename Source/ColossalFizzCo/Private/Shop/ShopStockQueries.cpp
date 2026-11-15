@@ -41,7 +41,7 @@ TArray<int32> UShopCustomerCashComponent::BuildShoppingPlan(int32 MaxBottles)
 	if (!GetOwner() || !GetOwner()->HasAuthority() || GetOwner()->GetNetMode() == NM_Client || VisitBudgetCents < 0) return Products;
 	APropManager* Manager = APropManager::Get(this);
 	if (!Manager || !Manager->ShopCheckout) return Products;
-	PlannedQuantities.Empty();
+	PlannedQuantities.Empty();PlannedContents.Empty();
 	TArray<int32> Candidates = Manager->ShopCheckout->GetAvailableColaStockISIDs();
 	for (int32 I = Candidates.Num() - 1; I > 0; --I) Candidates.Swap(I, FMath::RandRange(0, I));
 	int64 MaximumTotal = 0; int32 Selected = 0;
@@ -58,7 +58,7 @@ TArray<int32> UShopCustomerCashComponent::BuildShoppingPlan(int32 MaxBottles)
 		if (CoinCount > FMath::Clamp(Manager->ShopCheckout->MaxCoinsPerOperation, 1, 256)) continue;
 		MaximumTotal += Data.Price.OriginalBaseCents;
 		if (!PlannedQuantities.Contains(Data.ProductID)) Products.Add(Data.ProductID);
-		++PlannedQuantities.FindOrAdd(Data.ProductID); ++Selected;
+		++PlannedQuantities.FindOrAdd(Data.ProductID); ++PlannedContents.FindOrAdd(FIntPoint(Data.ContentID,Data.NominalPortions)); ++Selected;
 	}
 	return Products;
 }

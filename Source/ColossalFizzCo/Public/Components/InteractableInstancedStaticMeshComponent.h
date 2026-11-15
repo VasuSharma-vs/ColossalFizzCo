@@ -31,6 +31,7 @@ public:
 
 protected:
 	virtual void OnRegister() override;
+	virtual void PreReplication(IRepChangedPropertyTracker& ChangedPropertyTracker) override;
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
@@ -46,6 +47,8 @@ public:
 	/** Static Mesh ID (SMID) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated, Category = "IISM Component|Identity")
 	int32 StaticMeshID = 0;
+	/** Different bottle shapes can share the same Content PID and use separate render batches. */
+	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="IISM Component|Identity") int32 VisualBottlePID=0;
 
 	/** Unique IISM Component ID (ICID) assigned by the Prop Manager */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated, Category = "IISM Component|Identity")
@@ -371,6 +374,7 @@ public:
 
 protected:
 	/** One shared runtime liquid material per component, never per resting bottle. */
+	int32 LiquidMaterialSlot = 1;
 	UPROPERTY(Transient) TObjectPtr<UMaterialInstanceDynamic> LiquidInstanceMaterial;
 	UPROPERTY(Transient) TObjectPtr<UMaterialInterface> LiquidInstanceMaterialSource;
 	bool bUsesBottleLiquidVolume = false;

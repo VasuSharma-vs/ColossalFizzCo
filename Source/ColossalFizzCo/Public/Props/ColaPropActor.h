@@ -83,7 +83,9 @@ public:
 	float GetBottlePressureTolerance() const;
 	void AddAgitationPressure(float Amount);
 	void UpdatePlasticPressure(float DeltaSeconds);
-	bool StartPlasticPressureRelease();
+	bool StartPlasticPressureRelease(bool bTemporarySealFailure=false);
+	bool HasTemporaryManufacturingSeal() const;
+	UPROPERTY(EditAnywhere, Category="Cola|Pressure|Manual Filling",meta=(ClampMin="0.01")) float ManualFillVentRate=.15f;
 	/** Current prototype choice: reuse BP_Cola's original projectile flight. False selects Chaos thrust. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Cola|Pressure|Rocket")
 	bool bUseOriginalRocketFlight = true;
@@ -99,7 +101,7 @@ public:
 	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category="Cola|Pressure|Rocket") FColaRocketLaunchConfiguration RocketLaunchConfiguration;
 	void UpdateOriginalRocketDischarge(float DeltaSeconds);
 	TWeakObjectPtr<UShopProductionStationComponent> CapHoldingStation;
-	UPROPERTY(EditAnywhere, Category="Cola|Pressure") float ImpactPressureGain = .4f;
+	UPROPERTY(EditAnywhere, Category="Cola|Pressure") float ImpactPressureGain = .8f;
 	UPROPERTY(EditAnywhere, Category="Cola|Pressure") float ShakePressureGain = .4f;
 	UPROPERTY(EditAnywhere, Category="Cola|Pressure") float JetLiquidLevelPerSecond = .15f;
 	UPROPERTY(EditAnywhere, Category="Cola|Pressure") float JetAccelerationPerPressure = 1600.f;
@@ -121,6 +123,21 @@ public:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> CapMeshComponent;
+	UPROPERTY(Transient) TObjectPtr<UStaticMeshComponent> AssemblyLiquidMesh;
+	UPROPERTY(Transient) TObjectPtr<USkeletalMeshComponent> AssemblyLiquidSkeletalMesh;
+	void EnforceModularVisuals();
+	void UpdateMotionPressure(float DeltaSeconds);
+	FVector PreviousAgitationVelocity = FVector::ZeroVector;
+	FVector FilteredAgitationAcceleration = FVector::ZeroVector;
+	bool bHasAgitationHistory = false;
+	UPROPERTY(EditAnywhere, Category="Cola|Pressure|Handling", meta=(ClampMin="0", Units="cm/s")) float ImpactAgitationSpeedThreshold = 200.f;
+	UPROPERTY(EditAnywhere, Category="Cola|Pressure|Handling", meta=(ClampMin="0", Units="cm/s")) float RunningSpeedThreshold = 350.f;
+	UPROPERTY(EditAnywhere, Category="Cola|Pressure|Handling", meta=(ClampMin="0")) float RunningPressureRate = .12f;
+	UPROPERTY(EditAnywhere, Category="Cola|Pressure|Handling", meta=(ClampMin="0", ToolTip="Minimum acceleration in centimeters per second squared")) float AccelerationAgitationThreshold = 900.f;
+	UPROPERTY(EditAnywhere, Category="Cola|Pressure|Handling", meta=(ClampMin="0")) float AccelerationPressureGain = .8f;
+	UPROPERTY(EditAnywhere, Category="Cola|Pressure|Handling", meta=(ClampMin="0", Units="deg/s")) float AngularAgitationThreshold = 180.f;
+	UPROPERTY(EditAnywhere, Category="Cola|Pressure|Handling", meta=(ClampMin="0")) float AngularPressureRate = .35f;
+	float GetInstalledCapMass() const;
 
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Rendering")
 	TObjectPtr<UMaterialInstanceDynamic> DynamicMaterialInstance;

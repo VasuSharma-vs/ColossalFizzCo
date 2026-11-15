@@ -1,6 +1,42 @@
 #include "Props/InteractablePropDatabase.h"
 #include "Props/InteractablePropDataAsset.h"
 #include "Props/InteractableProp.h"
+#include "Kismet/GameplayStatics.h"
+#include "Serialization/ObjectAndNameAsStringProxyArchive.h"
+
+namespace
+{
+	// The scope identifies engine save-memory/slot readers. Package and object
+	// duplication archives must keep their own reference encoding unchanged.
+	thread_local bool bReadingPropSave = false;
+}
+
+UPropDatabaseSaveGame* UPropDatabaseSaveGame::LoadCompatibleSlot(const FString& SlotName, int32 UserIndex)
+{
+	TGuardValue<bool> Guard(bReadingPropSave,true);
+	return Cast<UPropDatabaseSaveGame>(UGameplayStatics::LoadGameFromSlot(SlotName,UserIndex));
+}
+
+UPropDatabaseSaveGame* UPropDatabaseSaveGame::LoadCompatibleMemory(const TArray<uint8>& Bytes)
+{
+	TGuardValue<bool> Guard(bReadingPropSave,true);
+	return Cast<UPropDatabaseSaveGame>(UGameplayStatics::LoadGameFromMemory(Bytes));
+}
+
+void UPropDatabaseSaveGame::Serialize(FArchive& Ar)
+{
+	if (Ar.IsLoading() && bReadingPropSave)
+	{
+		// Save-game references are strings. The outer engine reader does not opt
+		// into object-name CoreRedirects; resolve both package and object names.
+		// Strings/names retain the same on-disk encoding through this proxy.
+		FObjectAndNameAsStringProxyArchive RedirectAware(Ar,true);
+		RedirectAware.bResolveRedirectors=true;
+		RedirectAware.bResolveCoreRedirects=true;
+		Super::Serialize(RedirectAware);
+	}
+	else Super::Serialize(Ar);
+}
 
 // -----------------------------------------------------------------------------
 // FPropInteractionProfile
@@ -286,7 +322,7 @@ FPropProductDefinition FPropProductDefinition::FromDataAsset(const UInteractable
 		Def.DefaultUniqueData.ContinuousData.LastUpdatedTime = 0.0;
 		Def.DefaultUniqueData.EventData.CreationTime = 0.0;
 		Def.DefaultUniqueData.EventData.ContentLevel = (InAsset->NumOfPortions > 0) ? FMath::Clamp(InAsset->DefaultContentLevel, 0.0f, Def.MaxOverfillLevel) : 0.0f;
-		Def.DefaultUniqueData.EventData.ContentID = InAsset->DefaultContentID;
+		Def.DefaultUniqueData.EventData.ContentID = InAsset->InitialContentProduct.IsSet() ? InAsset->InitialContentProduct.PID : InAsset->DefaultContentID;
 		Def.DefaultUniqueData.EventData.Strength = Def.MaxStrength;
 		Def.DefaultUniqueData.EventData.CapSealed = FMath::Clamp(InAsset->DefaultCapSealed, 0.0f, 1.0f);
 		Def.DefaultUniqueData.EventData.CapType = (Def.DefaultUniqueData.EventData.CapSealed > 0.0f) ? static_cast<uint8>(InAsset->DefaultCapType) : 0;
@@ -522,6 +558,8 @@ bool FPropEventSyncDelta::NetSerialize(FArchive& Ar, class UPackageMap* Map, boo
 	if (ExtendedDirtyMask & EPropExtendedEventMask::ContentCreationTime) Ar << ContentCreationTime;
 	if (ExtendedDirtyMask & EPropExtendedEventMask::AttachedCap) Ar << AttachedCapISID;
 	if (ExtendedDirtyMask & EPropExtendedEventMask::AttachedBottle) Ar << AttachedBottleISID;
+	if (ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal) { Ar << TemporarySealUntil; Ar << bTemporarySealUsed; Ar << bManualFillPressure; }
+	if (ExtendedDirtyMask & EPropExtendedEventMask::LinkedSupply) Ar << LinkedSupplyISID;
 
 	if (HasFlag(EPropEventDirtyMask::ContentLevel))
 	{

@@ -58,6 +58,10 @@ class COLOSSALFIZZCO_API UInteractablePropDataAsset : public UPrimaryDataAsset
 
 public:
 	UInteractablePropDataAsset();
+	/** Shared bottle type used by legacy prefilled authoring assets. Never contains owner/child ISIDs. */
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Product Catalog",meta=(ProductCategory="Bottle")) FPropProductReference BottleProduct;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Product Catalog",meta=(ProductCategory="Content")) FPropProductReference InitialContentProduct;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Product Catalog",meta=(ProductCategory="Cap")) FPropProductReference InitialCapProduct;
 
 	// -------------------------------------------------------------
 	// Mesh & Presentation
@@ -104,9 +108,12 @@ public:
 	/** Used when registering this product's liquid content definition. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Physics|Bottle", meta=(ClampMin="0.001"))
 	float LiquidDensityGPerMl = 1.04f;
+	/** Liquid presentation is separate from the shell's material slots. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Visual|Contents")
+	TObjectPtr<UMaterialInterface> LiquidMaterial;
 
-	/** Total number of portions (e.g. 4 sips or bites) */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Quantity", meta = (DisplayName = "Num of Portions", ClampMin = "0"))
+	/** Shared maximum for the bottle/container type. Mutable contents belong to its instance, never the content asset. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Quantity", meta = (DisplayName = "Maximum Portions", ClampMin = "0"))
 	int32 NumOfPortions = 4;
 
 	// -------------------------------------------------------------

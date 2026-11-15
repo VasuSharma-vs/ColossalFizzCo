@@ -35,6 +35,14 @@ bool FShopStationGeometryTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Distant player still fails the existing range limit"),ShopInteractionGeometry::DistanceToStation(Counter,FVector(3000,0,556))>350);
 	Customer->SetActorLocation(FVector(-3000,-250,530));
 	TestTrue(TEXT("Distant customer cannot pay through a handover marker"),ShopInteractionGeometry::CustomerDistanceToStation(Customer,Counter)>350);
+	Customer->GetCapsuleComponent()->SetCapsuleSize(34,88);
+	Customer->SetActorScale3D(FVector(6)); Customer->SetActorRotation(FRotator(0,90,0));
+	const FBoxSphereBounds ContainerBounds(FVector(0,0,100),FVector(100),174);
+	const FVector ContainerScale(2);
+	const FTransform Carry=ShopInteractionGeometry::CarryContainerTransform(Customer,ContainerBounds,ContainerScale);
+	const FVector ContainerCenter=Carry.GetLocation()+Carry.GetRotation().RotateVector(ContainerBounds.Origin);
+	TestTrue(TEXT("Giant carrier scale does not multiply world-space container clearance"),FMath::IsNearlyEqual(ShopInteractionGeometry::DistanceToCustomer(Customer,ContainerCenter)-ContainerBounds.BoxExtent.X,25.,.1));
+	TestTrue(TEXT("Carry pose preserves the container world scale"),Carry.GetScale3D().Equals(ContainerScale));
 	return true;
 }
 #endif

@@ -9,7 +9,7 @@ class USceneComponent;
 class UBottleFillingComponent;
 
 UENUM(BlueprintType)
-enum class EShopProductionAction : uint8 { Fill, StopFilling, AttachCap, CloseCap, OpenCap, HoldCapRole, RotateCapRole, PressCap, TurnCap, LeaveCapRole };
+enum class EShopProductionAction : uint8 { Fill, StopFilling, AttachCap, CloseCap, OpenCap, HoldCapRole, RotateCapRole, PressCap, TurnCap, LeaveCapRole, ConnectSupply, AlignBottle, HoldFillingLever, ReleaseFillingLever, ApplyTemporarySeal };
 
 USTRUCT(BlueprintType)
 struct COLOSSALFIZZCO_API FShopProductionItem
@@ -20,6 +20,9 @@ struct COLOSSALFIZZCO_API FShopProductionItem
 	UPROPERTY(BlueprintReadOnly) float ContentLevel=0;
 	UPROPERTY(BlueprintReadOnly) float CapSealed=0;
 	UPROPERTY(BlueprintReadOnly) int32 AttachedCapISID=0;
+	UPROPERTY(BlueprintReadOnly) float ResidualPressure=0;
+	UPROPERTY(BlueprintReadOnly) float TemporarySealSeconds=0;
+	UPROPERTY(BlueprintReadOnly) bool bTemporarySealUsed=false;
 };
 
 USTRUCT(BlueprintType)
@@ -31,6 +34,9 @@ struct COLOSSALFIZZCO_API FShopProductionView
 	UPROPERTY(BlueprintReadOnly) TArray<FShopProductionItem> Cylinders;
 	UPROPERTY(BlueprintReadOnly) TArray<FShopProductionItem> Caps;
 	UPROPERTY(BlueprintReadOnly) bool bFilling=false;
+	UPROPERTY(BlueprintReadOnly) int32 SeatedBottleISID=0;
+	UPROPERTY(BlueprintReadOnly) int32 ConnectedSourceISID=0;
+	UPROPERTY(BlueprintReadOnly) TObjectPtr<AActor> LeverOperator;
 	UPROPERTY(BlueprintReadOnly) int32 ManualBottleISID=0;
 	UPROPERTY(BlueprintReadOnly) TObjectPtr<AActor> CapHolder;
 	UPROPERTY(BlueprintReadOnly) TObjectPtr<AActor> CapRotator;
@@ -46,6 +52,8 @@ class COLOSSALFIZZCO_API UShopProductionStationComponent : public UActorComponen
 	GENERATED_BODY()
 public:
 	UShopProductionStationComponent();
+	/** Server-only identities from the most recent successful supply delivery at this station. */
+	TArray<int32> LastDeliveredSupplies;
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out) const override;
@@ -55,6 +63,18 @@ public:
 	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Station") TObjectPtr<USceneComponent> SupplyOutput;
 	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Station") TObjectPtr<UBottleFillingComponent> Filler;
 	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Station") bool bOffersSupplies=true;
+	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Station|Manual Filling") bool bManualLeverMode=false;
+	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Station|Manual Filling") bool bAllowSoloCap=false;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Station|Manual Filling") TObjectPtr<USceneComponent> BottleHolder;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Station|Manual Filling",meta=(ClampMin="0.1")) float TemporarySealDuration=3.f;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Station|Manual Filling",meta=(ClampMin="0")) float SafeResidualPressure=.1f;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Station|Manual Filling",meta=(ClampMin="0.1")) float LeverLeaseSeconds=.4f;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Station|Manual Filling",meta=(ClampMin="0.1")) float FillPressurePerLevel=.6f;
+	bool IsBottleAligned(int32 BottleISID) const;
+	void UpdateManualEquipment();
+	void ResetEquipmentSession();
+	void ReleaseSeatedBottle();
+	EShopCheckoutResult ManualEquipmentAction(EShopProductionAction Action,int32 BottleISID,int32 OtherISID,AActor* Player);
 	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Station|Manual Cap") bool bRequiresCooperativeCap=false;
 	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Station|Manual Cap",meta=(ClampMin="0.01")) float HoldingForcePerPress=1.25f;
 	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Station|Manual Cap",meta=(ClampMin="0.01")) float MaximumHoldingForce=2.5f;

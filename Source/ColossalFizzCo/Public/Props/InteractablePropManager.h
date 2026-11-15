@@ -18,12 +18,14 @@ class UStaticMeshPhysicsSimulationComponent;
 class UPrimitiveComponent;
 class USceneComponent;
 class APlayerController;
+class APropDeliveryChannel;
 class UInteractablePropDataAsset;
 class UStaticMesh;
 class AFragmentDestructionActor;
 class UFragmentAssemblyDataAsset;
 class UStaticMeshComponent;
 class UPropActivationVolumeComponent;
+class UPropProductCatalog;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnSettlingObjectRested, UStaticMeshPhysicsSimulationComponent*, SimComp, AActor*, OwnerActor);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropRepresentationChanged, int32, ISID, EPropRepresentation, NewRepresentation, AActivePropActor*, ActiveActor);
@@ -51,6 +53,16 @@ class COLOSSALFIZZCO_API APropManager : public AActor
 
 public:
 	APropManager();
+	UPROPERTY(EditAnywhere, Category="Prop Manager|Database") TSoftObjectPtr<UPropProductCatalog> ProductCatalog;
+	/** Register shared definitions; instance ownership is never stored in the catalog. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Props|Products") bool InitializeProductCatalog();
+	UFUNCTION(BlueprintPure, Category="Props|Products") int32 CanonicalProductPID(int32 PID) const;
+	const FPropBottleContentVisual* FindBottleContentVisual(int32 ContentPID,int32 BottlePID) const;
+	FPropProductDefinition ResolveVisualDefinition(int32 PID,int32 BottlePID) const;
+	bool EnsureAssemblyVisualBatch(int32 ISID,int32 BottlePID);
+	int32 GenerateAssemblyContent(int32 ContentPID,int32 BottlePID,const FTransform& World);
+	int32 FindCatalogAssetPID(const UObject* Asset) const;
+	bool bRegisteringCatalog=false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Prop Manager|Database")
 	TMap<int32,FPropContentDefinition> ContentDefinitions;
@@ -106,8 +118,25 @@ public:
 	void SynchronizeCapAssembly(int32 InISID);
 	/** Give scoped, factory-sealed starter bottles their existing physical cap identity once. */
 	bool EnsureDefaultPhysicalCap(int32 BottleISID);
-	bool PrepareCapForBottleRest(int32 BottleISID);
 	TSet<int32> SynchronizingCapBottles;
+	UFUNCTION(BlueprintPure, Category="Props|Assembly") int32 ResolveRootISID(int32 ID) const;
+	UFUNCTION(BlueprintPure, Category="Props|Assembly") TArray<int32> GetChildISIDs(int32 ID) const;
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Props|Assembly") bool AttachPropChild(int32 Parent, int32 Child, const FTransform& Relative);
+	UFUNCTION(BlueprintPure, Category="Props|Assembly") UStaticMeshComponent* GetAssemblyComponent(int32 ID) const;
+	bool IsAssemblyCompatible(int32 BottlePID, int32 ContentID, int32 CapPID) const;
+private:
+	int32 ChildJoiningAssembly = 0;
+	bool InstallAssemblyEdge(int32 Parent, int32 Child, const FTransform& Relative);
+public:
+	bool EnsureLiquidChild(int32 BottleID);
+	void RefreshAssembly(int32 ID);
+	void CaptureAssembly(int32 Root);
+	void SetAssemblyEdge(int32 Child, const FPropAttachment& Edge);
+	void ForgetAssembly(int32 ID);
+	void ClearAssemblyComponents();
+	TMultiMap<int32,int32> ChildrenByOwner;
+	UPROPERTY(Transient) TMap<int32,TObjectPtr<UStaticMeshComponent>> AssemblyComponents;
+
 	struct FFillSession { int32 SourceISID = 0; int32 TargetISID = 0; int32 ContentID = 0; };
 	TMap<FGuid, FFillSession> FillSessions;
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Prop Manager|Product Conversion")
@@ -318,7 +347,7 @@ public:
 
 	/** Save schema version (Section 30) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Prop Manager|SaveLoad")
-	int32 SchemaVersion = 5;
+	int32 SchemaVersion = 6;
 
 	/** Current level initialization and synchronization state (Section 59) */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Replicated, Category = "Prop Manager|Loading")
@@ -471,7 +500,7 @@ public:
 	int32 RegisterIISMComponent(UInteractableISMComponent* InComponent, int32 ExplicitICID = 0);
 
 	UFUNCTION(BlueprintCallable, Category = "Prop Manager|Initialization")
-	UInteractableISMComponent* GetOrCreateIISMComponent(int32 InProductID);
+	UInteractableISMComponent* GetOrCreateIISMComponent(int32 InProductID, int32 VisualBottlePID=0);
 
 	UFUNCTION(BlueprintPure, Category = "Prop Manager|Initialization")
 	bool ValidateDefinitions() const;
@@ -601,6 +630,8 @@ public:
 	void RequestAdd(int32 InProductID, const FTransform& InTransform, AActor* RequestingActor = nullptr);
 
 	UFUNCTION(Server, Reliable, WithValidation, Category = "Prop Manager|Create")
+	void Server_RequestGenerateQuantity(int32 InProductID, int32 Quantity, const FTransform& BaseTransform);
+	UFUNCTION(Server, Reliable, WithValidation)
 	void Server_RequestGenerateProducts(int32 InProductID, const TArray<FTransform>& InTransforms);
 
 	UFUNCTION(BlueprintCallable, Category = "Prop Manager|Create")
@@ -1674,6 +1705,22 @@ protected:
 	int32 CurrentISMUpdateIndex = 0;
 	int32 CurrentISMInstanceIndex = 0;
 	int32 NextICID = 1;
+	friend class APropDeliveryChannel;
+	UPROPERTY(Transient) TMap<TObjectPtr<APlayerController>, TObjectPtr<APropDeliveryChannel>> DeliveryChannels;
+	struct FPendingPromotionRequest
+	{
+		TArray<int32> IDs;
+		EPropState State;
+		EPropActivationReason Reason;
+		bool bSimulate;
+		int32 Cursor = 0;
+	};
+	TArray<FPendingPromotionRequest> OutboundPromotions;
+	TWeakObjectPtr<APropDeliveryChannel> LocalDeliveryChannel;
+	struct FPromotionOptions { EPropState State; EPropActivationReason Reason; bool bSimulate; };
+	TMap<int32, FPromotionOptions> QueuedPromotionOptions;
+	TSet<int32> SnapshotObsoleteIDs;
+	float PromotionSendDelay = 0;
 	int32 NextBatchSequence = 1;
 
 	FTimerHandle SettlingTimerHandle;

@@ -30,8 +30,12 @@ void UShopTerminalButton::Configure(UShopTerminalWidget* Owner, const FString& L
 	auto* Text = NewObject<UTextBlock>(this); Text->SetText(FText::FromString(Label)); Text->SetAutoWrapText(true); Text->SetColorAndOpacity(FSlateColor(FLinearColor::White));
 	SetContent(Text); SetBackgroundColor(FLinearColor(.08f,.24f,.3f));
 	OnClicked.AddDynamic(this, &UShopTerminalButton::HandleClick);
+	OnPressed.AddDynamic(this,&UShopTerminalButton::HandlePress);
+	OnReleased.AddDynamic(this,&UShopTerminalButton::HandleRelease);
 }
-void UShopTerminalButton::HandleClick() { if (Terminal.IsValid()) Terminal->HandleButton(this); }
+void UShopTerminalButton::HandleClick() { if (!bLever && Terminal.IsValid()) Terminal->HandleButton(this); }
+void UShopTerminalButton::HandlePress() { if (bLever && Terminal.IsValid()) Terminal->BeginLever(ISID); }
+void UShopTerminalButton::HandleRelease() { if (bLever && Terminal.IsValid()) Terminal->EndLever(); }
 
 TSharedRef<SWidget> UShopTerminalWidget::RebuildWidget()
 {
@@ -62,15 +66,24 @@ void UShopTerminalWidget::NativeConstruct()
 void UShopTerminalWidget::NativeTick(const FGeometry& Geometry, float DeltaSeconds)
 {
 	Super::NativeTick(Geometry, DeltaSeconds);
+	if (LocalLeverBottle>0)
+	{
+		LeverHeartbeat-=DeltaSeconds;
+		if (!Actions.IsValid() || !Station.IsValid()) EndLever();
+		else if (LeverHeartbeat<=0) { LeverHeartbeat=.1f; BeginLever(LocalLeverBottle); }
+	}
 	RefreshCountdown -= DeltaSeconds;
 	if (RefreshCountdown <= 0) { RefreshCountdown = .2f; Refresh(); }
 }
 FReply UShopTerminalWidget::NativeOnKeyDown(const FGeometry& Geometry, const FKeyEvent& Event)
 {
 	if (Event.GetKey() == EKeys::Escape) { Close(); return FReply::Handled(); }
+	if (Event.GetKey()==EKeys::F && Station.IsValid())
+		if (auto* Production=Station->FindComponentByClass<UShopProductionStationComponent>(); Production && Production->bManualLeverMode)
+		{ if (!Event.IsRepeat()) BeginLever(Production->View.SeatedBottleISID); return FReply::Handled(); }
 	if (Station.IsValid() && Actions.IsValid())
 		if (auto* Production=Station->FindComponentByClass<UShopProductionStationComponent>())
-			if (Production->bRequiresCooperativeCap && (Event.GetKey()==EKeys::G || Event.GetKey()==EKeys::R))
+			if ((Production->bRequiresCooperativeCap || Production->bAllowSoloCap) && (Event.GetKey()==EKeys::G || Event.GetKey()==EKeys::R))
 			{
 				int32 BottleID=Production->View.ManualBottleISID;
 				if (!BottleID)
@@ -200,8 +213,32 @@ void UShopTerminalWidget::ActionResult(int64 Sequence, EShopCheckoutResult Resul
 {
 	if (ResultText) ResultText->SetText(StaticEnum<EShopCheckoutResult>()->GetDisplayNameTextByValue(int64(Result)));
 }
+FReply UShopTerminalWidget::NativeOnKeyUp(const FGeometry& Geometry,const FKeyEvent& Event)
+{
+	if (Event.GetKey()==EKeys::F && LocalLeverBottle>0) { EndLever(); return FReply::Handled(); }
+	return Super::NativeOnKeyUp(Geometry,Event);
+}
+void UShopTerminalWidget::NativeOnFocusLost(const FFocusEvent& Event) { EndLever(); Super::NativeOnFocusLost(Event); }
+void UShopTerminalWidget::NativeDestruct() { EndLever(); Super::NativeDestruct(); }
+void UShopTerminalWidget::BeginLever(int32 BottleID)
+{
+	if (BottleID<=0 || !Actions.IsValid() || !Station.IsValid()) return;
+	auto* Production=Station->FindComponentByClass<UShopProductionStationComponent>();
+	if (!Production || !Production->bManualLeverMode) return;
+	LocalLeverBottle=BottleID; LeverHeartbeat=.1f;
+	Actions->RequestProductionAction(Production,Production->View.SessionID,EShopProductionAction::HoldFillingLever,BottleID);
+}
+void UShopTerminalWidget::EndLever()
+{
+	if (!LocalLeverBottle) return;
+	LocalLeverBottle=0;
+	if (Actions.IsValid() && Station.IsValid())
+		if (auto* Production=Station->FindComponentByClass<UShopProductionStationComponent>())
+			Actions->RequestProductionAction(Production,Production->View.SessionID,EShopProductionAction::ReleaseFillingLever,0);
+}
 void UShopTerminalWidget::Close()
 {
+	EndLever();
 	if (Actions.IsValid() && Station.IsValid())
 		if (auto* Production=Station->FindComponentByClass<UShopProductionStationComponent>())
 			if (Production->View.CapHolder==Actions->GetOwner() || Production->View.CapRotator==Actions->GetOwner())

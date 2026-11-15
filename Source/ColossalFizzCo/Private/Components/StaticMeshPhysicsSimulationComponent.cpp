@@ -73,7 +73,7 @@ void UStaticMeshPhysicsSimulationComponent::OnTargetMeshHit(UPrimitiveComponent*
 	if (!Owner || !Owner->HasAuthority()) return;
 	if (const AActivePropActor* Prop = Cast<AActivePropActor>(Owner))
 	{
-		if (!Prop->bIsActive || Prop->bIsHeld || Prop->bIsInMotion) return;
+		if (!Prop->bIsActive || Prop->IsSeatedInFiller() || Prop->bIsHeld || Prop->bIsInMotion) return;
 	}
 
 	// Ignore passive static floor/world geometry unless hit by a Pawn, a moving physics body, or receiving an impact impulse
@@ -205,7 +205,7 @@ void UStaticMeshPhysicsSimulationComponent::TickComponent(float DeltaTime, ELeve
 
 	if (const AActivePropActor* Prop = Cast<AActivePropActor>(Owner))
 	{
-		if (!Prop->bIsActive || Prop->bIsHeld || Prop->bIsInMotion || Prop->IsKeptActiveByVolume())
+		if (!Prop->bIsActive || Prop->bIsHeld || Prop->bIsInMotion || Prop->IsKeptActiveByVolume() || Prop->IsSeatedInFiller())
 		{
 			return;
 		}
@@ -575,6 +575,7 @@ void UStaticMeshPhysicsSimulationComponent::ApplyState(EPhysicsSimulationState N
 {
 	AActor* Owner = GetOwner();
 	AActivePropActor* ActivePropOwner = Cast<AActivePropActor>(Owner);
+	if (ActivePropOwner && ActivePropOwner->IsSeatedInFiller() && NewState != EPhysicsSimulationState::Held && NewState != EPhysicsSimulationState::InMotion) return;
 	const bool bKeepActive=ActivePropOwner && ActivePropOwner->IsKeptActiveByVolume();
 	if (bKeepActive && (NewState==EPhysicsSimulationState::Settling || NewState==EPhysicsSimulationState::AtRest))
 		NewState=EPhysicsSimulationState::Unsettled;
@@ -631,7 +632,9 @@ void UStaticMeshPhysicsSimulationComponent::ApplyState(EPhysicsSimulationState N
 	}
 
 	const bool bCanModifyReplication = (Owner && Owner->HasAuthority() && World && !World->IsNetMode(NM_Client));
-	const bool bAllowPhysicsOnOwner = (!ActivePropOwner || ActivePropOwner->bIsActive);
+	const auto* Rocket = Owner ? Owner->FindComponentByClass<URocketProjectileComponent>() : nullptr;
+	const bool bProjectileControlsTransform = Rocket && Rocket->IsPoweredFlight() && !Rocket->GetReplicatedFlightState().bPressurePhysicsFlight;
+	const bool bAllowPhysicsOnOwner = (!ActivePropOwner || ActivePropOwner->bIsActive) && !bProjectileControlsTransform;
 	const bool bReplicateMovementWhenFree = (ActivePropOwner == nullptr);
 
 	switch (NewState)

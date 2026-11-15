@@ -1,5 +1,92 @@
 # Normal Cola prototype play guide
 
+**Current build — 14 November 2026: native14119 / Game70.** Plastic-bottle migration is installed; native65/65, packaged core13/13 and late-join13/13 checks pass. See [migration status, evidence and pending class decisions](Cola1_Plastic_Migration_2026-11-14.md) and [the DOCX checkpoint](Cola1_Plastic_Migration_2026-11-14.docx). Use Saved/Builds/NormalColaPrototype_14119/Windows/ColossalFizzCo.exe. Older build numbers below are historical.
+
+
+Updated 14 November 2026. This guide covers plastic bottles, the five Normal Colas and Normal manual twist caps. Current player, customer and bottle sizes are preserved.
+
+## Current build
+
+Candidate 14118 is at `Saved/Builds/NormalColaPrototype_14118/Windows/ColossalFizzCo.exe`. Keep the complete Windows folder together. The default map is `/Game/NormalColaPrototype/Lvl_NormalColaPrototype`; the Validation map contains the automated driver and is for QA.
+
+Candidate14118 passed the packaged three-customer multiplayer loop, banking, manual manufacture, stocking and pressure flight with75 ms configured lag and2 percent loss. Read [the current implementation and acceptance report](Bottle_Prototype_Progress_and_Questions_2026-11-14.docx) for exact evidence. Automated checks do not replace hands-on input, appearance and handling acceptance.
+
+## Controls
+
+- WASD and mouse: move and look.
+- Hold G: pick up or position a prop. Double-tap G: drop it.
+- E: interact with the workbench, checkout or ATM. Look toward the station controls and stand within their interaction reach.
+- Escape: close the terminal and release active production controls.
+- Hold F in the manual filling terminal: open the valve. Release it to stop.
+- R in the capping terminal: advance manual twist closure. The safe solo method below does not require another player.
+
+Powered rocket flight owns the bottle movement. Wait for thrust to finish before trying to grab that bottle again.
+
+## Serve the first customer
+
+The shared bank starts at $0. Use the existing starter shelf stock for initial sales.
+
+1. A giant customer takes a bucket, collects bottles and queues. Wait for the customer to dock the bucket.
+2. Place each requested bottle in SCAN. Scanning is automatic. The live list removes bottles taken out; Save preserves selected identities outside the volume.
+3. Check content, temperature and expiry. Replace unwanted bottles before locking the bill.
+4. Open checkout with E and choose **Finalize and lock bill**. The customer supplies physical coins in PAYMENT.
+5. If change is due, move the correct existing shop-owned coins to CHANGE. Complete the paid checkout only when payment and change match the bill.
+6. The customer collects its purchase, returns the bucket and leaves. Temporarily blocked paid customers wait and retry their exit; clearing the passage lets them continue.
+
+Customers pay exactly when the register cannot make change. Rounded payments require sufficient real change coins. The register starts empty.
+
+## Bank and buy supplies
+
+Sale proceeds remain physical shop cash until deposited. They are not also credited directly to the bank.
+
+Move shop-owned coins into the ATM deposit tray and deposit them. All players share the resulting bank balance. Withdrawals debit that same bank and produce physical coins. Supported denominations are $1, $2, $5, $10, $20, $50 and $100.
+
+Use the supply terminal to buy empty plastic bottles, Normal caps and pre-mixed Normal bulk cola. Deliveries need free output space. Prices are configurable prototype values, not final balance. Any teammate can continue the shared checkout.
+
+## Fill, cap and restock
+
+1. Bring a Normal bulk container within 400 cm of a manual machine. Open it with E and select **Connect single supply pipe**. Several machines may share a source; only transferred contents are deducted.
+2. Put an empty eligible bottle in the holder and select **Align and seat in bottle holder**.
+3. Hold F or the filling-lever button. Release to stop. Closing the menu, walking away or losing connection also releases the valve. Filling stops at nominal capacity.
+4. Use the safe solo sequence: leave the bottle open until residual pressure is **0.10 or lower**, attach a compatible Normal cap and tap R until fully closed.
+5. The faster alternative uses the one-time **three-second temporary seal**. Attach and close the cap before it expires. Expiry while still pressurized and unsecured can eject the cap and launch the bottle.
+6. A helper can supply cap-holding force with G while another player twists with R. Use explicit role buttons if several bottles are eligible.
+7. Carry the full sealed bottle into a shelf stock area. Shelf registration is automatic.
+
+Demo supplies are pre-mixed. Raw-ingredient recipes and advanced cola categories are outside this prototype. A physical hose/dispenser presentation and the full hot-source cooling workflow remain separate equipment integration work.
+
+## Pressure, saving and acceptance
+
+Gentle carrying is intended to be safe. Strong impacts, acceleration, running, shaking and spinning can build pressure. During a pressure launch, Rocket Projectile Component controls powered motion, liquid drains and mass updates. Normal physics takes over afterward.
+
+The prototype uses its own autosave slot and a 60-second interval. Unfinished checkouts are canceled on reload; completed receipts and committed financial state persist. Existing original-world saves remain separate.
+
+See the DOCX report for exact build/test evidence, known warnings, unresolved balance decisions and the remaining manual G/GG/hold-G, E/F/R, host/client and performance checks.
+
+## Archived guidance from earlier builds
+
+The original guide is preserved below as history. Its former build paths, acceptance boundaries and mandatory two-player closure instructions are superseded by the current sections above.
+
+# Normal Cola prototype play guide
+
+## Manual filling update — 13 November 2026
+
+Use the current Editor build. Earlier packaged archives do not contain this update. The existing raw-material rack still provides ten empty plastic bottles, ten Normal caps and one full Normal bulk container. The starter workbench is now a manual machine, and the supply terminal sells additional manual machines for a configurable **$50** each. Carry and place purchased machines using the existing **G** controls; each machine has its own bottle holder and one supply pipe. No electricity is required.
+
+1. Bring a Normal bulk container within 400 cm of the machine. Press **E**, then **Connect single supply pipe** for that container. Several machines can connect to the same source; each valve draws only the quantity actually transferred.
+2. Place a plastic bottle in the holder area and choose **Align and seat in bottle holder**. Misaligned or carried bottles cannot be filled.
+3. **Hold F** or hold the filling-lever button with the mouse. Release the key/button to stop immediately. Closing the terminal, losing focus, walking away or losing connection also releases the valve. Filling can resume with the retained contents. Nominal full capacity remains the safety limit.
+4. Choose a sealing method:
+   - **Fast/risky:** stop filling, apply the **three-second temporary seal**, attach a Normal cap and tap **R** until fully closed. The temporary seal is available once per fill. It prevents leakage and retains residual pressure; it cannot be refreshed by repeated presses. Proper closure cancels its expiry hazard. Letting it expire with significant pressure and an unsecured cap can eject the cap and trigger the existing bottle rocket.
+   - **Slow/safe:** leave the bottle open until displayed residual pressure is **0.10 or lower**, then attach the Normal cap and tap **R** to finish. No second player or temporary seal is required.
+5. Carry the finished bottle to a display shelf. Existing registration, NPC selection, checkout, liquid/mass/temperature updates and bottle/cap persistence remain in use.
+
+A helper can maintain cap pressure with **G** while another player twists with **R**, prepare the next bottle, handle completed goods, or operate another machine. One player can cycle through several machines, leaving earlier bottles to vent. Each machine holds one bottle for filling; the sequence across machines is entirely up to the players.
+
+Initial tuning is one portion/second (four seconds for a normal bottle), 0.60 residual pressure per full bottle, 0.15 pressure/second natural venting, a three-second temporary seal and a 0.40-second server lever timeout. These values are editable prototype settings. Temporary-seal deadlines use the persistent manager clock, so saving and loading cannot restart their countdowns.
+
+See [the supplied design](Normal_Cola_Manual_Filling_Design.md) and [the manual-filling validation record](Manual_Cola_Filling_2026-11-13.md) for exact acceptance results. The dated notes below describe earlier builds and their former mandatory two-player closure.
+
 **Checkout E repair, Editor 11205:** enter Play, climb the front player access
 deck, look at the counter near its front controls and press E. The old 150 cm
 prop trace missed this giant desk; a station-specific C++ query now uses the

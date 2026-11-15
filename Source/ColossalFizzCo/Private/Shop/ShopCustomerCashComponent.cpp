@@ -110,7 +110,7 @@ bool UShopCustomerCashComponent::ResetVisit()
 	if (!GetOwner()->HasAuthority() || GetNetMode()==NM_Client || Station.IsValid()) return false;
 	auto* Manager=APropManager::Get(this);
 	if (!Manager || !Manager->ShopCheckout || !Manager->ShopCheckout->ReclaimCustomerCoins(CustomerID,Manager->ShopCheckout->GetCustomerCoinISIDs(CustomerID))) return false;
-	IssuedPayments.Empty(); PlannedQuantities.Empty(); SpentCents=0; CustomerID=FGuid::NewGuid();
+	IssuedPayments.Empty(); PlannedQuantities.Empty(); PlannedContents.Empty(); SpentCents=0; CustomerID=FGuid::NewGuid();
 	GetOwner()->ForceNetUpdate(); return true;
 }
 

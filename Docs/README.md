@@ -1,4 +1,13 @@
+> Modular product update (15 November 2026): Bottle / Content / Cap databases, stable named PID catalog, bottle-owned capacity, per-instance assemblies and compatible filling/capping are installed. Set **Maximum Portions** in `/Game/Props/Products/DA_Bottle_Plastic`; old flavor assets are initial-stock presets. **72/72 native checks pass**, both real save copies and local-IP host/client/late join pass, and Editor/Development game builds pass. Six existing warning-bearing tests remain; rendered/manual and new packaged acceptance are pending. See [the implementation and checkpoint](Modular_Product_Databases_Implementation_2026-11-15.md) and [the approved specification](Modular_Product_Databases_2026-11-15.md). Historical status entries below are retained.
+
+> Dedicated prototype menu update (15 November 2026): native C++ login, host/join, ready/start, Epic friends/invites, offline solo and Escape session controls installed. Launch `Play_ColossalFizzCo.cmd` from the project root. Game67/67 (same six warning tests), plugin5/5 and installed menu1/1 pass; real two-account menu run passed 30 host/26 client assertions. The older packaged14120 build is unchanged. See [menu implementation and usage](Prototype_Menu_Implementation_2026-11-15.md).
+
 # Midnight Fizz: Giant Thirst — Game Design Documentation (GDD)
+
+**Current build — 14 November 2026: native14120 / Game78.** Saved cap mounts, resting bottle restoration and held-motion pressure sampling are repaired. Native66/66, packaged restored lifecycle14/14 and late join13/13 pass. Three-sale gameplay completed; its older harness exit-budget limitation is recorded in [the bottle lifecycle report](Bottle_Lifecycle_Repair_2026-11-14.md). Use Saved/Builds/NormalColaPrototype_14120/Windows/ColossalFizzCo.exe. Older build numbers below are historical.
+
+
+**Previous bottle prototype checkpoint 14 November 2026:** Read [the saved progress and questions document](Bottle_Prototype_Progress_and_Questions_2026-11-14.docx) for the installed build, verified tests and remaining acceptance work. The current repair uses artist-aligned cap pivots, paired shell and liquid morphs, compact continuous pressure updates and Rocket Projectile Component flight. Keep the dated entries below as historical evidence.
 
 **Bottle and checkout update — 12–13 November 2026:** [Implementation/checkpoint](Bottle_Systems_Update_2026-11-12.md),
 Editor **11208**, **61/62 native tests passing**, 24/24 cold asset checks passing.

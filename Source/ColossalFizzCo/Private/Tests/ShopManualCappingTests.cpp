@@ -28,12 +28,12 @@ bool FShopManualCappingTest::RunTest(const FString& Parameters)
 	auto* Manager=World->SpawnActor<APropManager>(); Manager->bEnableAutosave=false; Manager->InitializePropManager();
 	const auto* Template=LoadObject<UInteractablePropDataAsset>(nullptr,TEXT("/Game/Assest/DataAssets/DA_EmptyBottel.DA_EmptyBottel"));
 	if (!TestNotNull(TEXT("Actual bottle source mesh exists"),Template)) return false;
-	auto* BottleProduct=DuplicateObject<UInteractablePropDataAsset>(Template,Manager);
-	BottleProduct->BottleMaterialType=EBottleMaterialType::Plastic; BottleProduct->DefaultContentID=901; BottleProduct->DefaultContentLevel=1;
+	auto* BottleProduct=DuplicateObject<UInteractablePropDataAsset>(Template,Manager,TEXT("ManualCapBottleFixture"));
+	BottleProduct->BottleMaterialType=EBottleMaterialType::Plastic; BottleProduct->DefaultContentID=7901; BottleProduct->DefaultContentLevel=1;
 	BottleProduct->NumOfPortions=4; BottleProduct->DefaultCapSealed=0; BottleProduct->SupportedCapMask=1; BottleProduct->bHasExpiry=false;
 	BottleProduct->CustomActiveActorClass=AColaPropActor::StaticClass(); BottleProduct->FragmentAssembly=nullptr; BottleProduct->FractureFragments.Reset();
-	FPropContentDefinition Content; Content.ContentID=901; Content.ExpiryProfile.bHasExpiry=false; Manager->RegisterContentDefinition(Content);
-	auto* CapProduct=DuplicateObject<UInteractablePropDataAsset>(Template,Manager);
+	FPropContentDefinition Content; Content.ContentID=7901; Content.ExpiryProfile.bHasExpiry=false; Manager->RegisterContentDefinition(Content);
+	auto* CapProduct=DuplicateObject<UInteractablePropDataAsset>(Template,Manager,TEXT("ManualCapCapFixture"));
 	CapProduct->bIsBottleCap=true; CapProduct->NumOfPortions=0; CapProduct->DefaultContentID=0; CapProduct->DefaultContentLevel=0;
 	CapProduct->DefaultCapType=EBottleCapType::Twist; CapProduct->CustomActiveActorClass=AActivePropActor::StaticClass();
 	auto* Actor=World->SpawnActor<AActor>(); auto* Root=NewObject<USceneComponent>(Actor); Actor->SetRootComponent(Root); Root->RegisterComponent();
@@ -104,6 +104,23 @@ bool FShopManualCappingTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Auto-claim cannot let the holder rotate too"),Holding->ExecuteProductionAction(Station,Station->View.SessionID,EShopProductionAction::TurnCap,Fresh,0,++HoldSequence),EShopCheckoutResult::OperationConflict);
 	TestEqual(TEXT("Proper initial hold avoids mandatory role-selection leakage"),Manager->FindUniqueData(Fresh)->EventData.ContentLevel,1.f);
 	TestEqual(TEXT("Teammate R independently claims rotation and turns"),TurnFresh(),EShopCheckoutResult::Success);
+	const float PartialSeal=Manager->FindUniqueData(Fresh)->EventData.CapSealed;
+	TestTrue(TEXT("First wheel turn persists an incomplete seal on the bottle"),PartialSeal>0 && PartialSeal<1);
+	TestEqual(TEXT("Station rotation mirrors canonical cap progress"),Station->View.RotationProgress,PartialSeal);
+	TestEqual(TEXT("Holder can leave mid-closure"),Holding->ExecuteProductionAction(Station,Station->View.SessionID,EShopProductionAction::LeaveCapRole,Fresh,0,++HoldSequence),EShopCheckoutResult::Success);
+	TestEqual(TEXT("Rotator can leave mid-closure"),Rotating->ExecuteProductionAction(Station,Station->View.SessionID,EShopProductionAction::LeaveCapRole,Fresh,0,++TurnSequence),EShopCheckoutResult::Success);
+	Manager->InitializeInstanceTransform(Fresh,FTransform(FVector(2000,0,200)));
+	Station->RefreshInputs();
+	TestEqual(TEXT("Removing unfinished assembly releases station"),Station->View.ManualBottleISID,0);
+	// Open liquid needs its existing active simulation. A blocked pool return must
+	// preserve both the partial closure and the actual contents.
+	TestFalse(TEXT("Unfinished open assembly retains active simulation"),Manager->ConvertASMToISM(Fresh,EPropState::AtRest,true,true));
+	TestEqual(TEXT("Blocked pool return retains incomplete wheel rotation"),Manager->FindUniqueData(Fresh)->EventData.CapSealed,PartialSeal);
+	TestEqual(TEXT("Interrupted assembly retains all liquid"),Manager->FindUniqueData(Fresh)->EventData.ContentLevel,1.f);
+	Manager->InitializeInstanceTransform(Fresh,FTransform(FVector(10,0,200)));
+	TestEqual(TEXT("Returning active assembly retains incomplete wheel rotation"),Manager->GetActiveActorFromISID(Fresh)->GetCapSealed(),PartialSeal);
+	TestEqual(TEXT("Holder resumes interrupted assembly"),PressFresh(),EShopCheckoutResult::Success);
+	TestEqual(TEXT("Resumed station restores previous turns"),Station->View.RotationProgress,PartialSeal);
 	for (int32 Step=0;Step<12 && Manager->FindUniqueData(Fresh)->EventData.CapSealed<1;++Step)
 	{
 		World->Tick(LEVELTICK_All,.12f);

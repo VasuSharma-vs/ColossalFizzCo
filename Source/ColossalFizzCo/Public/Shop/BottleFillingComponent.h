@@ -26,6 +26,13 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Filling") void StopFilling();
 
 private:
+public:
+	/** Server-only dead-man lease. Release RPC stops immediately; timeout handles lost focus/disconnect. */
+	bool bRequireLever=false;
+	TWeakObjectPtr<AActor> LeverOperator;
+	double LeverExpiresAt=0;
+	float PressurePerContentLevel=0;
+private:
 	FGuid SessionID;
 	float AccumulatedSeconds = 0;
 	TWeakObjectPtr<class APropManager> Manager;

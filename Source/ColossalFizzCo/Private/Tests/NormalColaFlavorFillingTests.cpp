@@ -39,7 +39,7 @@ bool FNormalColaFlavorFillingTest::RunTest(const FString& Parameters)
 		const int32 Source=Manager->GenerateProductInstance(Manager->RegisterProductFromDataAsset(SourceAsset),FTransform(Origin+FVector(0,100,0)));
 		const int32 Bottle=Manager->GenerateProductInstance(Manager->RegisterProductFromDataAsset(Empty),FTransform(Origin));
 		if (!TestTrue(TEXT("Real source and bottle identities created"),Source>0 && Bottle>0)) return false;
-		const auto History=Manager->FindUniqueData(Bottle)->EventData;
+		const auto History=Manager->FindUniqueData(Bottle)->EventData; const int32 BottlePID=Manager->FindISIDData(Bottle)->ProductID;
 		auto* Equipment=World->SpawnActor<AActor>();
 		auto* Root=NewObject<USceneComponent>(Equipment); Equipment->SetRootComponent(Root); Root->RegisterComponent(); Equipment->SetActorLocation(Origin);
 		auto* Filler=NewObject<UBottleFillingComponent>(Equipment); Equipment->AddInstanceComponent(Filler);
@@ -55,7 +55,7 @@ bool FNormalColaFlavorFillingTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Flavor conversion preserves bottle strength"),Data->EventData.Strength,History.Strength);
 		TestEqual(TEXT("Flavor conversion preserves bottle physical age"),Data->EventData.CreationTime,History.CreationTime);
 		const auto* Record=Manager->FindISIDData(Bottle); const auto* Product=Record ? Manager->FindProductDefinition(Record->ProductID) : nullptr;
-		TestTrue(TEXT("Filled representation selects authored flavor product"),Product && Product->SourceDataAsset==Finished);
+		TestTrue(TEXT("Filling preserves the physical bottle PID and maximum capacity"),Product && Record->ProductID==BottlePID && Product->ConsumableProfile.NumOfPortions==Empty->NumOfPortions);
 		FilledContents.Add(Data->EventData.ContentID); ++Tested;
 	}
 	TestEqual(TEXT("All five Normal bulk recipes are exercised"),Tested,5);

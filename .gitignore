@@ -26,3 +26,9 @@ Thumbs.db
 Saved/Autosaves/*
 Saved/Crashes/*
 Saved/Logs/*
+
+/Config/Custom/Epic/DefaultEngine.ini
+
+/Config/Custom/EpicPrototype/
+
+/Config/Custom/PrototypeOffline/

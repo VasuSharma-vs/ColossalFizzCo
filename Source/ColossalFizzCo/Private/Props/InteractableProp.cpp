@@ -14,6 +14,7 @@
 #include "Net/UnrealNetwork.h"
 #include "Engine/World.h"
 #include "Components/ASMComponent.h"
+#include "Components/RocketProjectileComponent.h"
 
 AActivePropActor::AActivePropActor()
 {
@@ -326,11 +327,12 @@ void AActivePropActor::ApplyProductDefinition(const FPropProductDefinition& InPr
 	}
 
 	const UInteractablePropDataAsset* SourceAsset = InProductDef.SourceDataAsset ? InProductDef.SourceDataAsset.Get() : PropDataAsset.Get();
-	const TArray<TObjectPtr<UMaterialInterface>>& SourceOverrides = (SourceAsset && SourceAsset->MaterialOverrides.Num() > 0)
+	const bool Modular = InProductDef.LiquidVisualPID || InProductDef.bLiquidVisualOnly || (InProductDef.bIsBottleCap && !InProductDef.SupportedBottleMaterials.IsEmpty());
+	const TArray<TObjectPtr<UMaterialInterface>>& SourceOverrides = (!Modular && SourceAsset && SourceAsset->MaterialOverrides.Num() > 0)
 		? SourceAsset->MaterialOverrides
 		: InProductDef.MaterialOverrides;
 
-	USkeletalMesh* TargetSkelMesh = InProductDef.SkeletalMesh ? InProductDef.SkeletalMesh.Get() : (SourceAsset ? SourceAsset->SkeletalMesh.Get() : nullptr);
+	USkeletalMesh* TargetSkelMesh = InProductDef.SkeletalMesh ? InProductDef.SkeletalMesh.Get() : (!Modular && SourceAsset ? SourceAsset->SkeletalMesh.Get() : nullptr);
 	UStaticMesh* TargetStaticMesh = InProductDef.StaticMesh ? InProductDef.StaticMesh.Get() : (SourceAsset ? SourceAsset->StaticMesh.Get() : nullptr);
 
 	// Select Skeletal Mesh if present, otherwise fall back to Static Mesh
@@ -538,6 +540,7 @@ bool AActivePropActor::ChangeProductFromDataAsset(UInteractablePropDataAsset* Ne
 
 void AActivePropActor::InitializeFromISIDRecord(const FISIDRuntimeIndex& Record, const FPropProductDefinition* ProductDef, const FPropContentDefinition* ContentDef, const FPropInstanceUniqueData* UniqueData, APropManager* InManager)
 {
+	const bool NewBinding = ISID != Record.ISID || ProductID != Record.ProductID;
 	PropManagerReference = InManager;
 	if (!UniqueData && InManager) UniqueData = InManager->FindUniqueData(Record.ISID);
 	if (!ContentDef && UniqueData && InManager) ContentDef = InManager->FindContentDefinition(UniqueData->EventData.ContentID);
@@ -587,7 +590,7 @@ void AActivePropActor::InitializeFromISIDRecord(const FISIDRuntimeIndex& Record,
 
 	UpdateDebugBillboard();
 
-	ResetForInstanceBinding();
+	if (NewBinding) ResetForInstanceBinding();
 	bHasValidUniqueData = UniqueData != nullptr;
 	if (UniqueData) { LocalUniqueData = *UniqueData; OnApplyEventData(UniqueData->EventData); OnApplyContinuousData(UniqueData->ContinuousData); }
 	OnApplySharedDefinitions(ProductDef, ContentDef);
@@ -900,7 +903,9 @@ void AActivePropActor::DeactivateToPoolState(const FTransform& ResetTransform)
 
 void AActivePropActor::ApplyAuthoritativePhysicsSync(const FActivePropPhysicsSync& SyncData)
 {
-	if (!PropMesh || bIsInterpolatingToRest) return;
+	if (!PropMesh || bIsInterpolatingToRest || IsSeatedInFiller()) return;
+	if (const auto* Rocket = FindComponentByClass<URocketProjectileComponent>();
+		Rocket && Rocket->IsPoweredFlight() && !Rocket->GetReplicatedFlightState().bPressurePhysicsFlight) return;
 
 	// Keep authoritative state in sync
 	if (State != SyncData.State)
@@ -1374,6 +1379,7 @@ void AActivePropActor::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 
 	DOREPLIFETIME(AActivePropActor, ASMID);
 	DOREPLIFETIME(AActivePropActor, ISID);
+	DOREPLIFETIME(AActivePropActor, FillerSeatISID);
 	DOREPLIFETIME(AActivePropActor, ProductID);
 	DOREPLIFETIME(AActivePropActor, State);
 	DOREPLIFETIME(AActivePropActor, Version);
@@ -1400,6 +1406,7 @@ void AActivePropActor::OnRep_ASMID()
 
 void AActivePropActor::OnRep_ISID()
 {
+	OnRep_FillerSeat();
 	if (!PropManagerReference)
 	{
 		PropManagerReference = APropManager::Get(this);
@@ -1720,11 +1727,7 @@ void AActivePropActor::OnRep_IsActive()
 		(SkeletalMeshComponent && (!SkeletalMeshComponent->GetSkeletalMeshAsset() || SkeletalMeshComponent->GetMaterial(0) == nullptr));
 	if (bNeedsMeshOrMat)
 	{
-		if (PropDataAsset)
-		{
-			ApplyDataAsset(PropDataAsset);
-		}
-		else if (PropManagerReference && ProductID > 0)
+		if (PropManagerReference && ProductID > 0)
 		{
 			if (const FPropProductDefinition* Def = PropManagerReference->ProductDefinitions.Find(ProductID))
 			{
@@ -2134,6 +2137,7 @@ bool AActivePropActor::MoveHeldToLocation(FVector Location)
 bool AActivePropActor::OnPlayerGrab_Implementation(USceneComponent* AttachToParent, FName SocketName)
 {
 	if (!AttachToParent) return false;
+	if (const auto* Flight=FindComponentByClass<URocketProjectileComponent>()) if (Flight->IsPoweredFlight()) return false;
 
 	State = EPropState::Held;
 	bIsHeld = true;
@@ -2142,6 +2146,8 @@ bool AActivePropActor::OnPlayerGrab_Implementation(USceneComponent* AttachToPare
 	PackedRuntimeData.bIsGrabbable = false;
 	InteractionState = EPropInteractionLockState::Held;
 	InteractionOwner = AttachToParent->GetOwner();
+	for (AActor* Ancestor=InteractionOwner.Get(); IsValid(Ancestor); Ancestor=Ancestor->GetAttachParentActor())
+		if (Cast<APawn>(Ancestor)) { InteractionOwner=Ancestor; break; }
 	RuntimeData.CurrentInteractor = InteractionOwner;
 	RuntimeData.InteractionOwner = InteractionOwner;
 	RuntimeData.InteractionState = EPropInteractionLockState::Held;

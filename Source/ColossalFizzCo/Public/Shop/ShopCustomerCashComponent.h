@@ -27,8 +27,10 @@ public:
 	bool ResetVisit();
 	bool FindCompletedVisitReceipt(FCompletedCheckoutReceipt& Out) const;
 	UShopScannerComponent* GetStation() const { return Station.Get(); }
+	const TMap<FIntPoint,int32>& GetPlannedContents() const { return PlannedContents; }
 private:
 	TMap<int32, int32> PlannedQuantities;
+ TMap<FIntPoint,int32> PlannedContents;
 	TWeakObjectPtr<UShopScannerComponent> Station;
 	struct FVisitPayment { TArray<int32> Coins; int64 AmountCents=0; };
 	TMap<FGuid, FVisitPayment> IssuedPayments;

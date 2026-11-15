@@ -1,8 +1,12 @@
 #include "Props/ColaPropActor.h"
+#include "Shop/ShopProductionStationComponent.h"
+#include "Props/PropAssemblyMesh.h"
 #include "Components/RocketProjectileComponent.h"
 #include "Components/StaticMeshPhysicsSimulationComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
+#include "Shop/ShopProductionStationComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Net/UnrealNetwork.h"
 #include "Kismet/GameplayStatics.h"
@@ -30,6 +34,8 @@ AColaPropActor::AColaPropActor()
 
 void AColaPropActor::OnApplySharedDefinitions(const FPropProductDefinition* ProductDef, const FPropContentDefinition* ContentDef)
 {
+	if (PropMesh) PropMesh->SetCanEverAffectNavigation(false);
+	if (SkeletalMeshComponent) SkeletalMeshComponent->SetCanEverAffectNavigation(false);
 	if (ProductDef)
 	{
 		BottleMass=FMath::IsFinite(ProductDef->BottleMass) ? FMath::Max(.001f,ProductDef->BottleMass) : FMath::Max(.001f,DefaultBottleMassKg);
@@ -37,19 +43,27 @@ void AColaPropActor::OnApplySharedDefinitions(const FPropProductDefinition* Prod
 		ContentDensityGPerMl=ContentDef && FMath::IsFinite(ContentDef->DensityGPerMl) ? FMath::Max(.001f,ContentDef->DensityGPerMl) : 1.04f;
 		FPropProductDefinition BottleDefinition = *ProductDef;
 		ContentMass=GetContentID()>0 ? FMath::Max(0.f,GetContentLevel())*ProductDef->ConsumableProfile.NumOfPortions*PortionVolumeMl*ContentDensityGPerMl/1000.f : 0;
-		BottleDefinition.GameplayMassKg = BottleMass+ContentMass;
+		BottleDefinition.GameplayMassKg = BottleMass+ContentMass+GetInstalledCapMass();
 		Super::OnApplySharedDefinitions(&BottleDefinition, ContentDef);
 	}
 	else Super::OnApplySharedDefinitions(ProductDef, ContentDef);
-	if (ContentDef && ContentDef->LiquidMaterial && PropMesh && (!SkeletalMeshComponent || !SkeletalMeshComponent->GetSkeletalMeshAsset()))
+	if ((!ProductDef || !ProductDef->LiquidVisualPID) && ContentDef && ContentDef->LiquidMaterial && PropMesh && PropMesh->GetStaticMesh()
+		&& PropMesh->GetStaticMesh()->GetStaticMaterials().IsValidIndex(1) && (!SkeletalMeshComponent || !SkeletalMeshComponent->GetSkeletalMeshAsset()))
 		PropMesh->SetMaterial(1,ContentDef->LiquidMaterial);
+}
+
+float AColaPropActor::GetInstalledCapMass() const
+{
+	const auto* Record = PropManagerReference ? PropManagerReference->FindISIDData(LocalUniqueData.EventData.AttachedCapISID) : nullptr;
+	const auto* Def = Record ? PropManagerReference->FindProductDefinition(Record->ProductID) : nullptr;
+	return Def && Def->bIsBottleCap ? FMath::Max(0.f,Def->GameplayMassKg) : 0.f;
 }
 
 void AColaPropActor::UpdateBottleMass()
 {
 	if (const auto* Content=ResolveContentDefinition()) ContentDensityGPerMl=Content->DensityGPerMl;
 	ContentMass=GetContentID()>0 ? FMath::Max(0.f,GetContentLevel())*GetNumPortions()*PortionVolumeMl*ContentDensityGPerMl/1000.f : 0;
-	const float Total=FMath::Max(.001f,BottleMass+ContentMass);
+	const float Total=FMath::Max(.001f,BottleMass+ContentMass+GetInstalledCapMass());
 	// Update the existing body, without recreating it or adding an impulse. Chaos
 	// retains its linear/angular velocity; peers derive the same mass from content.
 	if (PropMesh && !FMath::IsNearlyEqual(PropMesh->BodyInstance.GetMassOverride(),Total,.000001f))
@@ -67,7 +81,7 @@ void AColaPropActor::ApplyUnsettlingImpulse(const FVector& Impulse)
 FVector AColaPropActor::NormalizePhysicalContactImpulse(const FVector& Impulse) const
 {
 	const float Mass = PropMesh ? PropMesh->BodyInstance.GetBodyMass() : ImpactReferenceMassKg;
-	return Impulse * (FMath::Max(.1f, ImpactReferenceMassKg) / FMath::Max(.1f, Mass));
+	return Impulse * (FMath::Max(.001f, ImpactReferenceMassKg) / FMath::Max(.001f, Mass));
 }
 
 void AColaPropActor::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -191,7 +205,10 @@ void AColaPropActor::Tick(float DeltaSeconds)
 
 	// Check if the bottle is held but still interpolating towards the player's hand (not yet attached)
 	const bool bIsAttachedToParent = (GetAttachParentActor() != nullptr || (GetRootComponent() && GetRootComponent()->GetAttachParent() != nullptr));
-	const bool bIsHeldInTransit = (bIsHeld || State == EPropState::Held) && !bIsAttachedToParent;
+	// A Blueprint/kinematic holder need not attach the root to its hand. Suppress
+	// pickup travel for the finite grace period, not every subsequent held frame.
+	const bool bIsHeldInTransit = (bIsHeld || State == EPropState::Held) && !bIsAttachedToParent
+		&& (bIsFirstActiveFrame || WarmupFramesRemaining>0 || HeldGracePeriod>0);
 	if (bIsHeldInTransit || bIsInterpolatingToRest) LiquidMotion.bHasHistory=false;
 	else AdvanceLiquidVisuals(DeltaSeconds, MeshComp ? MeshComp->GetComponentTransform() : GetActorTransform());
 
@@ -217,6 +234,7 @@ void AColaPropActor::Tick(float DeltaSeconds)
 		AngularVelocity = FVector::ZeroVector;
 		PrevGForce = 0.0f;
 
+		bHasAgitationHistory = false;
 		UpdateMorphTargets();
 		UpdateDynamicMaterial(false);
 		return;
@@ -256,7 +274,8 @@ void AColaPropActor::Tick(float DeltaSeconds)
 		// Server authoritative foam & agitation updates
 		if (HasAuthority())
 		{
-			UpdateFoamPressure(DeltaSeconds);
+			if (UsesPlasticPressure()) UpdateMotionPressure(DeltaSeconds);
+			else UpdateFoamPressure(DeltaSeconds);
 		}
 
 		// Update dynamic material parameters safely
@@ -476,8 +495,8 @@ void AColaPropActor::AddCap(int32 InProductID)
 	if (AttachTarget && CapMeshComponent)
 	{
 		CapMeshComponent->AttachToComponent(AttachTarget, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-		CapMeshComponent->SetRelativeLocation(FVector(0.0f, 0.0f, 170.0f));
-		CapMeshComponent->SetRelativeRotation(FRotator::ZeroRotator);
+		const auto* Definition=ResolveProductDefinition();
+		CapMeshComponent->SetRelativeTransform(Definition ? Definition->CapAttachmentTransform : FTransform::Identity);
 		CapMeshComponent->SetSimulatePhysics(false);
 		CapMeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		CapMeshComponent->SetVisibility(true);
@@ -541,17 +560,29 @@ float AColaPropActor::CalculateSalePayout(float TargetFill) const
 void AColaPropActor::UpdateDynamicMaterial(bool bUpdateVelocity)
 {
 	USkeletalMeshComponent* SkelComp = SkeletalMeshComponent;
+	EnforceModularVisuals();
 	UMeshComponent* LiquidMesh=SkelComp && SkelComp->GetSkeletalMeshAsset() ? static_cast<UMeshComponent*>(SkelComp) : static_cast<UMeshComponent*>(PropMesh.Get());
-	if (LiquidMesh && LiquidMesh->GetNumMaterials() > 1)
+	int32 Slot = 1;
+	if (IsValid(AssemblyLiquidMesh))
 	{
-		UMaterialInterface* CurrentMat = LiquidMesh->GetMaterial(1);
-		if (!DynamicMaterialInstance || LiquidMesh->GetMaterial(1) != DynamicMaterialInstance)
+		LiquidMesh = AssemblyLiquidSkeletalMesh ? static_cast<UMeshComponent*>(AssemblyLiquidSkeletalMesh.Get()) : static_cast<UMeshComponent*>(AssemblyLiquidMesh.Get());
+		Slot = 0;
+	}
+	if (!IsValid(AssemblyLiquidMesh))
+	{
+		if (const auto* Def = ResolveProductDefinition(); Def && Def->LiquidVisualPID) return;
+	}
+	if (LiquidMesh && LiquidMesh->GetNumMaterials() > Slot)
+	{
+		UMaterialInterface* CurrentMat = LiquidMesh->GetMaterial(Slot);
+		if (!DynamicMaterialInstance || LiquidMesh->GetMaterial(Slot) != DynamicMaterialInstance)
 		{
 			if (CurrentMat)
 			{
-				DynamicMaterialInstance = LiquidMesh->CreateDynamicMaterialInstance(1, CurrentMat);
+				DynamicMaterialInstance = LiquidMesh->CreateDynamicMaterialInstance(Slot, CurrentMat);
 				if (DynamicMaterialInstance)
 				{
+					if (IsValid(AssemblyLiquidMesh)) UPropAssemblyMesh::ConfigureLiquidBounds(AssemblyLiquidMesh->GetStaticMesh(),DynamicMaterialInstance);
 					DynamicMaterialInstance->GetScalarParameterValue(FMaterialParameterInfo(TEXT("Liquid Container Height")),LiquidHeightCm);
 					DynamicMaterialInstance->GetScalarParameterValue(FMaterialParameterInfo(TEXT("Liquid Container Radius")),LiquidRadiusCm);
 					float SloshStrength=.01f;
@@ -610,7 +641,9 @@ void AColaPropActor::UpdateMorphTargets()
 	// Resting carbonation should not keep every stocked bottle in an active ASM.
 	// Expansion measures actual pressure above its normal baseline toward tolerance.
 	const float RestPressure=FMath::Max(0.f,GetBottlePressure()-LocalUniqueData.ContinuousData.SealedPressure);
-	const float Ratio=UsesPlasticPressure() ? LocalUniqueData.ContinuousData.SealedPressure/FMath::Max(UE_SMALL_NUMBER,GetBottlePressureTolerance()-RestPressure) : 0;
+	const bool RetainsPressure=GetCapSealed()>=1 || HasTemporaryManufacturingSeal() || PressureReleaseEpisode.IsValid()
+		|| (CapHoldingStation.IsValid() && CapHoldingStation->HasSufficientCapHold(ISID));
+	const float Ratio=UsesPlasticPressure() && RetainsPressure ? LocalUniqueData.ContinuousData.SealedPressure/FMath::Max(UE_SMALL_NUMBER,GetBottlePressureTolerance()-RestPressure) : 0;
 	const float Expansion=FMath::SmoothStep(.15f,1.f,Ratio)*FMath::Clamp(PressureMorphScale,0.f,1.f);
 	const float Step=GetWorld() ? FMath::Clamp(GetWorld()->GetDeltaSeconds(),0.f,.1f) : 0;
 	SmoothedPressureExpansion=bMorphInitialized ? FMath::FInterpTo(SmoothedPressureExpansion,Expansion,Step,PressureMorphInterpolationSpeed) : Expansion;
@@ -618,25 +651,11 @@ void AColaPropActor::UpdateMorphTargets()
 	const float TargetEmpty = FMath::Clamp(1.0f - TotalVolume, 0.0f, 1.0f);
 	const float TargetOverfull = FMath::Max(FMath::Clamp(TotalVolume-1.f,0.f,1.f),SmoothedPressureExpansion);
 
-	if (!bMorphInitialized)
-	{
-		// Hard-snap to target during warmup so there is no residual shape from the pool
-		SkeletalMeshComponent->SetMorphTarget(FName(TEXT("EmptyLevel")), TargetEmpty);
-		SkeletalMeshComponent->SetMorphTarget(FName(TEXT("OverfullLevel")), TargetOverfull);
-		bMorphInitialized=true;
-	}
-	else
-	{
-		// Smoothly interpolate during active gameplay to eliminate any sudden jucking/popping
-		const float DeltaTime = GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.016f;
-		const float CurEmpty = SkeletalMeshComponent->GetMorphTarget(FName(TEXT("EmptyLevel")));
-		const float CurOverfull = SkeletalMeshComponent->GetMorphTarget(FName(TEXT("OverfullLevel")));
-		const float NewEmpty = FMath::FInterpTo(CurEmpty, TargetEmpty, DeltaTime, 12.0f);
-		const float NewOverfull = FMath::FInterpTo(CurOverfull, TargetOverfull, DeltaTime, 12.0f);
-
-		SkeletalMeshComponent->SetMorphTarget(FName(TEXT("EmptyLevel")), NewEmpty);
-		SkeletalMeshComponent->SetMorphTarget(FName(TEXT("OverfullLevel")), NewOverfull);
-	}
+	SkeletalMeshComponent->SetMorphTarget(FName(TEXT("OverfullLevel")), TargetOverfull);
+	if (AssemblyLiquidSkeletalMesh)
+		AssemblyLiquidSkeletalMesh->SetMorphTarget(FName(TEXT("OverfullLevel")), TargetOverfull);
+	if (!AssemblyLiquidMesh) SkeletalMeshComponent->SetMorphTarget(FName(TEXT("EmptyLevel")),TargetEmpty);
+	bMorphInitialized = true;
 }
 
 void AColaPropActor::HandleOnBecomeActive(AActivePropActor* Actor, int32 InISID, int32 InProductID, FTransform ActiveTransform)
@@ -715,19 +734,32 @@ void AColaPropActor::HandleOnBeforeReturnToRest(AActivePropActor* Actor, int32 I
 
 void AColaPropActor::HandleBottleComponentHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
-	if (!bIsActive || bIsFirstActiveFrame || WarmupFramesRemaining > 0 || HeldGracePeriod > 0.0f)
+	if (!bIsActive || bIsFirstActiveFrame || (bIsHeld && (WarmupFramesRemaining > 0 || HeldGracePeriod > 0.0f)))
 	{
 		return;
+	}
+	if (IsSeatedInFiller() && OtherActor)
+	{
+		const auto* Station = OtherActor->FindComponentByClass<UShopProductionStationComponent>();
+		if (Station && Station->View.SeatedBottleISID == ISID) return;
 	}
 	// Attached-body contacts with its own carrier are transport artifacts, not external damage.
 	// Genuine promotion impacts use ApplyInitialImpactFromPromotion and intentionally bypass warmup.
 	AActor* Carrier = InteractionOwner.Get();
 	if (bIsHeld && IsValid(Carrier) && IsValid(OtherActor)
 		&& (OtherActor == Carrier || OtherActor->IsAttachedTo(Carrier) || Carrier->IsAttachedTo(OtherActor))) return;
-	if (HasAuthority() && bDebugBottleImpacts && NormalImpulse.Size()>DropImpactThreshold)
-		UE_LOG(LogTemp,Display,TEXT("BOTTLE_IMPACT_TRACE id=%d other=%s component=%s impulse=%.3f mass=%.3f held=%d"),
-			ISID,*GetNameSafe(OtherActor),*GetNameSafe(OtherComp),NormalImpulse.Size(),PropMesh ? PropMesh->BodyInstance.GetBodyMass() : 0.f,bIsHeld ? 1 : 0);
-	const FVector CalibratedImpulse = NormalizePhysicalContactImpulse(NormalImpulse);
+	FVector ContactMomentum = NormalImpulse;
+	if (ContactMomentum.IsNearlyZero() && PropMesh && OtherComp)
+	{
+		const FVector RelativeVelocity = LinearVelocity - OtherComp->GetComponentVelocity();
+		const double ClosingSpeed = FMath::Max(0.,-FVector::DotProduct(RelativeVelocity,Hit.ImpactNormal));
+		ContactMomentum = -Hit.ImpactNormal * ClosingSpeed * PropMesh->BodyInstance.GetBodyMass();
+	}
+	const FVector CalibratedImpulse = NormalizePhysicalContactImpulse(ContactMomentum);
+	if (HasAuthority() && bDebugBottleImpacts && CalibratedImpulse.Size()>ImpactAgitationSpeedThreshold)
+		UE_LOG(LogTemp,Display,TEXT("BOTTLE_IMPACT_TRACE id=%d other=%s component=%s raw=%.3f calibrated=%.3f mass=%.4f held=%d sampled=%s physics=%s"),
+			ISID,*GetNameSafe(OtherActor),*GetNameSafe(OtherComp),NormalImpulse.Size(),CalibratedImpulse.Size(),
+			PropMesh ? PropMesh->BodyInstance.GetBodyMass() : 0.f,bIsHeld,*LinearVelocity.ToString(),PropMesh ? *PropMesh->GetPhysicsLinearVelocity().ToString() : TEXT("none"));
 	if (HasAuthority()) ApplyBottleImpact(CalibratedImpulse, 0);
 	if (UsesPlasticPressure()) return;
 
@@ -755,6 +787,16 @@ void AColaPropActor::HandleRocketHitTarget(AActor* HitActor, const FHitResult& H
 
 void AColaPropActor::HandleRocketFuelDepleted()
 {
+	if (HasAuthority() && PressureReleaseEpisode.IsValid() && PropManagerReference)
+	{
+		const double Remaining = double(GetContentLevel()) * GetNumPortions();
+		if (Remaining > 0) PropManagerReference->ReleaseBottleLiquidPortions(ISID,Remaining,PressureReleaseEpisode);
+		PropManagerReference->SetBottleAgitationPressure(ISID,0);
+		UpdateBottleMass();
+		UpdateDynamicMaterial(false);
+	}
+	if (HasAuthority() && bUseOriginalRocketFlight && RocketComp && !RocketComp->GetReplicatedFlightState().bPhysicsSimulating)
+		RocketComp->FinishPressureThrust();
 	if (PhysicsSimComponent)
 	{
 		PhysicsSimComponent->RetriggerUnsettledTimer(1.0f);
@@ -763,11 +805,22 @@ void AColaPropActor::HandleRocketFuelDepleted()
 
 void AColaPropActor::HandleRocketSettled()
 {
+	if (RocketComp) RocketComp->IgnoreEjectedCap(nullptr);
 	SetInMotion(false);
 	if (PhysicsSimComponent) PhysicsSimComponent->SetStateUnsettled(0.1f);
 	if (PropMesh && bIsActive && PropMesh->IsSimulatingPhysics())
 	{
 		const auto* Def=ResolveProductDefinition();
 		PropMesh->SetEnableGravity(!Def || Def->PhysicsProfile.bEnableGravity);
+	}
+}
+
+void AColaPropActor::EnforceModularVisuals()
+{
+	if (PropMesh) PropMesh->SetVisibility(!SkeletalMeshComponent || !SkeletalMeshComponent->GetSkeletalMeshAsset(),false);
+	if (AssemblyLiquidSkeletalMesh && AssemblyLiquidMesh)
+	{
+		AssemblyLiquidMesh->SetVisibility(false,false);
+		AssemblyLiquidSkeletalMesh->SetVisibility(bIsActive);
 	}
 }

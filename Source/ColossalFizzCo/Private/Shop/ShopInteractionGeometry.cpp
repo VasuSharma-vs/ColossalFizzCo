@@ -4,6 +4,14 @@
 #include "Engine/StaticMesh.h"
 #include "Components/SceneComponent.h"
 
+FTransform ShopInteractionGeometry::CarryContainerTransform(const ACharacter* Carrier,const FBoxSphereBounds& WorldBounds,const FVector& ContainerScale)
+{
+	if (!IsValid(Carrier)) return FTransform::Identity;
+	const auto* Capsule=Carrier->GetCapsuleComponent();
+	const FVector Offset=FVector(Capsule->GetScaledCapsuleRadius()+WorldBounds.BoxExtent.X+25,0,-Capsule->GetScaledCapsuleHalfHeight()*.1f)-WorldBounds.Origin;
+	return FTransform(Carrier->GetActorQuat(),Carrier->GetActorLocation()+Carrier->GetActorQuat().RotateVector(Offset),ContainerScale);
+}
+
 double ShopInteractionGeometry::DistanceToStation(const AActor* Station,const FVector& Point)
 {
 	if (!IsValid(Station) || Point.ContainsNaN()) return TNumericLimits<double>::Max();

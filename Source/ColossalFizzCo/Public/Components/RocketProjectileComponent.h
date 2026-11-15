@@ -893,6 +893,8 @@ public:
 	void RestoreReplicatedFlightState(const FRocketFlightNetState& Received);
 	void ReapplyReplicatedFlightState();
 
+	/** Keep the launching prop from immediately hitting its ejected closure. */
+	void IgnoreEjectedCap(class AActivePropActor* Cap);
 	bool StartPressurePhysicsFlight();
 	void ApplyPressureThrust(float Acceleration);
 	void FinishPressureThrust();
@@ -1166,6 +1168,9 @@ protected:
 	void InitializeSpentFalling();
 
 private:
+	TWeakObjectPtr<class AActivePropActor> EjectedCap;
+	int32 EjectedCapISID = 0;
+	void IgnoreLaunchDebris(FCollisionQueryParams& Query) const;
 	FRandomStream RandomStream;
 	FVector TipOverLaunchHeading = FVector::ForwardVector;
 	float TipOverElapsedTime = 0.0f;

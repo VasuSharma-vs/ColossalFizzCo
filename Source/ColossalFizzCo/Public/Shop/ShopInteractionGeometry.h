@@ -1,9 +1,12 @@
 #pragma once
 #include "CoreMinimal.h"
 class AActor;
+class ACharacter;
 class UStaticMesh;
 namespace ShopInteractionGeometry
 {
+	/** World pose for a container using measured world extents, independent of carrier scale. */
+	COLOSSALFIZZCO_API FTransform CarryContainerTransform(const ACharacter* Carrier,const FBoxSphereBounds& WorldBounds,const FVector& ContainerScale);
 	COLOSSALFIZZCO_API double DistanceToStation(const AActor* Station,const FVector& Point);
 	COLOSSALFIZZCO_API double CustomerDistanceToStation(const AActor* Customer,const AActor* Station);
 	/** Distance from a world point to a character's actual capsule; other actors use their origin. */

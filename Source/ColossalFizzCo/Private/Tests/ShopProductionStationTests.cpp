@@ -43,6 +43,7 @@ bool FShopProductionStationTest::RunTest(const FString& Parameters)
 	FShopSupplyOffer SourceOffer; SourceOffer.OfferID=TEXT("TestCylinder"); SourceOffer.Kind=EShopSupplyKind::ColaCylinder; SourceOffer.Product=Source;
 	Manager->ShopSupplies->Catalog.Get()->Offers.Add(SourceOffer);
 	FPropContentDefinition Content; Content.ContentID=901; Content.ExpiryProfile.bHasExpiry=false; Manager->RegisterContentDefinition(Content);
+	Filler->PortionsPerSecond=Empty->NumOfPortions; // One nominal bottle per second, independent of the authored recipe.
 	const int32 BottlePID=Manager->RegisterProductFromDataAsset(Empty), SourcePID=Manager->RegisterProductFromDataAsset(Source);
 	const int32 Bottle=Manager->GenerateProductInstance(BottlePID,FTransform(FRotator::ZeroRotator,BottleBox->GetComponentLocation(),FVector(.15)));
 	const int32 Cylinder=Manager->GenerateProductInstance(SourcePID,FTransform(FRotator::ZeroRotator,CylinderBox->GetComponentLocation(),FVector(.15)));
@@ -68,6 +69,15 @@ bool FShopProductionStationTest::RunTest(const FString& Parameters)
 	Manager->InitializeInstanceTransform(Cylinder,FTransform(FRotator::ZeroRotator,FVector(5000,0,200),FVector(.15)));
 	Station->RefreshInputs();
 	TestFalse(TEXT("Removing cylinder from physical input stops transfer"),Filler->bIsFilling);
+	const float Partial=Manager->FindUniqueData(Bottle)->EventData.ContentLevel;
+	Manager->InitializeInstanceTransform(Cylinder,FTransform(FRotator::ZeroRotator,CylinderBox->GetComponentLocation(),FVector(.15)));
+	TestEqual(TEXT("Returning supply resumes the same unfinished bottle"),Actions->ExecuteProductionAction(Station,Session,EShopProductionAction::Fill,Bottle,Cylinder,5),EShopCheckoutResult::Success);
+	TestEqual(TEXT("Reconnect preserves existing fill progress"),Manager->FindUniqueData(Bottle)->EventData.ContentLevel,Partial);
+	for (int32 I=0;I<50 && Filler->bIsFilling;++I) Filler->TickComponent(.1f,LEVELTICK_All,nullptr);
+	TestFalse(TEXT("Resumed equipment stops at nominal full"),Filler->bIsFilling);
+	TestEqual(TEXT("Interrupted and resumed bottle reaches full"),Manager->FindUniqueData(Bottle)->EventData.ContentLevel,1.f);
+	TestTrue(TEXT("Resume debits exactly one bottle from supply"),FMath::IsNearlyEqual(Manager->FindUniqueData(Cylinder)->EventData.ContentLevel,.9f,.0001f));
+	TestFalse(TEXT("Full target cannot reconnect to nominal filler"),Filler->StartFilling(Cylinder,Bottle));
 	return true;
 }
 #endif

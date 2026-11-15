@@ -9,6 +9,8 @@
 #include "Props/ColaPropActor.h"
 #include "Props/InteractablePropDataAsset.h"
 #include "Props/InteractablePropManager.h"
+#include "Shop/ShopProcurementComponent.h"
+#include "Shop/ShopSupplyCatalog.h"
 
 #if WITH_DEV_AUTOMATION_TESTS && !UE_BUILD_SHIPPING
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPropInitialContentDebugTest,"ColossalFizzCo.Props.InitialContentDebug",EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -66,5 +68,38 @@ bool FPropInitialContentDebugTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Normal demotion remains available"),Manager->SetInstanceToRest(Half));
 	TestEqual(TEXT("Pooling does not reroll the debug fill"),Manager->FindUniqueData(Half)->EventData.ContentLevel,.5f);
 	return true;
+}
+#endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlacedBottleRegistrationRollbackTest,"ColossalFizzCo.Props.PlacedRegistrationRollback",EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FPlacedBottleRegistrationRollbackTest::RunTest(const FString&)
+{
+ const auto Init=UWorld::InitializationValues().AllowAudioPlayback(false).CreatePhysicsScene(true).CreateNavigation(false).CreateAISystem(false);
+ auto* World=UWorld::CreateWorld(EWorldType::Game,false,NAME_None,nullptr,true,ERHIFeatureLevel::Num,&Init);
+ if(!World)return false;
+ GEngine->CreateNewWorldContext(EWorldType::Game).SetCurrentWorld(World);
+ ON_SCOPE_EXIT{World->DestroyWorld(false);GEngine->DestroyWorldContext(World);};
+ auto* Manager=World->SpawnActor<APropManager>();Manager->bEnableAutosave=false;Manager->InitializePropManager();
+ const auto* Original=Manager->ShopSupplies->Catalog.LoadSynchronous();
+ if(!TestNotNull(TEXT("Real assembly catalog exists"),Original))return false;
+ if(!Manager->ShopSupplies->InitializeCatalog())return false;
+ auto* Product=LoadObject<UInteractablePropDataAsset>(nullptr,TEXT("/Game/NormalColaPrototype/DA_NormalMint.DA_NormalMint"));
+ if(!TestNotNull(TEXT("Real bottle source exists"),Product))return false;
+ auto InvalidCap=*Manager->FindProductDefinition(Product->InitialCapProduct.PID);InvalidCap.StaticMesh=nullptr;
+ Manager->RegisterProductDefinition(InvalidCap);
+ const int32 PID=Manager->RegisterProductFromDataAsset(Product);
+ auto Definition=*Manager->FindProductDefinition(PID);Definition.LiquidVisualPID=0;
+ Manager->RegisterProductDefinition(Definition);
+ const FTransform Pose(FVector(0,0,500));
+ auto* Actor=World->SpawnActorDeferred<AColaPropActor>(AColaPropActor::StaticClass(),Pose,nullptr,nullptr,ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+ Actor->bAutoConvertToISMIfAtRest=false;Actor->PropDataAsset=Product;Actor->FinishSpawning(Pose);
+ if(!TestEqual(TEXT("Placed fixture starts without a logical identity"),Actor->ISID,0))return false;
+ TestEqual(TEXT("Invalid assembly configuration rejects registration"),Manager->ConvertPlacedActorToISM(Actor,true),0);
+ TestEqual(TEXT("Rejected first registration does not leave a retired identity on the actor"),Actor->ISID,0);
+ TestTrue(TEXT("Rejected registration preserves the authored position"),Actor->GetActorTransform().Equals(Pose));
+ TestTrue(TEXT("Rejected registration does not park or hide the placed actor"),!Actor->IsHidden());
+ TestTrue(TEXT("Rejected registration retains actor collision"),Actor->GetActorEnableCollision());
+ return true;
 }
 #endif

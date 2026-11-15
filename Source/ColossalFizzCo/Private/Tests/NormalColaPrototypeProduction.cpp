@@ -18,6 +18,8 @@
 #include "CollisionShape.h"
 #include "CollisionQueryParams.h"
 #include "EngineUtils.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 
 namespace
 {
@@ -30,7 +32,7 @@ bool FindSupportedShelfPlacement(APropManager* Manager,UShopShelfStockComponent*
 	TArray<FBox> Occupied;
 	for (const auto& Pair:Manager->ISIDData)
 	{
-		if (Pair.Key==ISID || Pair.Key==Data->EventData.AttachedCapISID) continue;
+		if (Manager->ResolveRootISID(Pair.Key)==ISID) continue;
 		const auto* Other=Manager->FindProductDefinition(Pair.Value.ProductID);
 		if (Other && Other->StaticMesh) Occupied.Add(Other->StaticMesh->GetBoundingBox().TransformBy(Manager->GetTransform(Pair.Key)));
 	}
@@ -62,16 +64,16 @@ bool FindSupportedShelfPlacement(APropManager* Manager,UShopShelfStockComponent*
 
 void ANormalColaPrototypeTestActor::TickReinvestment()
 {
-	if (TestSupplyISIDs.Num()==3)
-	{
-		const auto* Bottle=Manager->FindUniqueData(TestSupplyISIDs[0]);
-		const auto* Cylinder=Manager->FindUniqueData(TestSupplyISIDs[2]);
-		if (Bottle && Cylinder) LocalManufacturedBottle=FString::Printf(TEXT("content=%d level=%.3f sealed=%.3f cap=%d source=%.3f"),
-			Bottle->EventData.ContentID,Bottle->EventData.ContentLevel,Bottle->EventData.CapSealed,Bottle->EventData.AttachedCapISID,Cylinder->EventData.ContentLevel);
-	}
 	UShopProductionStationComponent* Bench=nullptr;
-	for (TActorIterator<AActor> It(GetWorld()); It; ++It) if ((Bench=It->FindComponentByClass<UShopProductionStationComponent>())) break;
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		if (const auto* Prop=Cast<AActivePropActor>(*It)) if (!Prop->bIsActive || Prop->ISID<=0) continue;
+		if ((Bench=It->FindComponentByClass<UShopProductionStationComponent>())) break;
+	}
 	if (!Bench) return;
+	// A slower opt-in validation fixture allows several rendered frames at partial fill.
+	if (HasAuthority() && Stage==140 && Bench->Filler && FParse::Param(FCommandLine::Get(),TEXT("BottleVisualTest")))
+		Bench->Filler->PortionsPerSecond=FMath::Min(Bench->Filler->PortionsPerSecond,1.f);
 	auto* PC=Cast<APlayerController>(GetOwner()); auto* Pawn=PC ? PC->GetPawn().Get() : nullptr;
 	auto* Actions=Pawn ? Pawn->FindComponentByClass<UShopPlayerInteractionComponent>() : nullptr;
 	if (!HasAuthority())
@@ -80,6 +82,25 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 		{
 			if (PC && PC->IsLocalController() && Actions && LastSentStage!=Stage)
 			{ Actions->OpenTerminal(Bench->GetOwner()); LastSentStage=Stage; }
+			return;
+		}
+		if (Stage==140 && Bench->bManualLeverMode && Actions && TestSupplyISIDs.Num()==3)
+		{
+			if (LastSentStage!=Stage || Bench->View.ConnectedSourceISID!=TestSupplyISIDs[2] || Bench->View.SeatedBottleISID!=TestSupplyISIDs[0])
+			{
+				Actions->RequestProductionAction(Bench,Bench->View.SessionID,EShopProductionAction::ConnectSupply,0,TestSupplyISIDs[2]);
+				Actions->RequestProductionAction(Bench,Bench->View.SessionID,EShopProductionAction::AlignBottle,TestSupplyISIDs[0],0);
+				LastSentStage=Stage;
+			}
+			const auto* Data=Manager->FindUniqueData(TestSupplyISIDs[0]);
+			Actions->RequestProductionAction(Bench,Bench->View.SessionID,Data && Data->EventData.ContentLevel>=1 ? EShopProductionAction::ReleaseFillingLever : EShopProductionAction::HoldFillingLever,TestSupplyISIDs[0],0);
+			++LocalRequestsSent; return;
+		}
+		if (Stage==160 && Bench->bAllowSoloCap && Actions && TestSupplyISIDs.Num()==3)
+		{
+			const auto* Data=Manager->FindUniqueData(TestSupplyISIDs[0]);
+			if (Data && Data->ContinuousData.SealedPressure<=Bench->SafeResidualPressure)
+			{ Actions->RequestProductionAction(Bench,Bench->View.SessionID,EShopProductionAction::TurnCap,TestSupplyISIDs[0],0); ++LocalRequestsSent; }
 			return;
 		}
 		if (Stage==160 && PC && PC->IsLocalController() && Actions && TestSupplyISIDs.Num()==3 && Bench->bRequiresCooperativeCap)
@@ -118,7 +139,7 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 		ATM->CollectDeposits(); ExpectedBankCents=ExpectedCashCents;
 		if (Manager->SharedWallet->GetWalletState().BalanceCents!=ExpectedBankCents || Manager->ShopCheckout->GetTeamCashCents()!=0)
 		{ Fail(TEXT("Banking sale proceeds did not conserve physical cash")); return; }
-		Pawn->SetActorLocation(Bench->GetOwner()->GetActorLocation()+FVector(0,-180,100),false,nullptr,ETeleportType::TeleportPhysics);
+		PlaceTestPawn(Pawn,Bench->GetOwner()->GetActorLocation()+FVector(0,-180,100));
 		for (const auto& Pair:Manager->ISIDData) KnownInstances.Add(Pair.Key);
 		TestSupplyISIDs.Init(0,3); ProductionStartedAt=GetWorld()->GetTimeSeconds(); Stage=110; ForceNetUpdate(); return;
 	}
@@ -130,7 +151,7 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 			auto* Host=It->Get(); auto* Partner=Host && Host->IsLocalController() ? Host->GetPawn().Get() : nullptr;
 			auto* PartnerActions=Partner ? Partner->FindComponentByClass<UShopPlayerInteractionComponent>() : nullptr;
 			if (!PartnerActions || Partner==Pawn) continue;
-			Partner->SetActorLocation(Bench->GetOwner()->GetActorLocation()+FVector(100,-100,100),false,nullptr,ETeleportType::TeleportPhysics);
+			PlaceTestPawn(Partner,Bench->GetOwner()->GetActorLocation()+FVector(100,-100,100));
 			if (bManualCappingInput)
 			{
 				if (LastSentStage!=Stage) { PartnerActions->OpenTerminal(Bench->GetOwner()); LastSentStage=Stage; }
@@ -146,12 +167,11 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 		const auto* Catalog=Manager->ShopSupplies->Catalog.Get(); const auto* Offer=Catalog ? Catalog->FindOffer(OfferID) : nullptr;
 		if (!Offer) { Fail(TEXT("Missing configured prototype supply offer")); return; }
 		int32 NewID=0;
-		for (const auto& Pair:Manager->ISIDData)
+		for (int32 ID : Bench->LastDeliveredSupplies)
 		{
-			const auto* Product=Manager->FindProductDefinition(Pair.Value.ProductID);
-			const auto* Data=Manager->FindUniqueData(Pair.Key);
-			if (!KnownInstances.Contains(Pair.Key) && Product && Data && !Data->EventData.AttachedBottleISID
-				&& Product->SourceDataAsset.Get()==Offer->Product.Get()) { NewID=Pair.Key; break; }
+			const auto* R=Manager->FindISIDData(ID);
+			const auto* Product=R ? Manager->FindProductDefinition(R->ProductID) : nullptr;
+			if (!KnownInstances.Contains(ID) && Product && Product->SourceDataAsset.Get()==Offer->Product.Get()) { NewID=ID; break; }
 		}
 		if (!NewID) return;
 		ExpectedBankCents-=Offer->UnitCostCents;
@@ -159,7 +179,10 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 		const int32 Index=(Stage-110)/10; TestSupplyISIDs[Index]=NewID; KnownInstances.Add(NewID);
 		if (auto* Prop=Manager->GetActiveActorFromISID(NewID)) Prop->PropMesh->SetSimulatePhysics(false);
 		const auto* Input=Index==0 ? Bench->BottleInput.Get() : Index==1 ? Bench->CapInput.Get() : Bench->CylinderInput.Get();
-		Manager->InitializeInstanceTransform(NewID,FTransform(FRotator::ZeroRotator,Input->GetComponentLocation(),Manager->GetTransform(NewID).GetScale3D()));
+		const auto* Definition=Manager->FindProductDefinition(Manager->FindISIDData(NewID)->ProductID);
+		const FVector Scale=Manager->GetTransform(NewID).GetScale3D();
+		const FVector Offset=Index==1 && Definition && Definition->StaticMesh ? Definition->StaticMesh->GetBoundingBox().GetCenter()*Scale : FVector::ZeroVector;
+		Manager->InitializeInstanceTransform(NewID,FTransform(FRotator::ZeroRotator,Input->GetComponentLocation()-Offset,Scale));
 		Stage+=10; ForceNetUpdate(); return;
 	}
 	if (TestSupplyISIDs.Num()!=3) return;
@@ -174,6 +197,7 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 			Operation,Stage,TestSupplyISIDs[0],Data->EventData.ContentID,Data->EventData.ContentLevel,Data->EventData.CapSealed,
 			Data->EventData.Strength,Data->ContinuousData.SealedPressure,Active ? Active->ColaLevel : -1.f,
 			Bench->View.HoldingForce,Bench->View.HoldingEfficiency,Bench->View.RotationProgress);
+		if (Data && Bench->bManualLeverMode) UE_LOG(LogTemp,Display,TEXT("MANUAL_FILLING_TRACE session=%s seat=%d source=%d filling=%d aligned=%d bottle=%s holder=%s operator=%s"),*Bench->View.SessionID.ToString(),Bench->View.SeatedBottleISID,Bench->View.ConnectedSourceISID,Bench->Filler->bIsFilling,Bench->IsBottleAligned(TestSupplyISIDs[0]),*Manager->GetTransform(TestSupplyISIDs[0]).GetLocation().ToCompactString(),Bench->BottleHolder ? *Bench->BottleHolder->GetComponentLocation().ToCompactString() : TEXT("none"),Pawn ? *Pawn->GetActorLocation().ToCompactString() : TEXT("none"));
 	};
 	if (Stage>=140 && Stage<=160) TraceBottle(TEXT("production"));
 	if (Stage==140 && Bottle->EventData.ContentLevel>=1 && Bench->Filler && !Bench->Filler->bIsFilling)
@@ -195,7 +219,7 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 		}
 		if (!Shelf || !Pawn) { Fail(TEXT("No clear supported position on any configured shelf for manufactured bottle")); return; }
 		const FVector Destination=Transform.GetLocation();
-		Pawn->SetActorLocation(Destination+FVector(0,-200,0),false,nullptr,ETeleportType::TeleportPhysics);
+		PlaceTestPawn(Pawn,Destination+FVector(0,-200,0));
 		if (!Manager->BeginGrab(TestSupplyISIDs[0],Pawn,Pawn->GetRootComponent())) { Fail(TEXT("Finished bottle could not be carried to shelf")); return; }
 		TraceBottle(TEXT("after-grab"));
 		Manager->UpdateHeldTransform(TestSupplyISIDs[0],Transform); Manager->ReleaseGrab(TestSupplyISIDs[0],Pawn);
@@ -204,7 +228,7 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 		TraceBottle(TEXT("after-demotion"));
 		Shelf->RefreshStock();
 		if (!Manager->ShopCheckout->IsAvailableColaStockISID(TestSupplyISIDs[0])) { Fail(TEXT("Remote manufactured bottle did not become customer stock")); return; }
-		Pawn->SetActorLocation(Bench->GetOwner()->GetActorLocation()+FVector(0,-180,100),false,nullptr,ETeleportType::TeleportPhysics);
+		PlaceTestPawn(Pawn,Bench->GetOwner()->GetActorLocation()+FVector(0,-180,100));
 		Stage=200; ForceNetUpdate();
 		UE_LOG(LogTemp,Display,TEXT("NORMAL_COLA_REMOTE_REINVESTMENT_PASSED bank=%lld bottle=%d cap=%d cylinder=%d"),ExpectedBankCents,TestSupplyISIDs[0],TestSupplyISIDs[1],TestSupplyISIDs[2]);
 	}

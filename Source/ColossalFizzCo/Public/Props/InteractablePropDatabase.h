@@ -4,6 +4,7 @@
 #include "Shop/SharedWalletTypes.h"
 #include "Shop/ShopCheckoutTypes.h"
 #include "Props/LiquidReleaseTypes.h"
+#include "Props/PropProductReference.h"
 #include "Engine/DataAsset.h"
 #include "Engine/NetSerialization.h"
 #include "NPCEnumsAndTypes.h"
@@ -236,6 +237,8 @@ namespace EPropExtendedEventMask
 	constexpr uint8 ContentCreationTime = 1 << 1;
 	constexpr uint8 AttachedCap = 1 << 2;
 	constexpr uint8 AttachedBottle = 1 << 3;
+	constexpr uint8 TemporarySeal = 1 << 4;
+	constexpr uint8 LinkedSupply = 1 << 5;
 }
 
 /**
@@ -684,7 +687,7 @@ struct COLOSSALFIZZCO_API FPropContinuousUpdateData
 };
 
 /**
- * Category 2.2: Event Update Data (32 bytes).
+ * Category 2.2: Persistent per-instance event state.
  * Mutated ONLY at spawn or on discrete gameplay events (Fill, Consume, Cap, Damage, Repair, PID Swap).
  */
 USTRUCT(BlueprintType)
@@ -705,6 +708,12 @@ struct COLOSSALFIZZCO_API FPropEventUpdateData
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Unique Data|Event")
 	int32 AttachedBottleISID = 0;
+
+	/** Persistent equipment connection and one-use temporary seal on the manager clock. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") double TemporarySealUntil = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") bool bTemporarySealUsed = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") bool bManualFillPressure = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") int32 LinkedSupplyISID = 0;
 
 	/** Normalized fill volume (0.0 = Empty, 1.0 = NormalCapacity, > 1.0 = Overfill; resting BasePressure) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Unique Data|Event", meta = (ClampMin = "0.0"))
@@ -756,11 +765,30 @@ struct COLOSSALFIZZCO_API FPropInstanceUniqueData
  * Prevents duplicating liquid arrays, materials, prices, and expiry settings per bottle instance.
  */
 USTRUCT(BlueprintType)
+struct COLOSSALFIZZCO_API FPropAttachment
+{
+	GENERATED_BODY()
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame) int32 OwnerISID = 0;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame) FTransform RelativeTransform;
+	bool NetSerialize(FArchive& Ar, UPackageMap*, bool& Success)
+	{
+		uint32 Parent = static_cast<uint32>(OwnerISID);
+		Ar.SerializeIntPacked(Parent);
+		if (Ar.IsLoading()) OwnerISID = static_cast<int32>(Parent);
+		if (Parent) Ar << RelativeTransform;
+		Success = !Ar.IsError() && OwnerISID >= 0 && (!Parent || RelativeTransform.IsValid());
+		return true;
+	}
+};
+template<> struct TStructOpsTypeTraits<FPropAttachment> : TStructOpsTypeTraitsBase2<FPropAttachment>
+{ enum { WithNetSerializer = true }; };
+
+USTRUCT(BlueprintType)
 struct COLOSSALFIZZCO_API FPropContentDefinition
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Content Definition")
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Content Definition")
 	int32 ContentID = 0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Content Definition")
@@ -777,6 +805,12 @@ struct COLOSSALFIZZCO_API FPropContentDefinition
 	/** g/ml; shared, replicated and saved once per content type. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Content Definition", meta=(ClampMin="0.001"))
 	float DensityGPerMl = 1.04f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Compatibility") TArray<EBottleMaterialType> SupportedBottleMaterials;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Compatibility") TArray<int32> SupportedCapPIDs;
+	/** New authored products use PID compatibility. Legacy material rules remain migration input only. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Compatibility") bool bUseBottlePIDCompatibility=false;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Compatibility") TArray<int32> SupportedBottlePIDs;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Visuals") TArray<FPropBottleContentVisual> BottleVisuals;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Content Definition", meta = (ClampMin = "0.0"))
 	float BasePortionPrice = 2.5f;
@@ -989,6 +1023,10 @@ struct COLOSSALFIZZCO_API FPropEventSyncDelta
 	UPROPERTY() int32 AttachedCapISID = 0;
 	UPROPERTY() int32 AttachedBottleISID = 0;
 	UPROPERTY() bool bClean = true;
+	UPROPERTY() double TemporarySealUntil = 0;
+	UPROPERTY() bool bTemporarySealUsed = false;
+	UPROPERTY() bool bManualFillPressure = false;
+	UPROPERTY() int32 LinkedSupplyISID = 0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Replication")
 	float ContentLevel = 0.0f;
@@ -1334,6 +1372,11 @@ struct COLOSSALFIZZCO_API FPropProductDefinition
 	/** Unique Product Identifier (PID) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Product Definition")
 	int32 ProductID = 0;
+	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Product Definition") EPropProductCategory Category=EPropProductCategory::Other;
+	/** Canonical catalog identity for a legacy persisted product; record PIDs are never renumbered. */
+	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Product Definition") int32 CatalogPID=0;
+	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Compatibility") bool bUseBottlePIDCompatibility=false;
+	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Compatibility") TArray<int32> SupportedBottlePIDs;
 
 	/** Static Mesh Identifier (SMID) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Product Definition")
@@ -1377,6 +1420,14 @@ struct COLOSSALFIZZCO_API FPropProductDefinition
 	float BottleMass = .05f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Product Definition|Bottle", meta=(ClampMin="0.001"))
 	float PortionVolumeMl = 20.f;
+	/** Stable across filled SKU changes. Zero keeps the legacy combined-mesh presentation. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Assembly") int32 LiquidVisualPID = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Assembly") bool bLiquidVisualOnly = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Assembly") FTransform LiquidAttachment;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Assembly") TArray<int32> SupportedCapPIDs;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Assembly") TArray<EBottleMaterialType> SupportedBottleMaterials;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Assembly") FTransform CapMountOffset;
+
 
 	/** Consumable portions and economy profile */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Product Definition")
@@ -1601,6 +1652,13 @@ USTRUCT(BlueprintType)
 struct COLOSSALFIZZCO_API FISIDRuntimeIndex
 {
 	GENERATED_BODY()
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame) FPropAttachment Attachment;
+	/** Direct children only; rebuilt from immediate owner edges on load/delivery. */
+	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Assembly") TArray<int32> ChildISIDs;
+	/** Exact runtime amount derived from the canonical amount and this bottle's shared capacity. */
+	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Quantity") float CurrentPortions=0;
+	/** Content batch visual key, not another product identity. */
+	UPROPERTY() int32 VisualBottlePID=0;
 
 	/** Permanent logical instance identity */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ISID Record")
@@ -1679,7 +1737,8 @@ struct COLOSSALFIZZCO_API FISIDRuntimeIndex
 		const int32 MaxPortions = (ProductDef && ProductDef->ConsumableProfile.NumOfPortions > 0)
 			? ProductDef->ConsumableProfile.NumOfPortions
 			: 4;
-		PackedRuntimeData.RemainingPortions = FMath::Clamp(FMath::RoundToInt(Unique.EventData.ContentLevel * static_cast<float>(MaxPortions)), 0, 255);
+		CurrentPortions=Unique.EventData.ContentLevel*static_cast<float>(MaxPortions);
+		PackedRuntimeData.RemainingPortions = FMath::Clamp(FMath::RoundToInt(CurrentPortions), 0, 255);
 	}
 };
 
@@ -1714,6 +1773,8 @@ USTRUCT(BlueprintType)
 struct COLOSSALFIZZCO_API FPropInstanceDelta
 {
 	GENERATED_BODY()
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame) FPropAttachment Attachment;
+	UPROPERTY() int32 VisualBottlePID=0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Replication")
 	int32 ISID = 0;
@@ -1981,6 +2042,8 @@ USTRUCT(BlueprintType)
 struct COLOSSALFIZZCO_API FPropSerializedInstance
 {
 	GENERATED_BODY()
+	UPROPERTY(SaveGame) int32 VisualBottlePID=0;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame) FPropAttachment Attachment;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "SaveLoad")
 	int32 ISID = 0;
@@ -2051,6 +2114,8 @@ struct COLOSSALFIZZCO_API FPropWorldSaveData
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "SaveLoad")
+	/** Keep the legacy serialization default: old tagged saves may omit a default
+	 * value. New saves explicitly write the manager's current schema (6). */
 	int32 SchemaVersion = 5;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "SaveLoad")
@@ -2089,6 +2154,11 @@ class COLOSSALFIZZCO_API UPropDatabaseSaveGame : public USaveGame
 	GENERATED_BODY()
 
 public:
+	/** Keep the engine save header/versioning while resolving renamed asset paths. */
+	static UPropDatabaseSaveGame* LoadCompatibleSlot(const FString& SlotName, int32 UserIndex);
+	static UPropDatabaseSaveGame* LoadCompatibleMemory(const TArray<uint8>& Bytes);
+	virtual void Serialize(FArchive& Ar) override;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "SaveLoad")
 	FPropWorldSaveData WorldSaveData;
 };

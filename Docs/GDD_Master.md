@@ -1,5 +1,8 @@
 # Game Design Document (GDD) — Master
-**Design Name:** Colossal Cola Co.
+
+**Modular product architecture — 15 November 2026:** [Approved Bottle / Content / Cap specification](Modular_Product_Databases_2026-11-15.md) supersedes flavor-owned capacity and filled-SKU replacement rules. Maximum portions belong to the bottle type; current portions and immediate ownership belong to individual instances. Contents/caps select supported bottle products by stable named PID references. Preserve the Plastic + five Normal Colas + Manual Twist prototype scope and current sizes. [Implementation evidence and remaining acceptance](Modular_Product_Databases_Implementation_2026-11-15.md) are recorded separately.
+
+**Design Name:** Colossal Fizz Co
 
 **Bottle dynamics update — 12–13 November 2026:** The designer approved separate
 empty bottle and liquid mass, with **0.05 kg** as the editable plastic shell
@@ -146,7 +149,7 @@ Measured reference values are verification aids, not instructions to resize an a
 | :--- | :--- |
 | Default player collision capsule | Approximately 192 cm tall, radius 34 cm, component scale 1 |
 | Existing giant NPC collision capsule | Approximately 1,056 cm tall, radius 204 cm; existing character proportions preserved |
-| `Cola1` static mesh | Approximately 190 cm tall and 75 cm wide at native mesh scale 1 |
+| `SM_PlasticBottle` supplied plastic shell | Approximately 186 cm tall at native mesh scale 1; replaces the historical `Cola1` mesh without changing placed actor scales |
 | Existing reference bottles | Actor scale 1 in `Lvl_FirstPerson` |
 
 **Giant-scale environment:** bottles and matching caps, cash and coins, scanners, checkout equipment and counters, storage/display racks, shop furniture, structures and most other environmental props. Use the reference bottles and giant characters to determine proportions, spacing and capacity.

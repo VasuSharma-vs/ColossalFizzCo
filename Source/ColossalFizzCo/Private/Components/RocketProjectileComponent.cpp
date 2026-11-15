@@ -5,6 +5,7 @@
 #include "Engine/Engine.h"
 #include "Net/UnrealNetwork.h"
 #include "CollisionQueryParams.h"
+#include "Props/InteractableProp.h"
 #include "TimerManager.h"
 #include "GameFramework/GameStateBase.h"
 #include "DrawDebugHelpers.h"
@@ -152,6 +153,7 @@ void URocketProjectileComponent::InitializeTipping(const FVector& InLaunchHeadin
 	// Find the floor underneath the bottle
 	FHitResult GroundHit;
 	FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(RocketTippingTrace), false, GetOwner());
+	IgnoreLaunchDebris(TraceParams);
 	const FVector TraceStart = TippingStartCenter;
 	const FVector TraceEnd = TraceStart - FVector(0.0f, 0.0f, 600.0f);
 
@@ -237,6 +239,7 @@ void URocketProjectileComponent::InitializeDragging(float InServerLaunchTime, in
 	// Find ground normal under dragging start
 	FHitResult GroundHit;
 	FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(RocketDragTrace), false, GetOwner());
+	IgnoreLaunchDebris(TraceParams);
 	const FVector TraceEnd = DragStartCenter - FVector(0.0f, 0.0f, 500.0f);
 	if (GetWorld() && GetWorld()->LineTraceSingleByChannel(GroundHit, DragStartCenter, TraceEnd, ECC_WorldStatic, TraceParams))
 	{
@@ -299,6 +302,7 @@ void URocketProjectileComponent::InitializeFlightPath(const FVector& InStartLoc,
 		// Fallback: perform a forward line trace along the flight heading to find obstacle hit point (Image 1: orange baseline)
 		FHitResult BaselineHit;
 		FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(RocketFlightBaselineTrace), false, GetOwner());
+		IgnoreLaunchDebris(TraceParams);
 		const FVector TraceEnd = FlightStartLocation + (FlightBaselineDir * MaxBaselineDist);
 		if (GetWorld() && GetWorld()->LineTraceSingleByChannel(BaselineHit, FlightStartLocation, TraceEnd, ECC_Visibility, TraceParams))
 		{
@@ -427,6 +431,7 @@ void URocketProjectileComponent::InitializeFlightPath(const FVector& InStartLoc,
 			// Ensures waypoint never dips below ground level + sweep radius + 10cm
 			FHitResult GroundCheck;
 			FCollisionQueryParams GroundParams(SCENE_QUERY_STAT(RocketWaypointGroundSafety), false, GetOwner());
+			IgnoreLaunchDebris(GroundParams);
 			const FVector TraceStart = Waypoint + FVector(0.0f, 0.0f, 150.0f);
 			const FVector TraceDown = Waypoint - FVector(0.0f, 0.0f, 300.0f);
 			if (GetWorld() && GetWorld()->LineTraceSingleByChannel(GroundCheck, TraceStart, TraceDown, ECC_WorldStatic, GroundParams))
@@ -1234,6 +1239,7 @@ void URocketProjectileComponent::GenerateServerFlightPlan(
 
 	FRandomStream PlanStream(LaunchSeed > 0 ? LaunchSeed : 1);
 	FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(RocketServerFlightPlanTrace), false, GetOwner());
+	IgnoreLaunchDebris(TraceParams);
 
 	FVector CurrentLoc = LiftoffCenter;
 	int32 IterationCount = 0;
@@ -2021,6 +2027,7 @@ void URocketProjectileComponent::ApplyClientLaunch(
 	const FVector LaunchTraceEnd = LaunchTraceStart + (TipOverLaunchHeading * 15000.0f);
 	FHitResult LaunchHit;
 	FCollisionQueryParams LaunchTraceParams(SCENE_QUERY_STAT(RocketClientLaunchHitTrace), false, GetOwner());
+	IgnoreLaunchDebris(LaunchTraceParams);
 	if (GetWorld() && GetWorld()->LineTraceSingleByChannel(LaunchHit, LaunchTraceStart, LaunchTraceEnd, ECC_Visibility, LaunchTraceParams))
 	{
 		LaunchTargetHitLocation = LaunchHit.ImpactPoint;
@@ -2128,6 +2135,7 @@ void URocketProjectileComponent::TickComponent(float DeltaTime, ELevelTick TickT
 			{
 				FHitResult GroundCheck;
 				FCollisionQueryParams QP(SCENE_QUERY_STAT(RocketGroundCheckBeforeSettle), false, GetOwner());
+				IgnoreLaunchDebris(QP);
 				// The root can be at the upper end of an inverted giant bottle. Trace
 				// from its bounds, so contact does not depend on pivot or orientation.
 				const FVector CenterLoc = TargetPrimitive->Bounds.Origin;
@@ -2359,8 +2367,21 @@ void URocketProjectileComponent::RestorePrimitiveSettings()
 	LogDebug(TEXT("RestorePrimitiveSettings: Restored original primitive and actor settings."));
 }
 
+void URocketProjectileComponent::IgnoreEjectedCap(AActivePropActor* Cap)
+{
+	EjectedCap = Cap;
+	EjectedCapISID = Cap ? Cap->ISID : 0;
+}
+
+void URocketProjectileComponent::IgnoreLaunchDebris(FCollisionQueryParams& Query) const
+{
+	if (const auto* Cap = EjectedCap.Get(); Cap && Cap->ISID == EjectedCapISID && Cap->bIsActive)
+		Query.AddIgnoredActor(Cap);
+}
+
 void URocketProjectileComponent::ResetRocketSimulation()
 {
+	IgnoreEjectedCap(nullptr);
 	ProjectileAngularVelocityDegrees=FVector::ZeroVector; bProjectileHasAscended=false;
 	CurrentState = ERocketSimulationState::Idle;
 	CurrentVelocity = FVector::ZeroVector;
@@ -2600,6 +2621,7 @@ void URocketProjectileComponent::LaunchRocket(
 	const FVector LaunchTraceEnd = LaunchTraceStart + (TipOverLaunchHeading * 15000.0f);
 	FHitResult LaunchHit;
 	FCollisionQueryParams LaunchTraceParams(SCENE_QUERY_STAT(RocketLaunchHitTrace), false, GetOwner());
+	IgnoreLaunchDebris(LaunchTraceParams);
 	if (GetWorld() && GetWorld()->LineTraceSingleByChannel(LaunchHit, LaunchTraceStart, LaunchTraceEnd, ECC_Visibility, LaunchTraceParams))
 	{
 		LaunchTargetHitLocation = LaunchHit.ImpactPoint;
@@ -2823,8 +2845,9 @@ void URocketProjectileComponent::ApplyPhysicsHandoff(const FVector& FinalLinearV
 		}
 	}
 
-	// 4. Disable RocketProjectileComponent tick so its internal timers never prematurely freeze the physics simulation in mid-air
-	SetComponentTickEnabled(false);
+	// 4. The server monitors the handed-off body for supported rest; clients follow authoritative physics.
+	// TickComponent returns from its physics-monitor branch before any scripted movement runs.
+	SetComponentTickEnabled(bIsServer);
 
 	LogDebug(FString::Printf(TEXT("ApplyPhysicsHandoff complete! IsServer: %d, LinearVel: %s, AngularVel: %s"),
 		bIsServer ? 1 : 0, *FinalLinearVelocity.ToString(), *FinalAngularVelocity.ToString()));
@@ -3230,6 +3253,7 @@ void URocketProjectileComponent::ProcessDraggingStep(float DeltaTime)
 	// Check floor underneath: does the floor support the bottle, or did it run off the shelf edge? (Image 4 vs 5)
 	FHitResult FloorHit;
 	FCollisionQueryParams FloorParams(SCENE_QUERY_STAT(RocketDragFloorCheck), false, GetOwner());
+	IgnoreLaunchDebris(FloorParams);
 	const FVector TraceDown = CurrentCenter - (FVector::UpVector * (SweepRadius + 25.0f));
 	const bool bHasFloor = GetWorld() && GetWorld()->LineTraceSingleByChannel(FloorHit, CurrentCenter, TraceDown, ECC_WorldStatic, FloorParams);
 
@@ -3975,6 +3999,7 @@ void URocketProjectileComponent::InitializeSpentFalling()
 
 	FHitResult FloorHit;
 	FCollisionQueryParams FloorParams(SCENE_QUERY_STAT(RocketFallingFloorTrace), false, GetOwner());
+	IgnoreLaunchDebris(FloorParams);
 	const bool bHitFloor = GetWorld() && GetWorld()->LineTraceSingleByChannel(FloorHit, CurrentCenter, TraceDown, CollisionChannel, FloorParams);
 
 	if (bHitFloor)
@@ -4143,6 +4168,7 @@ void URocketProjectileComponent::ProcessSpentFallingStep(float DeltaTime)
 		// Check if ground is now directly below within 1500 cm
 		FHitResult RecheckHit;
 		FCollisionQueryParams RecheckParams(SCENE_QUERY_STAT(RocketGlideGroundCheck), false, GetOwner());
+		IgnoreLaunchDebris(RecheckParams);
 		if (GetWorld() && GetWorld()->LineTraceSingleByChannel(RecheckHit, CurrentCenter, CurrentCenter - FVector(0.0f, 0.0f, 1500.0f), CollisionChannel, RecheckParams))
 		{
 			bIsGlidingToReachablePoint = false;
@@ -4159,6 +4185,7 @@ void URocketProjectileComponent::ProcessSpentFallingStep(float DeltaTime)
 		// Line trace downward to measure height above the ground
 		FHitResult GroundCheckHit;
 		FCollisionQueryParams GroundParams(SCENE_QUERY_STAT(RocketFallingGroundCheck), false, GetOwner());
+		IgnoreLaunchDebris(GroundParams);
 		const float CheckDistance = FMath::Max(FallingSettings.GroundInterpDistance * 2.5f, 800.0f);
 		const FVector TraceDown = CurrentCenter - FVector(0.0f, 0.0f, CheckDistance);
 		const bool bFoundFloor = GetWorld() && GetWorld()->LineTraceSingleByChannel(GroundCheckHit, CurrentCenter, TraceDown, CollisionChannel, GroundParams);
@@ -4211,6 +4238,7 @@ void URocketProjectileComponent::ProcessSpentFallingStep(float DeltaTime)
 	{
 		FHitResult FloorHit;
 		FCollisionQueryParams FloorParams(SCENE_QUERY_STAT(RocketFloorTrace), false, GetOwner());
+		IgnoreLaunchDebris(FloorParams);
 		const FVector CenterLoc = GetWorldCenterLocation();
 		const FVector TraceDownFallback = CenterLoc - FVector(0.0f, 0.0f, 15000.0f);
 		if (GetWorld() && GetWorld()->LineTraceSingleByChannel(FloorHit, CenterLoc, TraceDownFallback, CollisionChannel, FloorParams))
@@ -4259,6 +4287,7 @@ bool URocketProjectileComponent::SweepAndMove(const FVector& MoveDelta, const FR
 	const FVector SweepEnd = CurrentCenter + MoveDelta + (MoveDir * SphereOffset);
 
 	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(RocketSweep), false, GetOwner());
+	IgnoreLaunchDebris(QueryParams);
 	FCollisionShape SphereShape = FCollisionShape::MakeSphere(SweepRadius);
 
 	const bool bHit = GetWorld()->SweepSingleByChannel(

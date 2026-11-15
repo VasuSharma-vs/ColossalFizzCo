@@ -1,4 +1,5 @@
 #include "Shop/ShopCustomerFlow.h"
+#include "Shop/NormalColaNavigationConfig.h"
 #include "Shop/ShopCustomerVisitComponent.h"
 #include "Shop/ShopCustomerCashComponent.h"
 #include "Shop/ShopScannerComponent.h"
@@ -8,6 +9,13 @@
 #include "GameFramework/Character.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "EngineUtils.h"
+#include "Engine/StaticMeshActor.h"
+#include "Engine/StaticMesh.h"
+#include "NavModifierComponent.h"
+#include "NavAreas/NavArea_Null.h"
+#include "NavAreas/NavArea_Obstacle.h"
 #include "NavigationSystem.h"
 #include "NavMesh/RecastNavMesh.h"
 #include "Engine/World.h"
@@ -18,12 +26,56 @@ void AShopCustomerFlow::BeginPlay()
 {
 	Super::BeginPlay();
 	if (!HasAuthority() || GetNetMode()==NM_Client) return;
+	// Imported fixtures can have coarser navigation than physical collision. A null
+	// area needs explicit capsule clearance because area modifiers are applied after erosion.
+	const auto* DefaultCustomer=CustomerClass ? CustomerClass->GetDefaultObject<ACharacter>() : nullptr;
+	const float Clearance=(DefaultCustomer ? DefaultCustomer->GetCapsuleComponent()->GetScaledCapsuleRadius() : 204.f)+60.f;
+	auto AddNavigationBlocker=[this,Clearance](UPrimitiveComponent* Geometry,const FVector& Extent,TSubclassOf<UNavArea> Area)
+	{
+		FActorSpawnParameters Params; Params.Owner=this; Params.ObjectFlags|=RF_Transient;
+		auto* Blocker=GetWorld()->SpawnActor<AActor>(Params);
+		if (!Blocker) return;
+		auto* Root=NewObject<USceneComponent>(Blocker);
+		Blocker->SetRootComponent(Root); Root->RegisterComponent();
+		Blocker->SetActorLocation(Geometry->GetComponentLocation());
+		if (!Geometry->IsA<UCapsuleComponent>()) Blocker->SetActorLocation(Geometry->Bounds.Origin);
+		Root->AttachToComponent(Geometry,FAttachmentTransformRules::KeepWorldTransform);
+		auto* Modifier=NewObject<UNavModifierComponent>(Blocker);
+		Blocker->AddInstanceComponent(Modifier);
+		Modifier->FailsafeExtent=Extent+FVector(Clearance,Clearance,0);
+		Modifier->bIncludeAgentHeight=true;
+		Modifier->SetAreaClass(Area);
+		Modifier->ForceNavigationRelevancy(true);
+		Modifier->RegisterComponent();
+		UE_LOG(LogTemp,Verbose,TEXT("SHOP_ROUTE_OBSTACLE source=%s bounds=%s relevant=%d"),*GetNameSafe(Geometry->GetOwner()),*Modifier->GetNavigationBounds().ToString(),Modifier->IsNavigationRelevant());
+		NavigationBlockers.Add(Blocker);
+	};
+	for (TActorIterator<AStaticMeshActor> It(GetWorld()); It; ++It)
+	{
+		auto* Mesh=It->GetStaticMeshComponent();
+		if (Mesh && Mesh->GetStaticMesh() && Mesh->GetStaticMesh()->GetPathName()==TEXT("/Game/Assest/HighDetailedMeshs/TheMerchantsEngine/TheMerchantsEngine.TheMerchantsEngine"))
+			AddNavigationBlocker(Mesh,Mesh->Bounds.BoxExtent,UNavArea_Null::StaticClass());
+	}
+	const UClass* ExistingPatronClass=LoadClass<ACharacter>(nullptr,TEXT("/Game/AI/BasicNPC/BP_Basic_NPC.BP_Basic_NPC_C"));
+	for (TActorIterator<ACharacter> It(GetWorld()); It; ++It)
+	{
+		PrepareCustomerMovement(*It);
+		// Existing patrons keep their size, location and behavior. Route around their
+		// capsules instead of asking local avoidance to squeeze through a blocked aisle.
+		if (ExistingPatronClass && It->IsA(ExistingPatronClass) && !It->FindComponentByClass<UShopCustomerVisitComponent>())
+		{
+			auto* Capsule=It->GetCapsuleComponent();
+			AddNavigationBlocker(Capsule,FVector(Capsule->GetScaledCapsuleRadius(),Capsule->GetScaledCapsuleRadius(),Capsule->GetScaledCapsuleHalfHeight()),UNavArea_Obstacle::StaticClass());
+		}
+	}
 	for (AActor* Bucket:Buckets) if (IsValid(Bucket)) BucketHomes.Add(Bucket,Bucket->GetActorTransform());
 	GetWorldTimerManager().SetTimer(ArrivalTimer,FTimerDelegate::CreateWeakLambda(this,[this]{TryArrival();}),FMath::Max(1.f,ArrivalInterval),true,1.f);
 }
 void AShopCustomerFlow::EndPlay(const EEndPlayReason::Type Reason)
 {
 	if (auto* ComponentWorld=GetWorld()) ComponentWorld->GetTimerManager().ClearTimer(ArrivalTimer);
+	if (GetWorld() && !GetWorld()->bIsTearingDown) for (AActor* Blocker:NavigationBlockers) if (IsValid(Blocker)) Blocker->Destroy();
+	NavigationBlockers.Reset();
 	Super::EndPlay(Reason);
 }
 UShopScannerComponent* AShopCustomerFlow::GetScanner() const { return IsValid(CheckoutStation) ? CheckoutStation->FindComponentByClass<UShopScannerComponent>() : nullptr; }
@@ -56,8 +108,53 @@ int32 AShopCustomerFlow::QueuePosition(UShopCustomerVisitComponent* Visit)
 FVector AShopCustomerFlow::QueueLocation(int32 Index) const
 {
 	const auto* Default=CustomerClass ? CustomerClass->GetDefaultObject<ACharacter>() : nullptr;
-	const float Spacing=Default ? FMath::Max(140.f,Default->GetCapsuleComponent()->GetScaledCapsuleRadius()*2+60) : 140.f;
-	return IsValid(QueuePoint) ? QueuePoint->GetActorLocation()-QueuePoint->GetActorForwardVector()*FMath::Max(0,Index)*Spacing : GetActorLocation();
+	float Spacing=Default ? FMath::Max(140.f,Default->GetCapsuleComponent()->GetScaledCapsuleRadius()*2+60) : 140.f;
+	for (const AActor* Container:Buckets) if (IsValid(Container)) if (const auto* Body=Cast<UPrimitiveComponent>(Container->GetRootComponent()))
+	{
+		const auto Bounds=Body->CalcBounds(FTransform(FQuat::Identity,FVector::ZeroVector,Container->GetActorScale3D()));
+		// Match the carry pose's 25 cm forward gap, then leave 60 cm beyond the
+		// next customer's capsule. A capsule-only queue stacks giant buckets.
+		const float Diameter=Default ? Default->GetCapsuleComponent()->GetScaledCapsuleRadius()*2 : 408.f;
+		Spacing=FMath::Max(Spacing,Diameter+Bounds.BoxExtent.X*2+85);
+	}
+	if (!IsValid(QueuePoint)) return GetActorLocation();
+	FVector Direction=QueuePoint->GetActorForwardVector(); Direction.Z=0;
+	if (!Direction.Normalize())
+	{
+		Direction=IsValid(CheckoutStation) ? CheckoutStation->GetActorLocation()-QueuePoint->GetActorLocation() : FVector::ForwardVector;
+		Direction.Z=0; Direction=Direction.GetSafeNormal(SMALL_NUMBER,FVector::ForwardVector);
+	}
+	const FVector AuthoredFront=QueuePoint->GetActorLocation();
+	auto* Nav=UNavigationSystemV1::GetCurrent(GetWorld());
+	const auto* Data=Nav ? Nav->GetDefaultNavDataInstance(FNavigationSystem::DontCreate) : nullptr;
+	if (!Data || !Default) return AuthoredFront-Direction*FMath::Max(0,Index)*Spacing;
+	const float Radius=Default->GetCapsuleComponent()->GetScaledCapsuleRadius();
+	const auto Filter=UNavigationQueryFilter::GetQueryFilter(*Data,this,UNormalColaCustomerFilter::StaticClass());
+	const FVector Extent(Radius+400,Radius+400,200);
+	FNavLocation Front;
+	FVector Floor=AuthoredFront;
+	// Markers may be authored at eye height. Use the live customer's navigation
+	// floor, just as visit MoveTo does, rather than selecting a shelf-top island.
+	for (const ACharacter* Customer:Customers) if (IsValid(Customer) && !Customer->IsHidden())
+	{ Floor.Z=Customer->GetNavAgentLocation().Z; break; }
+	if (!Nav->ProjectPointToNavigation(Floor,Front,Extent,Data,Filter)) return AuthoredFront-Direction*FMath::Max(0,Index)*Spacing;
+	TArray<FVector,TInlineAllocator<8>> Slots; Slots.Add(Front.Location);
+	for (int32 Slot=1; Slot<=FMath::Clamp(Index,0,7); ++Slot)
+	{
+		FVector Candidate=Slots.Last()-Direction*Spacing;
+		// Projection near a counter can collapse neighboring authored positions.
+		// Search farther back, then require actual capsule clearance from every slot.
+		for (int32 Attempt=0; Attempt<8; ++Attempt)
+		{
+			FNavLocation Projected;
+			if (Nav->ProjectPointToNavigation(Candidate,Projected,Extent,Data,Filter)
+				&& !Slots.ContainsByPredicate([&](const FVector& Occupied){return FVector::DistSquared2D(Occupied,Projected.Location)<FMath::Square(Spacing-1);}))
+			{ Candidate=Projected.Location; break; }
+			Candidate-=Direction*(Spacing*.5f);
+		}
+		Slots.Add(Candidate);
+	}
+	return Slots.Last();
 }
 void AShopCustomerFlow::JoinQueue(UShopCustomerVisitComponent* Visit) { if (HasAuthority() && IsValid(Visit)) Queue.AddUnique(Visit); }
 void AShopCustomerFlow::LeaveQueue(UShopCustomerVisitComponent* Visit) { Queue.RemoveAll([Visit](const auto& Item){return !Item.IsValid() || Item.Get()==Visit;}); }
@@ -83,8 +180,8 @@ bool AShopCustomerFlow::TryArrival()
 	auto* Nav=UNavigationSystemV1::GetCurrent(GetWorld()); FNavLocation Entrance;
 	const auto* CustomerDefault=CustomerClass->GetDefaultObject<ACharacter>();
 	const FVector EntranceFloor=EntrancePoint->GetActorLocation()-FVector(0,0,CustomerDefault->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
-	if (!Nav || UNavigationSystemV1::IsNavigationBeingBuiltOrLocked(GetWorld())
-		|| !Nav->ProjectPointToNavigation(EntranceFloor,Entrance,FVector(400,400,200)))
+	// An unrelated dynamic tile rebuild must not stop arrivals at a valid entrance.
+	if (!Nav || !Nav->ProjectPointToNavigation(EntranceFloor,Entrance,FVector(400,400,200)))
 	{
 		const auto* Data=Nav ? Cast<ARecastNavMesh>(Nav->GetDefaultNavDataInstance(FNavigationSystem::DontCreate)) : nullptr;
 		ArrivalStatus=FString::Printf(TEXT("Waiting for walkable giant entrance navigation: bounds=%d activeTiles=%d building=%d"),
@@ -128,4 +225,14 @@ bool AShopCustomerFlow::TryArrival()
 	BucketClaims.Add(FreeBucket,Visit);
 	if (Visit->StartVisit(this,FreeBucket)) { ArrivalStatus=TEXT("Customer visit started"); return true; }
 	ArrivalStatus=TEXT("Customer could not begin its configured visit"); BucketClaims.Remove(FreeBucket); return false;
+}
+
+void AShopCustomerFlow::PrepareCustomerMovement(ACharacter* Customer)
+{
+	if (!HasAuthority() || GetNetMode()==NM_Client || !Customer || Customer->IsPlayerControlled()) return;
+	if (auto* Movement=Customer->GetCharacterMovement())
+	{
+		Movement->AvoidanceConsiderationRadius=FMath::Max(800.f,Customer->GetCapsuleComponent()->GetScaledCapsuleRadius()*6);
+		Movement->SetAvoidanceEnabled(true);
+	}
 }

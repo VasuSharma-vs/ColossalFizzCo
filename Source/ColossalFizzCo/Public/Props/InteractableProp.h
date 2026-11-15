@@ -445,6 +445,15 @@ public:
 	UFUNCTION(BlueprintPure, Category="ASM State")
 	bool IsKeptActiveByVolume() const;
 
+	bool IsSeatedInFiller() const { return ISID > 0 && FillerSeatISID == ISID; }
+	void SetSeatedInFiller(bool bSeated);
+
+private:
+	// Compare identities so a stale seat update cannot pin a reused pool actor.
+	UPROPERTY(ReplicatedUsing=OnRep_FillerSeat) int32 FillerSeatISID = 0;
+	UFUNCTION() void OnRep_FillerSeat();
+public:
+
 	/**
 	 * Returns true when this ASM currently has active thermal sources (e.g. nearby heat/cold sources)
 	 * that should prevent demotion to ISM. Base returns false.

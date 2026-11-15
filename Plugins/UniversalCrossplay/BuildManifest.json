@@ -1,0 +1,782 @@
+{
+  "plugin": "UniversalCrossplay",
+  "version": "0.1.0",
+  "engine_tested": "5.8.2",
+  "platform": "Win64",
+  "eos_runtime": "1.19.2.1-58105819",
+  "created_utc": "2026-11-14T12:27:02.303335+00:00",
+  "builds": [
+    "Editor",
+    "UnrealGame Development",
+    "UnrealGame Shipping"
+  ],
+  "service_acceptance": "PENDING actual EOS/Steam configuration and accounts",
+  "files": {
+    ".gitignore": {
+      "sha256": "683626e767ded6244f765b325f30726567140f83a0e69c2e813982031fd6fb48",
+      "bytes": 289
+    },
+    "README.md": {
+      "sha256": "0237665446e01bb0ac3ec894cfd739a9556b8f1807d80b49dcf9f0cd908be8d2",
+      "bytes": 1718
+    },
+    "THIRD_PARTY.md": {
+      "sha256": "5649caccd169b533572b7968f3750fbfca3666db90a03fd07e8d02dfca699969",
+      "bytes": 560
+    },
+    "UniversalCrossplay.uplugin": {
+      "sha256": "ec61bbc4751ad8c1edd841da08c585b4a7aa4818e94cec9c30e2b8ee8ac9f1f3",
+      "bytes": 1070
+    },
+    "Binaries/ThirdParty/Win64/EOSSDK-Win64-Shipping.dll": {
+      "sha256": "ab25af350c48856633d671a16e8469277f9acee39186d69fe5b2a26100d738e8",
+      "bytes": 19548600
+    },
+    "Binaries/Win64/UnrealEditor-UniversalCrossplay.dll": {
+      "sha256": "57cd594cb22a29e5b41b5e241f3316a8f952cbae077e73ba3165fce3a4f4879e",
+      "bytes": 607744
+    },
+    "Binaries/Win64/UnrealEditor-UniversalCrossplay.pdb": {
+      "sha256": "29432e20928eca988a2100c51da5235d3e5c9965bf64272623c6db730408276c",
+      "bytes": 67932160
+    },
+    "Binaries/Win64/UnrealEditor-UniversalCrossplayBootstrap.dll": {
+      "sha256": "19cbddb8a71a3ccf681df4c486e6113c2038f4e8f77199dcf0bb4231c314f258",
+      "bytes": 51200
+    },
+    "Binaries/Win64/UnrealEditor-UniversalCrossplayBootstrap.pdb": {
+      "sha256": "f7245f8839224bc57c9e8f859ede8832423f9139fad8acfd0cecab89c764749e",
+      "bytes": 7426048
+    },
+    "Binaries/Win64/UnrealEditor.modules": {
+      "sha256": "c202ae422580d027df2f24ae1d4c358ee2d24d4a8180ab0a6afb48b9341b425f",
+      "bytes": 196
+    },
+    "ConfigExamples/credentials.example.json": {
+      "sha256": "bc9a0065892255145af58e306f028b5640ae8faf9647b8d53320eea74aaa1b1f",
+      "bytes": 355
+    },
+    "Docs/API.md": {
+      "sha256": "41ee395c68b11082bda1812da989cdb46a14dbb98d55f51557a8aee341d51f5d",
+      "bytes": 6118
+    },
+    "Docs/IMPLEMENTATION_REPORT.md": {
+      "sha256": "f338219d00b060f5daafc211517ea04bb95a8f8946b6b414e87022059ae20e03",
+      "bytes": 10713
+    },
+    "Docs/INTEGRATION_CHECKLIST.md": {
+      "sha256": "0d954ddbef4b51d2ac7bf4434b3b448f47211bede727e4f4b1a90d52b2b1b6f0",
+      "bytes": 3094
+    },
+    "Docs/SETUP.md": {
+      "sha256": "6a1790667a7780081b39d8a19d564b712ad5760bdb32379bc09d16dc616ca0f4",
+      "bytes": 9890
+    },
+    "Docs/VALIDATION.md": {
+      "sha256": "890be264859ad86a414cbc6cfdddd7842e88db4f63329f9a7e8364ee3de32ba3",
+      "bytes": 8196
+    },
+    "Intermediate/Build/Win64/UnrealEditor/Inc/UniversalCrossplay/UHT/CrossplayNetwork.gen.cpp": {
+      "sha256": "7ae784434e22c2b7b0a7ec58aabf84d560ce375508bac846d0adbb3f464d1829",
+      "bytes": 55708
+    },
+    "Intermediate/Build/Win64/UnrealEditor/Inc/UniversalCrossplay/UHT/CrossplayNetwork.generated.h": {
+      "sha256": "76db9c6c6cbc4b5ba35cde81e0e86e1fc2acbe651a28b380b28d9c2d8a76ccc4",
+      "bytes": 11902
+    },
+    "Intermediate/Build/Win64/UnrealEditor/Inc/UniversalCrossplay/UHT/CrossplayNetworkTestActor.gen.cpp": {
+      "sha256": "5cdd810ebabe238e8882452b447d6afc543c817e96d846180e31db4d04ba433d",
+      "bytes": 10754
+    },
+    "Intermediate/Build/Win64/UnrealEditor/Inc/UniversalCrossplay/UHT/CrossplayNetworkTestActor.generated.h": {
+      "sha256": "2f86d896941df2bc6be535d3a48c98a323ed189bdad16a2ae04ec49ebaea7a17",
+      "bytes": 4813
+    },
+    "Intermediate/Build/Win64/UnrealEditor/Inc/UniversalCrossplay/UHT/CrossplaySampleWidget.gen.cpp": {
+      "sha256": "a368f5664c4f96e238945e1c42257792739dc18f48c20e4ce2b65fc8361c9863",
+      "bytes": 75529
+    },
+    "Intermediate/Build/Win64/UnrealEditor/Inc/UniversalCrossplay/UHT/CrossplaySampleWidget.generated.h": {
+      "sha256": "63d3155aae4752ed470ba56ceff310011fe2e02dd5931b157f30f63f7adddf70",
+      "bytes": 11305
+    },
+    "Intermediate/Build/Win64/UnrealEditor/Inc/UniversalCrossplay/UHT/CrossplaySettings.gen.cpp": {
+      "sha256": "fbb95a87c765ce653d387ea9ca4658e37695b786692c855cf78ee7125ea01932",
+      "bytes": 17861
+    },
+    "Intermediate/Build/Win64/UnrealEditor/Inc/UniversalCrossplay/UHT/CrossplaySettings.generated.h": {
+      "sha256": "a7d6ee353454c95ab2b2195af8164ae144218c1f84c53f34c5fe70d385e8283c",
+      "bytes": 3776
+    },
+    "Intermediate/Build/Win64/UnrealEditor/Inc/UniversalCrossplay/UHT/CrossplaySubsystem.gen.cpp": {
+      "sha256": "e0d0d6fe012ef576dc4a334f750b03e2925774469d6a84d2524e2ac2baae82a0",
+      "bytes": 171771
+    },
+    "Intermediate/Build/Win64/UnrealEditor/Inc/UniversalCrossplay/UHT/CrossplaySubsystem.generated.h": {
+      "sha256": "9bd1e2b5b192da27d36f33c04f17b57c585bc445b167a46774c6881d2baa274d",
+      "bytes": 5510
+    },
+    "Intermediate/Build/Win64/UnrealEditor/Inc/UniversalCrossplay/UHT/CrossplayTypes.gen.cpp": {
+      "sha256": "00caf7af5187d117304cffcff694173cf603a23775e32e95e06eaae4717f2a25",
+      "bytes": 51949
+    },
+    "Intermediate/Build/Win64/UnrealEditor/Inc/UniversalCrossplay/UHT/CrossplayTypes.generated.h": {
+      "sha256": "5043e2e7785eb571cef44657df48137b1db4ca485e5e1c10954a5b3d1a999371",
+      "bytes": 8035
+    },
+    "Intermediate/Build/Win64/UnrealEditor/Inc/UniversalCrossplay/UHT/UniversalCrossplay.init.gen.cpp": {
+      "sha256": "f791e31664e72389ffaf5bbc7f6bc087b39bb28d2cce983538f5fca7f0b5b9b0",
+      "bytes": 3791
+    },
+    "Intermediate/Build/Win64/UnrealEditor/Inc/UniversalCrossplay/UHT/UniversalCrossplayClasses.h": {
+      "sha256": "1270d67f056d111136d87fed9076cb3f77df8b680fe4464c38514e021940c54e",
+      "bytes": 353
+    },
+    "Intermediate/Build/Win64/UnrealGame/Inc/UniversalCrossplay/UHT/CrossplayNetwork.gen.cpp": {
+      "sha256": "7ae784434e22c2b7b0a7ec58aabf84d560ce375508bac846d0adbb3f464d1829",
+      "bytes": 55708
+    },
+    "Intermediate/Build/Win64/UnrealGame/Inc/UniversalCrossplay/UHT/CrossplayNetwork.generated.h": {
+      "sha256": "76db9c6c6cbc4b5ba35cde81e0e86e1fc2acbe651a28b380b28d9c2d8a76ccc4",
+      "bytes": 11902
+    },
+    "Intermediate/Build/Win64/UnrealGame/Inc/UniversalCrossplay/UHT/CrossplayNetworkTestActor.gen.cpp": {
+      "sha256": "5cdd810ebabe238e8882452b447d6afc543c817e96d846180e31db4d04ba433d",
+      "bytes": 10754
+    },
+    "Intermediate/Build/Win64/UnrealGame/Inc/UniversalCrossplay/UHT/CrossplayNetworkTestActor.generated.h": {
+      "sha256": "2f86d896941df2bc6be535d3a48c98a323ed189bdad16a2ae04ec49ebaea7a17",
+      "bytes": 4813
+    },
+    "Intermediate/Build/Win64/UnrealGame/Inc/UniversalCrossplay/UHT/CrossplaySampleWidget.gen.cpp": {
+      "sha256": "a368f5664c4f96e238945e1c42257792739dc18f48c20e4ce2b65fc8361c9863",
+      "bytes": 75529
+    },
+    "Intermediate/Build/Win64/UnrealGame/Inc/UniversalCrossplay/UHT/CrossplaySampleWidget.generated.h": {
+      "sha256": "63d3155aae4752ed470ba56ceff310011fe2e02dd5931b157f30f63f7adddf70",
+      "bytes": 11305
+    },
+    "Intermediate/Build/Win64/UnrealGame/Inc/UniversalCrossplay/UHT/CrossplaySettings.gen.cpp": {
+      "sha256": "fbb95a87c765ce653d387ea9ca4658e37695b786692c855cf78ee7125ea01932",
+      "bytes": 17861
+    },
+    "Intermediate/Build/Win64/UnrealGame/Inc/UniversalCrossplay/UHT/CrossplaySettings.generated.h": {
+      "sha256": "a7d6ee353454c95ab2b2195af8164ae144218c1f84c53f34c5fe70d385e8283c",
+      "bytes": 3776
+    },
+    "Intermediate/Build/Win64/UnrealGame/Inc/UniversalCrossplay/UHT/CrossplaySubsystem.gen.cpp": {
+      "sha256": "e0d0d6fe012ef576dc4a334f750b03e2925774469d6a84d2524e2ac2baae82a0",
+      "bytes": 171771
+    },
+    "Intermediate/Build/Win64/UnrealGame/Inc/UniversalCrossplay/UHT/CrossplaySubsystem.generated.h": {
+      "sha256": "9bd1e2b5b192da27d36f33c04f17b57c585bc445b167a46774c6881d2baa274d",
+      "bytes": 5510
+    },
+    "Intermediate/Build/Win64/UnrealGame/Inc/UniversalCrossplay/UHT/CrossplayTypes.gen.cpp": {
+      "sha256": "00caf7af5187d117304cffcff694173cf603a23775e32e95e06eaae4717f2a25",
+      "bytes": 51949
+    },
+    "Intermediate/Build/Win64/UnrealGame/Inc/UniversalCrossplay/UHT/CrossplayTypes.generated.h": {
+      "sha256": "5043e2e7785eb571cef44657df48137b1db4ca485e5e1c10954a5b3d1a999371",
+      "bytes": 8035
+    },
+    "Intermediate/Build/Win64/UnrealGame/Inc/UniversalCrossplay/UHT/UniversalCrossplay.init.gen.cpp": {
+      "sha256": "f791e31664e72389ffaf5bbc7f6bc087b39bb28d2cce983538f5fca7f0b5b9b0",
+      "bytes": 3791
+    },
+    "Intermediate/Build/Win64/UnrealGame/Inc/UniversalCrossplay/UHT/UniversalCrossplayClasses.h": {
+      "sha256": "1270d67f056d111136d87fed9076cb3f77df8b680fe4464c38514e021940c54e",
+      "bytes": 353
+    },
+    "Intermediate/Build/Win64/x64/UnrealEditor/Development/UniversalCrossplay/UnrealEditor-UniversalCrossplay.lib": {
+      "sha256": "8ce25312f893494bbfd3660c50b63fb6119c1aa326f2ffdc896158c53170cab0",
+      "bytes": 175288
+    },
+    "Intermediate/Build/Win64/x64/UnrealEditor/Development/UniversalCrossplayBootstrap/UnrealEditor-UniversalCrossplayBootstrap.lib": {
+      "sha256": "fc57f68cebb8c3c49331cb06c6f644b3d6614fca467fd48463e4c396be98d5a7",
+      "bytes": 2294
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplay/CrossplayNetwork.cpp.obj": {
+      "sha256": "990bb7d6ad2c15e00a28c5d3b16e23acf6eb48400bcc912ab85d570c8b1646d0",
+      "bytes": 9640297
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplay/CrossplayNetworkTestActor.cpp.obj": {
+      "sha256": "b08de03a2b83076ec36ddccac8cba3cdcea26568de23d15326dd9d8a6f0162ee",
+      "bytes": 6714298
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplay/CrossplaySampleWidget.cpp.obj": {
+      "sha256": "be5f4a53261cc462307d8446b1c6d85b61ae2f74cdbf4d4c3af6994970a3e6a9",
+      "bytes": 10793372
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplay/CrossplaySessions.cpp.obj": {
+      "sha256": "c6d3bc93c5976a6a36cabc20004b4a84b43a3b9677cb9ce3231b87e298d63f75",
+      "bytes": 8644231
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplay/CrossplaySocial.cpp.obj": {
+      "sha256": "c01227ea10dae225adb1bf2dd1d50efef381b8cb5f9dce5fbd39764feb5cd76a",
+      "bytes": 8256325
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplay/CrossplaySubsystem.cpp.obj": {
+      "sha256": "a8d6e22830ccd1aedac20f233e2a70a60e478f8424203b9f96d63b5a2df96e04",
+      "bytes": 9852110
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplay/CrossplayTests.cpp.obj": {
+      "sha256": "7fcf9a3a751b8a0f6ee09ff08ffc6896d058f318727e81c7cf57e8eba6bfa030",
+      "bytes": 8345536
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplay/CrossplayTypes.cpp.obj": {
+      "sha256": "955b17b3c0c768aaac36f5509d5c8c089159bbb43af3b26be296211bceddf71b",
+      "bytes": 2527401
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplay/CrossplayVoice.cpp.obj": {
+      "sha256": "21a256f329362e42c42f97908c6c92bd95a2c29d9ba71b3af33bc60cab54ef25",
+      "bytes": 4401603
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplay/Module.UniversalCrossplay.cpp.obj": {
+      "sha256": "80364c31961a90290bf38645d3b39d9be529bb55bfda4df7b2ba1e96a00c5787",
+      "bytes": 10300574
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplay/SteamCrossplayBridge.cpp.obj": {
+      "sha256": "1d2633abc9f535fd62b56e17ad8e39d893c623c6fe9c50ccdca602f8f3fe5d84",
+      "bytes": 3108931
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplay/UniversalCrossplay.precompiled": {
+      "sha256": "4b1debb65bcb86a79c63e8e1f02e8551b42ce7f7d9190e7fb27ec25e1429aa6c",
+      "bytes": 466
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplay/UniversalCrossplayModule.cpp.obj": {
+      "sha256": "b5bffe9810495446f0e5872671292817fb7a650f316a445cf5d79b6c2c4003a0",
+      "bytes": 9537978
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplayBootstrap/UniversalCrossplayBootstrap.cpp.obj": {
+      "sha256": "3a8245e6fdbf7c383d7af63bb33f34fcdb94d277605067bfcf97075f332c2929",
+      "bytes": 1729146
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Development/UniversalCrossplayBootstrap/UniversalCrossplayBootstrap.precompiled": {
+      "sha256": "234ff1d8ef856905fa64e8e13edf4f30df4e1cdcb76781195168ff37e826c33b",
+      "bytes": 105
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplay/CrossplayNetwork.cpp.obj": {
+      "sha256": "64daf98c2d27a5824051d85fda49fc344ad50f62bb1d4b83cdc6b303b4841d4d",
+      "bytes": 8904928
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplay/CrossplayNetworkTestActor.cpp.obj": {
+      "sha256": "e9cc82e0268f00d0b69d13be33f91a8c1e0b693f311a8409ec9a898f9a1426ee",
+      "bytes": 6072165
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplay/CrossplaySampleWidget.cpp.obj": {
+      "sha256": "49181d0038183bbf12860384f7bc28c63adbeb980eb4327b573648d3c954391f",
+      "bytes": 9910325
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplay/CrossplaySessions.cpp.obj": {
+      "sha256": "a9cc6cfa992d370a501fc40dc4b3c196b4fe8a0c45e46b715c64e1cb90604f04",
+      "bytes": 8012260
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplay/CrossplaySocial.cpp.obj": {
+      "sha256": "2d8206945d62374409430b6bd7f799ee029c607b3a7227ba9594039440a74bb7",
+      "bytes": 7640401
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplay/CrossplaySubsystem.cpp.obj": {
+      "sha256": "a4ce34401c27f668ae981a2d8e6375946fa5ffd19c48d8a5f8965d9606e67b93",
+      "bytes": 9191010
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplay/CrossplayTests.cpp.obj": {
+      "sha256": "7ec7adcdb83a371ce38461d0139504a9ce5920510bffa0fed175f0262bdbcf46",
+      "bytes": 7564835
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplay/CrossplayTypes.cpp.obj": {
+      "sha256": "3ee49206bf10f376c34662d8b78611f2d934c82ba7208f02d85866372947e24b",
+      "bytes": 2295171
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplay/CrossplayVoice.cpp.obj": {
+      "sha256": "c041a81e9c51b88b22583d507e167f9fa00e9dcaeeabdf7a5fb3f04d928195ef",
+      "bytes": 3970564
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplay/Module.UniversalCrossplay.cpp.obj": {
+      "sha256": "2673396d7542dbbcc206f3c1efcd17af7bad074a4f1e308be5c4bec9dfe4df34",
+      "bytes": 9580467
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplay/SteamCrossplayBridge.cpp.obj": {
+      "sha256": "249729283eb95cdf3fe0bd52414616f505013cbe3df7035d01c66e23371cd3bd",
+      "bytes": 2872391
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplay/UniversalCrossplay.precompiled": {
+      "sha256": "4b1debb65bcb86a79c63e8e1f02e8551b42ce7f7d9190e7fb27ec25e1429aa6c",
+      "bytes": 466
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplay/UniversalCrossplayModule.cpp.obj": {
+      "sha256": "5204fefa824fb95d3898850bfaf7b05e6d28bc019e1dc01aaa7493d901e14656",
+      "bytes": 8774018
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplayBootstrap/UniversalCrossplayBootstrap.cpp.obj": {
+      "sha256": "e02efea97a09d0d4671cae581873364c13a3d09df4ecd5483ff3d7ee987d866d",
+      "bytes": 1634163
+    },
+    "Intermediate/Build/Win64/x64/UnrealGame/Shipping/UniversalCrossplayBootstrap/UniversalCrossplayBootstrap.precompiled": {
+      "sha256": "234ff1d8ef856905fa64e8e13edf4f30df4e1cdcb76781195168ff37e826c33b",
+      "bytes": 105
+    },
+    "Scripts/ConfigurePrivateProfiles.py": {
+      "sha256": "5e78455caa7043cab68e8ac29c3b25c9335fc1ccc3c3d759b873da9385cab82f",
+      "bytes": 4981
+    },
+    "Scripts/CreateDesktopBootstrap.ps1": {
+      "sha256": "c761676524d8d2eaac47d93e25ece2856b00afad54ae1aa32ff0e701da4f51e9",
+      "bytes": 1399
+    },
+    "Scripts/CreateValidationProject.py": {
+      "sha256": "8a50fd605f66e8acc378ca524fac97db4bb0ab147ccf929c490a86e0e766ce52",
+      "bytes": 2757
+    },
+    "Scripts/InstallSDK.ps1": {
+      "sha256": "b6665130aaea55a9034a3a1fdfc1e1944e2a3aa44ab625fc3237c327433cce6a",
+      "bytes": 641
+    },
+    "Scripts/RunLocalIPValidation.ps1": {
+      "sha256": "8f84e87cc6d519baf4da2432e5e4e33ea16ec224e0ebf5cdd911ab716582910e",
+      "bytes": 2649
+    },
+    "Source/UniversalCrossplay/UniversalCrossplay.Build.cs": {
+      "sha256": "2169d00494f19ed93da20a52793125b3021a1881d331cef34b5c43fc719bcbde",
+      "bytes": 828
+    },
+    "Source/UniversalCrossplay/Private/CrossplayNetwork.cpp": {
+      "sha256": "b91100adbe5a57cddcd82259e77d97611603eb4c82d89499bbc5b6d4d377799b",
+      "bytes": 9674
+    },
+    "Source/UniversalCrossplay/Private/CrossplayOnlineState.h": {
+      "sha256": "7800dba56e653999d0909816ba6d3a59e34996f6644b7cb56afa6c7cf2a0c406",
+      "bytes": 1261
+    },
+    "Source/UniversalCrossplay/Private/CrossplaySampleWidget.cpp": {
+      "sha256": "42723f6a4e7e3c2e4c054ca82ce4a48c7a1092728161375a7f46d2ca3508b2e7",
+      "bytes": 8188
+    },
+    "Source/UniversalCrossplay/Private/CrossplaySessions.cpp": {
+      "sha256": "9ff18d8a4a01eac6e92e7c308484f524bab69b3b3943125c7c5c52f7a0287c45",
+      "bytes": 16273
+    },
+    "Source/UniversalCrossplay/Private/CrossplaySocial.cpp": {
+      "sha256": "aa7fe4dada111c53e1227d993031c99f57f42ed9e39e6b7f13a060289891b1e2",
+      "bytes": 12854
+    },
+    "Source/UniversalCrossplay/Private/CrossplaySubsystem.cpp": {
+      "sha256": "c02aa91129838765eddbeabd1c81015194f6dfbc595cf8ca5fe5e9f724cd97f2",
+      "bytes": 12664
+    },
+    "Source/UniversalCrossplay/Private/CrossplayTypes.cpp": {
+      "sha256": "cc93d16a0342b8f48aa40ec2d6aa1171449692731dde4559bc3394eaa03a467a",
+      "bytes": 1091
+    },
+    "Source/UniversalCrossplay/Private/CrossplayVoice.cpp": {
+      "sha256": "fd664c22d2737214221c613cab30ff0dad7e08aef25b05f55c9b232da9d1c2f9",
+      "bytes": 3887
+    },
+    "Source/UniversalCrossplay/Private/SteamCrossplayBridge.cpp": {
+      "sha256": "9db83fc35425ea0b1412c6f9bc74ee3f74f349aaa2b46a0c6fa58ca0f8475807",
+      "bytes": 1487
+    },
+    "Source/UniversalCrossplay/Private/SteamCrossplayBridge.h": {
+      "sha256": "54b1cb95b6ce79048f15538028b1ac204f04935a603a9e6ec8f07f9f791d1829",
+      "bytes": 703
+    },
+    "Source/UniversalCrossplay/Private/UniversalCrossplayModule.cpp": {
+      "sha256": "d5fc01b4da657ab297ca6774905754e51c2ce6f2ce4f868fef9c24ee4e58ca33",
+      "bytes": 1622
+    },
+    "Source/UniversalCrossplay/Private/Tests/CrossplayNetworkTestActor.cpp": {
+      "sha256": "ed0a8462d190b1d7661df69921504476417d9414a70fff406ca7ba8896f03163",
+      "bytes": 3251
+    },
+    "Source/UniversalCrossplay/Private/Tests/CrossplayTests.cpp": {
+      "sha256": "4196e7d4958170c9f0363f46e36b9f6e00692e310d56e63c04a45f3efe2616f7",
+      "bytes": 4842
+    },
+    "Source/UniversalCrossplay/Public/CrossplayNetwork.h": {
+      "sha256": "02918ef4e68b0f4cf4cea5d3d378e27bdb505f8702cc4d1e59014920562ed26c",
+      "bytes": 3067
+    },
+    "Source/UniversalCrossplay/Public/CrossplayNetworkTestActor.h": {
+      "sha256": "06bc44230c731c09632f275ad92cf0e9e01e774c875308e0440e26abc87e12a3",
+      "bytes": 646
+    },
+    "Source/UniversalCrossplay/Public/CrossplaySampleWidget.h": {
+      "sha256": "bb855a5f91341dbd8cb87364f0d7d9cbb5440a47a3f03977937f5479adc549d3",
+      "bytes": 2419
+    },
+    "Source/UniversalCrossplay/Public/CrossplaySettings.h": {
+      "sha256": "9b955673e7f73f78f1fe86dffc465d7047b0ef5e3dca19d3150a187b56c71236",
+      "bytes": 1488
+    },
+    "Source/UniversalCrossplay/Public/CrossplaySubsystem.h": {
+      "sha256": "95600aa1a86b790ab709823681e95f75e3c62b9ac756cc3da94745672b3d0b40",
+      "bytes": 6340
+    },
+    "Source/UniversalCrossplay/Public/CrossplayTypes.h": {
+      "sha256": "6a7592648ef307f78e45112ac90ab67ca94735e7b8e25a919830bad463926529",
+      "bytes": 3321
+    },
+    "Source/UniversalCrossplayBootstrap/UniversalCrossplayBootstrap.Build.cs": {
+      "sha256": "e3a5f27703dd1319f28b1b583d2f30b6720adbfab338e8bb3f433beb00b2bc85",
+      "bytes": 563
+    },
+    "Source/UniversalCrossplayBootstrap/Private/UniversalCrossplayBootstrap.cpp": {
+      "sha256": "0e936b84fe3ac2f52475eea96af856f0a79da29d2706a978e83339a917e4b45d",
+      "bytes": 1319
+    },
+    "ThirdParty/EOSSDK/SDKManifest.json": {
+      "sha256": "891119dc1ce78ec7f111b96b64a0a3096703d17008b6c6f9133b9ac4828de5f4",
+      "bytes": 227
+    },
+    "ThirdParty/EOSSDK/ThirdPartySoftwareNotice.txt": {
+      "sha256": "9aa38890a43af9304c06ac03f8ba6288bba7373ad73474633b6200caf3198c32",
+      "bytes": 141252
+    },
+    "ThirdParty/EOSSDK/Bin/EOSSDK-Win64-Shipping.dll": {
+      "sha256": "ab25af350c48856633d671a16e8469277f9acee39186d69fe5b2a26100d738e8",
+      "bytes": 19548600
+    },
+    "ThirdParty/EOSSDK/Include/eos_achievements.h": {
+      "sha256": "cd061655a246223ff860ac627f8db0c904d05331c5a4f163c706a521f967f3d0",
+      "bytes": 16760
+    },
+    "ThirdParty/EOSSDK/Include/eos_achievements_types.h": {
+      "sha256": "7f048bd1ffc7b91d1c7c527ca401711f73949b88e79534a48c1bcc362930e87e",
+      "bytes": 18623
+    },
+    "ThirdParty/EOSSDK/Include/eos_achievements_types_deprecated.inl": {
+      "sha256": "12ecf705be02ced9c52c46d744dfa38847b8bd4993ee7394bd01a74fef9f2bf7",
+      "bytes": 8345
+    },
+    "ThirdParty/EOSSDK/Include/eos_anticheatclient.h": {
+      "sha256": "622058b912be3757b26d9f8834734b9e0cac06baf05fb64c58341ba1d69f5d57",
+      "bytes": 19242
+    },
+    "ThirdParty/EOSSDK/Include/eos_anticheatclient_types.h": {
+      "sha256": "9b8e00918e743a7b61351922dadd223b638af998ced1ba5ba8f6607bcde13c53",
+      "bytes": 17426
+    },
+    "ThirdParty/EOSSDK/Include/eos_anticheatclient_types_deprecated.inl": {
+      "sha256": "21ac8098f16627f40f8fd55e8efa8c7705ff5248262da64b9e0e8c41e8b457aa",
+      "bytes": 748
+    },
+    "ThirdParty/EOSSDK/Include/eos_anticheatcommon_types.h": {
+      "sha256": "451605beec0348391981a293e3e3deabc884b6c51a6c3b4f8505f4dddc3450b1",
+      "bytes": 27467
+    },
+    "ThirdParty/EOSSDK/Include/eos_anticheatserver.h": {
+      "sha256": "64f223e3d14e1f9186494027fa096bbb1368ef06000223098603a01d74e063d8",
+      "bytes": 20875
+    },
+    "ThirdParty/EOSSDK/Include/eos_anticheatserver_types.h": {
+      "sha256": "7a7215714ccddbecc8095d19c6b01e54717c895f6f043f3222eb5ad8b465e4d5",
+      "bytes": 10588
+    },
+    "ThirdParty/EOSSDK/Include/eos_auth.h": {
+      "sha256": "192638b9c8d0609b0b565cf01e5e1d577471701ba144836064f42c5160dd6291",
+      "bytes": 12721
+    },
+    "ThirdParty/EOSSDK/Include/eos_auth_types.h": {
+      "sha256": "93274052dd106645e00ed0060850486506ef68dfb903a96b6fd0d3f0d846a3c4",
+      "bytes": 32471
+    },
+    "ThirdParty/EOSSDK/Include/eos_auth_types_deprecated.inl": {
+      "sha256": "881fc03c59e64b4974dd709b5e4b7036476484ae64abae82df61f10df6f87d04",
+      "bytes": 956
+    },
+    "ThirdParty/EOSSDK/Include/eos_base.h": {
+      "sha256": "c05f9cec011537c85ad17862c9176db4ff17f47f67662d5238f488fa916ebccb",
+      "bytes": 4656
+    },
+    "ThirdParty/EOSSDK/Include/eos_common.h": {
+      "sha256": "49cf57ffa4527245c815957f7d3aea969ae298595cff6c902d4cbe0e058ccc7e",
+      "bytes": 26125
+    },
+    "ThirdParty/EOSSDK/Include/eos_connect.h": {
+      "sha256": "b94654b175d58a63c26f96636c0d6f5052cf39c5e060eae35c942b6df8b73aba",
+      "bytes": 30164
+    },
+    "ThirdParty/EOSSDK/Include/eos_connect_types.h": {
+      "sha256": "427943389acce7cc1cf6c68b808ded12e4366c4b8600f1e469b35f4b5d46b2dc",
+      "bytes": 32850
+    },
+    "ThirdParty/EOSSDK/Include/eos_custominvites.h": {
+      "sha256": "dae96d2175711e09dca3fe3395ce5d9c3372204da2fdacf2cc578055649ca9bc",
+      "bytes": 18533
+    },
+    "ThirdParty/EOSSDK/Include/eos_custominvites_types.h": {
+      "sha256": "5c6b2f8ae10e4f76d6564bd56befcb44b0204c2d61bdcc31f8940967aec31167",
+      "bytes": 20435
+    },
+    "ThirdParty/EOSSDK/Include/eos_ecom.h": {
+      "sha256": "c9618117fc47e6f5e903d1cfa9fe75dfa0e3640f900b265eb17644c29d3c4bb9",
+      "bytes": 29908
+    },
+    "ThirdParty/EOSSDK/Include/eos_ecom_types.h": {
+      "sha256": "0b330f51fb4e6cf3a1b1b8fdbcee58704f5efcf2ca46e03d3ec62ce9943620c9",
+      "bytes": 48782
+    },
+    "ThirdParty/EOSSDK/Include/eos_friends.h": {
+      "sha256": "b9d80aca762db326c504f02aef7c0a5c5e38633b13209f7e5805910f9837f8d1",
+      "bytes": 9674
+    },
+    "ThirdParty/EOSSDK/Include/eos_friends_types.h": {
+      "sha256": "2d20b98dc231499e1124a1b259592dc71844f1357eeee51446e6f1a21b0e60ea",
+      "bytes": 14144
+    },
+    "ThirdParty/EOSSDK/Include/eos_init.h": {
+      "sha256": "f8b37384f2c6841e995ccd0911c6461c99187a57eca9a0130f2d221ad4d88172",
+      "bytes": 7319
+    },
+    "ThirdParty/EOSSDK/Include/eos_integratedplatform.h": {
+      "sha256": "c72ea83a28a69e7c81481637df483a61f09864a38486d257114cf1f7c557eaea",
+      "bytes": 9282
+    },
+    "ThirdParty/EOSSDK/Include/eos_integratedplatform_types.h": {
+      "sha256": "6db95be1ce82983e3739dbbe1081abbadcb26a382846223e1b1c542329ec3f45",
+      "bytes": 19016
+    },
+    "ThirdParty/EOSSDK/Include/eos_kws.h": {
+      "sha256": "f996ae8d81628d490310083da1198665fa2e561e705f11c6dee443013ce1d777",
+      "bytes": 8159
+    },
+    "ThirdParty/EOSSDK/Include/eos_kws_types.h": {
+      "sha256": "af1159640689d2b0b9a88caa08ddb51b4d2747e1b6c91d19189b9ed810e46827",
+      "bytes": 11739
+    },
+    "ThirdParty/EOSSDK/Include/eos_leaderboards.h": {
+      "sha256": "f0db2c3676482730b5e9762fb2580bd35193bf5f796804498abc2cf3bb44a1ad",
+      "bytes": 10513
+    },
+    "ThirdParty/EOSSDK/Include/eos_leaderboards_types.h": {
+      "sha256": "bdca2811f1c5c302ed58f4e0582f7088dcc13470b78ee3969fc1fd81e38c8dd5",
+      "bytes": 16060
+    },
+    "ThirdParty/EOSSDK/Include/eos_leaderboards_types_deprecated.inl": {
+      "sha256": "940535b7c727f475996fd72834a7bcacb6b891385923776f8fd8a7eb12de1413",
+      "bytes": 490
+    },
+    "ThirdParty/EOSSDK/Include/eos_lobby.h": {
+      "sha256": "c23feb3bad37c113d6eaeb915e2eb0e330eb668e118294333b5b118561a36b6c",
+      "bytes": 62547
+    },
+    "ThirdParty/EOSSDK/Include/eos_lobby_types.h": {
+      "sha256": "c66daf1ebd2c3526f9b6d2392e44dce644fd4f482c34a3e95a65fa8718916572",
+      "bytes": 72701
+    },
+    "ThirdParty/EOSSDK/Include/eos_logging.h": {
+      "sha256": "8574042e0703ae98c8cc841c8455430d0518c7b171181fb0aa9209f7f571b2a8",
+      "bytes": 3587
+    },
+    "ThirdParty/EOSSDK/Include/eos_logging_categories.h": {
+      "sha256": "3f541ccbf188fafda7d2dc61ea5573eb596b9666a170faa59907cc42a46ed7d5",
+      "bytes": 4503
+    },
+    "ThirdParty/EOSSDK/Include/eos_metrics.h": {
+      "sha256": "4ca4ea834372f49f768726b0c9e4a44f3e536078ce602029e1e41edbccd69a43",
+      "bytes": 2040
+    },
+    "ThirdParty/EOSSDK/Include/eos_metrics_types.h": {
+      "sha256": "726f1dbc386617d0583d60acd8ceee0a147f695d629ff8aa3f7d535aba76d631",
+      "bytes": 3178
+    },
+    "ThirdParty/EOSSDK/Include/eos_mods.h": {
+      "sha256": "4f8dd353f6432a9e5fd738a2136b6d0cddf74b16cc690d8634fe1aced9b7cc60",
+      "bytes": 4653
+    },
+    "ThirdParty/EOSSDK/Include/eos_mods_types.h": {
+      "sha256": "55bb1d399d7cac5d906b6a798fe732ac8378e8e13b16bed5dd03bf7cfd549ae3",
+      "bytes": 8837
+    },
+    "ThirdParty/EOSSDK/Include/eos_p2p.h": {
+      "sha256": "f0980331982d0c215e213c8c8da06e935783b6e917236b69853143b2a0b3c26c",
+      "bytes": 21990
+    },
+    "ThirdParty/EOSSDK/Include/eos_p2p_types.h": {
+      "sha256": "dc9db7f31de5e5404d1475de56f0087a13b03daf8a0697cc61f28187ee79f2d0",
+      "bytes": 26619
+    },
+    "ThirdParty/EOSSDK/Include/eos_platform_prereqs.h": {
+      "sha256": "7a4cf4e735e999c2ccbd1f1222e3ae82dd1f55eb8bd22194932de0fc9db97c5f",
+      "bytes": 2659
+    },
+    "ThirdParty/EOSSDK/Include/eos_playerdatastorage.h": {
+      "sha256": "07a6cd8db22a2ac07c0f812d85ac7394237d89f04ab7b305451a722d294b8fd1",
+      "bytes": 14089
+    },
+    "ThirdParty/EOSSDK/Include/eos_playerdatastorage_types.h": {
+      "sha256": "5d7cc80aef68ffb044fddff3a119249185a833d525518121b6ad0c87e5ec2e0b",
+      "bytes": 23453
+    },
+    "ThirdParty/EOSSDK/Include/eos_presence.h": {
+      "sha256": "8d37e1ea9f95e143f073b50f4c8db9602a2488a4e6c0f10df9ebcd3a6c56e454",
+      "bytes": 13670
+    },
+    "ThirdParty/EOSSDK/Include/eos_presence_localized_types.h": {
+      "sha256": "c8812ec29ba45530376219d30e8045318cf1db1ef9ec5cf1cf25e83bd9842bba",
+      "bytes": 1682
+    },
+    "ThirdParty/EOSSDK/Include/eos_presence_types.h": {
+      "sha256": "83e862a86fb99d99250ae05dddf4c27bc335e01a1152cb451353c6613e154c40",
+      "bytes": 17622
+    },
+    "ThirdParty/EOSSDK/Include/eos_progressionsnapshot.h": {
+      "sha256": "b04411b4bbaf3041ba6bea38c6afb35c1313f7986eb2aadc9b956b6b7772f4b2",
+      "bytes": 3903
+    },
+    "ThirdParty/EOSSDK/Include/eos_progressionsnapshot_types.h": {
+      "sha256": "b70783eb0dc53b76a1114e28c8e1ffa1e52984074f37ac3ef589d7e1b2fb0fef",
+      "bytes": 4859
+    },
+    "ThirdParty/EOSSDK/Include/eos_reports.h": {
+      "sha256": "e19df62a77b11907db59fc60de9edc99843b28943701f20602fc3a5adc37546d",
+      "bytes": 980
+    },
+    "ThirdParty/EOSSDK/Include/eos_reports_types.h": {
+      "sha256": "a0c530eb3945e1f6f7788089a11b7ffcaad90da8c7432ba51e1e103d39c94059",
+      "bytes": 3435
+    },
+    "ThirdParty/EOSSDK/Include/eos_result.h": {
+      "sha256": "81b314617da3de0b9c3bc23c3e58ae2daf0a186865329527539b6cd986e1c897",
+      "bytes": 30497
+    },
+    "ThirdParty/EOSSDK/Include/eos_rtc.h": {
+      "sha256": "33d0fe63fd0aada542dccc0a74665178de6dc575f3e3e8425d09649b70fe8c50",
+      "bytes": 11827
+    },
+    "ThirdParty/EOSSDK/Include/eos_rtc_admin.h": {
+      "sha256": "56b7107d7a39a198ba6e71b831d6f44ec11feaa97ca11f3f981ebf0bb70974ca",
+      "bytes": 4888
+    },
+    "ThirdParty/EOSSDK/Include/eos_rtc_admin_types.h": {
+      "sha256": "b4eb783802773d99a85803d877b9233821587bdba5d765ee9d5b807cd61d4ac4",
+      "bytes": 7470
+    },
+    "ThirdParty/EOSSDK/Include/eos_rtc_audio.h": {
+      "sha256": "e2ac72603c47123a254d5bdc5fcac4108970a6024fd6f1b9cac8496b322bd78d",
+      "bytes": 29215
+    },
+    "ThirdParty/EOSSDK/Include/eos_rtc_audio_types.h": {
+      "sha256": "0f0d2614b319679fea175c0ae40837af6c8430b0a38b7167641a972475f53d0a",
+      "bytes": 34012
+    },
+    "ThirdParty/EOSSDK/Include/eos_rtc_audio_types_deprecated.inl": {
+      "sha256": "09f569b45b3118025e6f3a42304bda28f0e47d26c9a2eb28f668865b0818bdea",
+      "bytes": 7431
+    },
+    "ThirdParty/EOSSDK/Include/eos_rtc_data.h": {
+      "sha256": "00abe1676f173ba546c2af52abd7632942b49f3e0409993f4b8ca267e9a0e0a9",
+      "bytes": 5164
+    },
+    "ThirdParty/EOSSDK/Include/eos_rtc_data_types.h": {
+      "sha256": "dd25a1db0fb84f13fa7909c339bde4d9ffc4ca1ee7d9c891ff35c749e41f6a22",
+      "bytes": 7902
+    },
+    "ThirdParty/EOSSDK/Include/eos_rtc_types.h": {
+      "sha256": "1a279d5693e0fef0a5761bbe78e4d346d8c6408caf494a62fcdd4fb152bbe66d",
+      "bytes": 17500
+    },
+    "ThirdParty/EOSSDK/Include/eos_sanctions.h": {
+      "sha256": "683accce27f03a599ef2b974a4f08bd815b85a23c807bc9c1a6723b5f20c2ed7",
+      "bytes": 3620
+    },
+    "ThirdParty/EOSSDK/Include/eos_sanctions_types.h": {
+      "sha256": "ea4a15a9390ae251433df1c3f6b2a012e4729c03316f224445fe30f3c1af0303",
+      "bytes": 6239
+    },
+    "ThirdParty/EOSSDK/Include/eos_sdk.h": {
+      "sha256": "aa045dbbaa2e5710f77967f798e612f2bd8e21a67c02d9eb10365102e0fa26e1",
+      "bytes": 19380
+    },
+    "ThirdParty/EOSSDK/Include/eos_sessions.h": {
+      "sha256": "8d644ecb6ce5464305de49e7d5decfbb2d6fcd65f624ae4aeece7b1ecd25cfdf",
+      "bytes": 47021
+    },
+    "ThirdParty/EOSSDK/Include/eos_sessions_types.h": {
+      "sha256": "38f542caa0a4b6a5ad8de474352b93df185ebdd25475ab3c22ee3b397c4f83ac",
+      "bytes": 56100
+    },
+    "ThirdParty/EOSSDK/Include/eos_stats.h": {
+      "sha256": "4ca69b3e7bda07e560013c8d6b544d1bd1bb21d558e6e07f13e2ad08fb20165f",
+      "bytes": 4245
+    },
+    "ThirdParty/EOSSDK/Include/eos_stats_types.h": {
+      "sha256": "fdb3f7bca2a72295fb4dbfb4d8a2b8b9cd6a5ca68753a71327cdca52b34b9d98",
+      "bytes": 7709
+    },
+    "ThirdParty/EOSSDK/Include/eos_titlestorage.h": {
+      "sha256": "467efaa79c40a8306f1c3b62947331a607b7295c8f34b7f589444932f7f86a2a",
+      "bytes": 10002
+    },
+    "ThirdParty/EOSSDK/Include/eos_titlestorage_types.h": {
+      "sha256": "da4d3ac9c9e2761d0c0a1d45db73e1ec1195a25e0ac5d8e382235168601b744f",
+      "bytes": 13362
+    },
+    "ThirdParty/EOSSDK/Include/eos_types.h": {
+      "sha256": "66aa9c904e3980736e14770c9968d540165d3d4f05f2f8db14306a462d40c7ca",
+      "bytes": 15609
+    },
+    "ThirdParty/EOSSDK/Include/eos_ui.h": {
+      "sha256": "4241f0f00594571ee27aa61f9207e4bb04863054311646668af52d139ec00111",
+      "bytes": 18292
+    },
+    "ThirdParty/EOSSDK/Include/eos_ui_buttons.h": {
+      "sha256": "d5fafa5a8266dac1b227cf43019da141590536e2fbbfde3b48fb3b7798d968ed",
+      "bytes": 1832
+    },
+    "ThirdParty/EOSSDK/Include/eos_ui_keys.h": {
+      "sha256": "c41a0a761c302cc0e11847d35d23d05ba0f8438db4f7a865ea35c8d232c2b382",
+      "bytes": 7074
+    },
+    "ThirdParty/EOSSDK/Include/eos_ui_types.h": {
+      "sha256": "c2b175b61170e17c3f965cb49fb4a18b50d20e7bf0fde1479fe1d7767c17caba",
+      "bytes": 22424
+    },
+    "ThirdParty/EOSSDK/Include/eos_userinfo.h": {
+      "sha256": "8ca8bdf99a5a922870b461523654b7b77143780a4ded11282941576894435db5",
+      "bytes": 13321
+    },
+    "ThirdParty/EOSSDK/Include/eos_userinfo_types.h": {
+      "sha256": "e74a9e3ff99e72227b91d7217ad7427a7d426cd1b66fee629332031341f2515f",
+      "bytes": 15802
+    },
+    "ThirdParty/EOSSDK/Include/eos_version.h": {
+      "sha256": "2552a09e69fbdbb72ec09eae270aeb724a557dd344fb72bac985929e6ff65191",
+      "bytes": 2293
+    },
+    "ThirdParty/EOSSDK/Include/Linux/eos_Linux.h": {
+      "sha256": "9efb7fe46df5d794bd3003a69e5bc70e661b98bc17e87f5c2f3641ce2db8422f",
+      "bytes": 351
+    },
+    "ThirdParty/EOSSDK/Include/Linux/eos_Linux_base.h": {
+      "sha256": "9efb7fe46df5d794bd3003a69e5bc70e661b98bc17e87f5c2f3641ce2db8422f",
+      "bytes": 351
+    },
+    "ThirdParty/EOSSDK/Include/Mac/eos_Mac.h": {
+      "sha256": "9c90044e85029f7071d665cd7f76a3fe418336aeea114e19bfcff396c92e875d",
+      "bytes": 68
+    },
+    "ThirdParty/EOSSDK/Include/Mac/eos_Mac_base.h": {
+      "sha256": "9efb7fe46df5d794bd3003a69e5bc70e661b98bc17e87f5c2f3641ce2db8422f",
+      "bytes": 351
+    },
+    "ThirdParty/EOSSDK/Include/Windows/eos_Windows.h": {
+      "sha256": "bc2d8850d4ad6f321c572ade46fad3d4ad4d35f40538225a27c87ed851fceff6",
+      "bytes": 604
+    },
+    "ThirdParty/EOSSDK/Include/Windows/eos_Windows_base.h": {
+      "sha256": "9efb7fe46df5d794bd3003a69e5bc70e661b98bc17e87f5c2f3641ce2db8422f",
+      "bytes": 351
+    },
+    "ThirdParty/EOSSDK/Lib/EOSSDK-Win64-Shipping.lib": {
+      "sha256": "8fce1aa0b2d82ec939d5bcb12666bacca555ed2bbc52aa843fb0082f54e1dd3a",
+      "bytes": 214016
+    },
+    "ConfigExamples/epic.credentials.example.json": {
+      "sha256": "cb9abc33f01891281dc2456d49549e7a071012d1ce8911727850fbf6d4ccfcb5",
+      "bytes": 239
+    }
+  },
+  "setup_tools_revision": "2026-11-14-EpicOnly",
+  "native_source_unchanged": true
+}

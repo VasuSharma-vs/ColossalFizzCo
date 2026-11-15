@@ -224,6 +224,17 @@ bool UShopCheckoutComponent::GetCanceledStockTransform(int32 ISID, FTransform& O
 	// A physical cap is a separate persistent instance, but must return with its
 	// reserved bottle when the unfinished checkout is canceled during save/load.
 	const auto* Manager=Cast<APropManager>(GetOwner());
+	if (Manager)
+	{
+		const auto* R=Manager->FindISIDData(ISID);
+		if (R && R->Attachment.OwnerISID)
+		{
+			FTransform Parent;
+			if (!Manager->ResolveRootISID(ISID) || !GetCanceledStockTransform(R->Attachment.OwnerISID, Parent)) return false;
+			Out=R->Attachment.RelativeTransform*Parent;
+			return true;
+		}
+	}
 	const auto* Cap=Manager ? Manager->FindUniqueData(ISID) : nullptr;
 	const int32 BottleID=Cap ? Cap->EventData.AttachedBottleISID : 0;
 	const auto* Bottle=Manager ? Manager->FindUniqueData(BottleID) : nullptr;
@@ -232,7 +243,8 @@ bool UShopCheckoutComponent::GetCanceledStockTransform(int32 ISID, FTransform& O
 	const auto* BottleStock=Stock.Find(BottleID);
 	if (!Bottle || Bottle->EventData.AttachedCapISID!=ISID || !Definition || !BottleStock
 		|| !Reservations.Contains(BottleID) || BottleStock->CustomerOwner.IsValid()) return false;
-	Out=Definition->CapAttachmentTransform*BottleStock->StockTransform; return true;
+	const auto* PartRecord=Manager->FindISIDData(ISID);
+	Out=(PartRecord && PartRecord->Attachment.OwnerISID ? PartRecord->Attachment.RelativeTransform : Definition->CapAttachmentTransform)*BottleStock->StockTransform; return true;
 }
 
 FShopCheckoutSaveData UShopCheckoutComponent::ExportCommittedState() const

@@ -28,21 +28,32 @@ bool FBottleContentDynamicsTest::RunTest(const FString& Parameters)
 	auto* Product=LoadObject<UInteractablePropDataAsset>(nullptr,TEXT("/Game/NormalColaPrototype/DA_NormalMint.DA_NormalMint"));
 	if (!Product) return false;
 	const int32 ID=Manager->GenerateProductInstance(Manager->RegisterProductFromDataAsset(Product),FTransform(FVector(0,0,2000)));
-	auto* ISM=Manager->GetComponentFromISID(ID); const int32 Index=ISM->FindISMI(ID),Slots=ISM->GetInstanceCount();
+	int32 LiquidID=0;
+	for (int32 Child : Manager->GetChildISIDs(ID))
+	{
+		const auto* R=Manager->FindISIDData(Child);
+		if (R && Manager->FindProductDefinition(R->ProductID)->bLiquidVisualOnly) LiquidID=Child;
+	}
+	auto* ISM=Manager->GetComponentFromISID(LiquidID);
+	if (!TestNotNull(TEXT("Liquid has its own managed ISM"),ISM)) return false;
+	const int32 Index=ISM->FindISMI(LiquidID),Slots=ISM->GetInstanceCount();
 	if (!Manager->SetInstanceToUnsettled(ID)) return false;
 	auto* Bottle=Cast<AColaPropActor>(Manager->GetActiveActorFromISID(ID));
 	if (!Bottle) return false;
 	TestTrue(TEXT("Approved empty plastic mass reaches real product"),FMath::IsNearlyEqual(Bottle->BottleMass,.05f));
 	TestTrue(TEXT("Four 20ml portions at density1.04 weigh 0.0832kg"),FMath::IsNearlyEqual(Bottle->ContentMass,.0832f));
-	TestTrue(TEXT("Physics receives bottle plus content mass"),FMath::IsNearlyEqual(Bottle->PropMesh->BodyInstance.GetBodyMass(),.1332f));
+	const float CapMass=Bottle->GetInstalledCapMass();
+	TestTrue(TEXT("Installed cap adds mass"),CapMass>0);
+	TestTrue(TEXT("Physics receives assembled mass"),FMath::IsNearlyEqual(Bottle->PropMesh->BodyInstance.GetBodyMass(),.1332f+CapMass));
 	Bottle->PropMesh->SetPhysicsLinearVelocity(FVector(123,45,67));
 	Bottle->PropMesh->SetPhysicsAngularVelocityInDegrees(FVector(12,23,34));
 	const FVector Velocity=Bottle->PropMesh->GetPhysicsLinearVelocity(),Angular=Bottle->PropMesh->GetPhysicsAngularVelocityInDegrees();
 	if (!Manager->ReleaseBottleLiquidPortions(ID,2,FGuid::NewGuid())) return false;
 	TestEqual(TEXT("Half release keeps fractional canonical content"),Bottle->GetContentLevel(),.5f);
-	TestTrue(TEXT("Half full bottle becomes lighter"),FMath::IsNearlyEqual(Bottle->PropMesh->BodyInstance.GetBodyMass(),.0916f));
+	TestTrue(TEXT("Half full bottle becomes lighter"),FMath::IsNearlyEqual(Bottle->PropMesh->BodyInstance.GetBodyMass(),.0916f+CapMass));
 	TestTrue(TEXT("Mass update preserves linear velocity"),Bottle->PropMesh->GetPhysicsLinearVelocity().Equals(Velocity,.01));
 	TestTrue(TEXT("Mass update preserves angular velocity"),Bottle->PropMesh->GetPhysicsAngularVelocityInDegrees().Equals(Angular,.01));
+	if (!TestNotNull(TEXT("Inner liquid mesh has a runtime material"),Bottle->DynamicMaterialInstance.Get())) return false;
 	float Level=-1,Cached=-1;
 	Bottle->DynamicMaterialInstance->GetScalarParameterValue(FMaterialParameterInfo(TEXT("Liquid Level")),Level);
 	Bottle->DynamicMaterialInstance->GetScalarParameterValue(FMaterialParameterInfo(TEXT("Liquid Cached Fill")),Cached);
@@ -66,7 +77,7 @@ bool FBottleContentDynamicsTest::RunTest(const FString& Parameters)
 	Bottle->DynamicMaterialInstance->GetScalarParameterValue(FMaterialParameterInfo(TEXT("Liquid Cached Fill")),Cached);
 	TestEqual(TEXT("Empty ASM material receives exact zero"),Level,0.f); TestEqual(TEXT("Empty cached fill is zero"),Cached,0.f);
 	TestEqual(TEXT("No contents retain zero content mass"),Bottle->ContentMass,0.f);
-	TestTrue(TEXT("Empty physics mass is shell only"),FMath::IsNearlyEqual(Bottle->PropMesh->BodyInstance.GetBodyMass(),.05f));
+	TestTrue(TEXT("Empty capped bottle retains cap mass"),FMath::IsNearlyEqual(Bottle->PropMesh->BodyInstance.GetBodyMass(),.05f+CapMass,1.e-5f));
 	for (int32 I=0;I<100;++I) Bottle->UpdateMorphTargets();
 	TestTrue(TEXT("Expansion relaxes after pressure release"),Bottle->SmoothedPressureExpansion<Bulge*.01f);
 	Bottle->LiquidMotion.Reset(); Bottle->ColaLevel=.7f; // Simulate an obsolete legacy visual mirror.
@@ -77,9 +88,19 @@ bool FBottleContentDynamicsTest::RunTest(const FString& Parameters)
 	if (!TestTrue(TEXT("Empty instance promotes again"),Manager->SetInstanceToUnsettled(ID))) return false;
 	Bottle=Cast<AColaPropActor>(Manager->GetActiveActorFromISID(ID));
 	TestEqual(TEXT("Reactivation preserves emptiness"),Bottle->GetContentLevel(),0.f);
-	TestTrue(TEXT("Reactivation restores the light empty mass"),FMath::IsNearlyEqual(Bottle->PropMesh->BodyInstance.GetBodyMass(),.05f));
+	TestTrue(TEXT("Reactivation restores the light empty mass"),FMath::IsNearlyEqual(Bottle->PropMesh->BodyInstance.GetBodyMass(),.05f+CapMass,1.e-5f));
 	// Receiving-role fixture exercises the same replicated-event callbacks without
 	// claiming an actual remote network connection.
+	// A refilled bottle now receives a managed content child as well as its event.
+	// Recreate that authoritative setup before testing the receiving callbacks.
+	auto DenseVisual=*Manager->FindProductDefinition(Product->DefaultContentID);
+	DenseVisual.ProductID=Dense.ContentID;DenseVisual.StaticMeshID=Dense.ContentID;DenseVisual.CatalogPID=Dense.ContentID;
+	if(!Manager->RegisterProductDefinition(DenseVisual))return false;
+	FPropEventSyncDelta Refill;Refill.SetFlag(EPropEventDirtyMask::ContentID);Refill.SetFlag(EPropEventDirtyMask::ContentLevel);
+	Refill.ContentID=Dense.ContentID;Refill.ContentLevel=.5f;
+	if(!Manager->SubmitInstanceEventUpdate(ID,Refill))return false;
+	Bottle->UpdateDynamicMaterial(false);
+	if(!TestNotNull(TEXT("Replicated refill has a managed liquid material"),Bottle->DynamicMaterialInstance.Get()))return false;
 	Bottle->SwapRoles();
 	FPropEventUpdateData Incoming=Bottle->LocalUniqueData.EventData;
 	Incoming.ContentID=Dense.ContentID; Incoming.ContentLevel=.5f; ++Incoming.EventSequence;

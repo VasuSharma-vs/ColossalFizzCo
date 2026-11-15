@@ -1,6 +1,9 @@
 #include "Shop/BottleFillingComponent.h"
 #include "Props/InteractablePropManager.h"
 #include "Net/UnrealNetwork.h"
+#include "Engine/World.h"
+#include "Shop/ShopProductionStationComponent.h"
+#include "GameFramework/Pawn.h"
 
 UBottleFillingComponent::UBottleFillingComponent()
 {
@@ -19,7 +22,15 @@ void UBottleFillingComponent::GetLifetimeReplicatedProps(TArray<FLifetimePropert
 
 bool UBottleFillingComponent::ConnectionsInRange() const
 {
-	if (!Manager.IsValid() || !GetOwner() || !Manager->FindISIDData(SourceISID) || !Manager->FindISIDData(TargetISID)) return false;
+	if (!Manager.IsValid() || !GetOwner() || !FMath::IsFinite(MaxConnectionDistance) || MaxConnectionDistance <= 0 || !Manager->FindISIDData(SourceISID) || !Manager->FindISIDData(TargetISID)) return false;
+	if (bRequireLever && (!LeverOperator.IsValid() || GetWorld()->GetTimeSeconds()>=LeverExpiresAt
+		|| FVector::DistSquared(LeverOperator->GetActorLocation(),GetOwner()->GetActorLocation())>FMath::Square(400.f))) return false;
+	if (bRequireLever)
+	{
+		const auto* Pawn=Cast<APawn>(LeverOperator.Get());
+		const auto* Station=GetOwner()->FindComponentByClass<UShopProductionStationComponent>();
+		if (!Pawn || !Pawn->GetController() || !Station || !Station->IsBottleAligned(TargetISID)) return false;
+	}
 	const FVector Origin = GetOwner()->GetActorLocation();
 	return FVector::DistSquared(Origin, Manager->GetTransform(SourceISID).GetLocation()) <= FMath::Square(MaxConnectionDistance)
 		&& FVector::DistSquared(Origin, Manager->GetTransform(TargetISID).GetLocation()) <= FMath::Square(MaxConnectionDistance);
@@ -30,9 +41,12 @@ bool UBottleFillingComponent::StartFilling(int32 Source, int32 Target)
 	if (!GetOwner() || !GetOwner()->HasAuthority() || bIsFilling || !FMath::IsFinite(PortionsPerSecond) || PortionsPerSecond <= 0
 		|| !FMath::IsFinite(TargetContentLevel) || TargetContentLevel < 0) return false;
 	Manager = APropManager::Get(this); SourceISID = Source; TargetISID = Target;
-	if (!ConnectionsInRange()) return false;
+	if (!ConnectionsInRange()) { SourceISID = TargetISID = 0; return false; }
+	const auto* TargetData = Manager->FindUniqueData(Target);
+	if (TargetContentLevel > 0 && (!TargetData || TargetData->EventData.ContentLevel >= TargetContentLevel))
+	{ SourceISID = TargetISID = 0; return false; }
 	SessionID = Manager->BeginLiquidTransfer(Source, Target);
-	if (!SessionID.IsValid()) return false;
+	if (!SessionID.IsValid()) { SourceISID = TargetISID = 0; return false; }
 	bIsFilling = true; AccumulatedSeconds = 0; SetComponentTickEnabled(true); GetOwner()->ForceNetUpdate(); return true;
 }
 
@@ -65,7 +79,23 @@ void UBottleFillingComponent::TickComponent(float Dt, ELevelTick TickType, FActo
 			if (!Data || !Product) { StopFilling(); break; }
 			Requested = FMath::Min(Requested, FMath::Max(0.f, TargetContentLevel - Data->EventData.ContentLevel) * Product->ConsumableProfile.NumOfPortions);
 		}
-		if (Requested <= 0 || Manager->TransferLiquid(SessionID, Requested) <= 0) StopFilling();
+		const auto* Before=Manager->FindUniqueData(TargetISID);
+		const float PreviousLevel=Before ? Before->EventData.ContentLevel : 0;
+		if (Requested <= 0 || Manager->TransferLiquid(SessionID, Requested) <= 0) { StopFilling(); break; }
+		if (PressurePerContentLevel>0)
+		{
+			const auto* After=Manager->FindUniqueData(TargetISID);
+			if (After)
+			{
+				if (PreviousLevel<=0)
+				{
+					FPropEventSyncDelta D; D.ExtendedDirtyMask=EPropExtendedEventMask::TemporarySeal; D.bManualFillPressure=true;
+					Manager->SubmitInstanceEventUpdate(TargetISID,D);
+				}
+				After=Manager->FindUniqueData(TargetISID);
+				Manager->SetBottleAgitationPressure(TargetISID,(PreviousLevel<=0 ? 0.f : After->ContinuousData.SealedPressure)+(After->EventData.ContentLevel-PreviousLevel)*PressurePerContentLevel);
+			}
+		}
 	}
 }
 

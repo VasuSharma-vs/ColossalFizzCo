@@ -2,7 +2,17 @@
 #include "CoreMinimal.h"
 #include "NavigationSystem.h"
 #include "NavMesh/RecastNavMesh.h"
+#include "NavFilters/NavigationQueryFilter.h"
 #include "NormalColaNavigationConfig.generated.h"
+
+/** Prototype visit paths avoid patrons; their own legacy AI can still exit the high-cost area. */
+UCLASS()
+class COLOSSALFIZZCO_API UNormalColaCustomerFilter:public UNavigationQueryFilter
+{
+	GENERATED_BODY()
+public:
+	UNormalColaCustomerFilter();
+};
 
 UCLASS(NotPlaceable)
 class COLOSSALFIZZCO_API ANormalColaNavigationData:public ARecastNavMesh
@@ -10,6 +20,7 @@ class COLOSSALFIZZCO_API ANormalColaNavigationData:public ARecastNavMesh
 	GENERATED_BODY()
 public:
 	ANormalColaNavigationData();
+	FVector2D GetGenerationAgentSize() const { return FVector2D(AgentRadius,AgentHeight); }
 	virtual void PostInitProperties() override;
 	virtual void PostLoad() override;
 };

@@ -1,0 +1,5 @@
+{
+  "version": "1.19.2.1",
+  "dll_sha256": "ab25af350c48856633d671a16e8469277f9acee39186d69fe5b2a26100d738e8",
+  "scope": "Windows x64; engine public bridge API, supplied project-local runtime; no engine files modified"
+}

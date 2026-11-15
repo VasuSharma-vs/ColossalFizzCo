@@ -1,4 +1,5 @@
 #include "Components/InteractableInstancedStaticMeshComponent.h"
+#include "Props/PropAssemblyMesh.h"
 #include "Props/InteractableProp.h"
 #include "Props/ColaPropActor.h"
 #include "Props/ColaLiquidMotion.h"
@@ -41,7 +42,7 @@ void UInteractableISMComponent::OnRegister()
 	SetGenerateOverlapEvents(false);
 	SetNotifyRigidBodyCollision(true);
 	BodyInstance.bNotifyRigidBodyCollision = true;
-	if (GetCollisionEnabled() == ECollisionEnabled::NoCollision)
+	if (LiquidMaterialSlot != 0 && GetCollisionEnabled() == ECollisionEnabled::NoCollision)
 	{
 		SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 		SetCollisionProfileName(UCollisionProfile::BlockAllDynamic_ProfileName);
@@ -148,6 +149,12 @@ void UInteractableISMComponent::EndPlay(const EEndPlayReason::Type EndPlayReason
 	Super::EndPlay(EndPlayReason);
 }
 
+void UInteractableISMComponent::PreReplication(IRepChangedPropertyTracker& ChangedPropertyTracker)
+{
+	Super::PreReplication(ChangedPropertyTracker);
+	DOREPLIFETIME_ACTIVE_OVERRIDE(UInteractableISMComponent, PackedInstanceData, !Cast<APropManager>(GetOwner()));
+}
+
 void UInteractableISMComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
@@ -187,7 +194,9 @@ void UInteractableISMComponent::ApplyProductDefinition(const FPropProductDefinit
 	}
 
 	// 2. Resolve source material overrides
-	const TArray<TObjectPtr<UMaterialInterface>>& SourceOverrides = (InDefinition.SourceDataAsset && InDefinition.SourceDataAsset->MaterialOverrides.Num() > 0)
+	const bool Modular = InDefinition.LiquidVisualPID || InDefinition.bLiquidVisualOnly || (InDefinition.bIsBottleCap && !InDefinition.SupportedBottleMaterials.IsEmpty());
+	if (Modular) SetCanEverAffectNavigation(false);
+	const TArray<TObjectPtr<UMaterialInterface>>& SourceOverrides = (!Modular && InDefinition.SourceDataAsset && InDefinition.SourceDataAsset->MaterialOverrides.Num() > 0)
 		? InDefinition.SourceDataAsset->MaterialOverrides
 		: InDefinition.MaterialOverrides;
 
@@ -232,11 +241,13 @@ void UInteractableISMComponent::ApplyProductDefinition(const FPropProductDefinit
 			Mat->CheckMaterialUsage(MATUSAGE_InstancedStaticMeshes);
 		}
 	}
-	bUsesBottleLiquidVolume=InDefinition.CustomActiveActorClass && InDefinition.CustomActiveActorClass->IsChildOf(AColaPropActor::StaticClass());
+	LiquidMaterialSlot = InDefinition.bLiquidVisualOnly ? 0 : 1;
+	bUsesBottleLiquidVolume=InDefinition.bLiquidVisualOnly || (!InDefinition.LiquidVisualPID && InDefinition.CustomActiveActorClass && InDefinition.CustomActiveActorClass->IsChildOf(AColaPropActor::StaticClass()));
 	RefreshBottleLiquidMaterial();
 	MarkRenderStateDirty();
 
-	if (GetCollisionEnabled() == ECollisionEnabled::NoCollision)
+	if (InDefinition.bLiquidVisualOnly) SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	else if (GetCollisionEnabled() == ECollisionEnabled::NoCollision)
 	{
 		SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 		SetCollisionProfileName(UCollisionProfile::BlockAllDynamic_ProfileName);
@@ -251,15 +262,16 @@ void UInteractableISMComponent::RefreshBottleLiquidMaterial()
 		// During play, every resting bottle uses its authoritative per-instance fill.
 		if (GetWorld() && GetWorld()->IsGameWorld())
 		{
-			UMaterialInterface* Source=GetMaterial(1);
+			UMaterialInterface* Source=GetMaterial(LiquidMaterialSlot);
 			if (Source && Source!=LiquidInstanceMaterial)
 			{
 				if (!LiquidInstanceMaterial || Source!=LiquidInstanceMaterialSource)
 				{
 					LiquidInstanceMaterialSource=Source;
 					LiquidInstanceMaterial=UMaterialInstanceDynamic::Create(Source,this);
+					if (LiquidMaterialSlot == 0) UPropAssemblyMesh::ConfigureLiquidBounds(GetStaticMesh(),LiquidInstanceMaterial);
 				}
-				if (LiquidInstanceMaterial) SetMaterial(1,LiquidInstanceMaterial);
+				if (LiquidInstanceMaterial) SetMaterial(LiquidMaterialSlot,LiquidInstanceMaterial);
 			}
 			if (LiquidInstanceMaterial)
 			{
@@ -267,7 +279,7 @@ void UInteractableISMComponent::RefreshBottleLiquidMaterial()
 				LiquidInstanceMaterial->SetScalarParameterValue(TEXT("Native Liquid Motion"),0);
 			}
 		}
-		if (UMaterialInterface* Liquid=GetMaterial(1))
+		if (UMaterialInterface* Liquid=GetMaterial(LiquidMaterialSlot))
 		{
 			Liquid->GetScalarParameterValue(FMaterialParameterInfo(TEXT("Liquid Container Height")),LiquidVolumeHeightCm);
 			Liquid->GetScalarParameterValue(FMaterialParameterInfo(TEXT("Liquid Container Radius")),LiquidVolumeRadiusCm);
@@ -279,7 +291,7 @@ void UInteractableISMComponent::RefreshBottleLiquidMaterial()
 UMaterialInterface* UInteractableISMComponent::GetProductMaterial(int32 MaterialIndex) const
 {
 	UMaterialInterface* Material=GetMaterial(MaterialIndex);
-	return MaterialIndex==1 && Material && Material==LiquidInstanceMaterial
+	return MaterialIndex==LiquidMaterialSlot && Material && Material==LiquidInstanceMaterial
 		? LiquidInstanceMaterialSource.Get() : Material;
 }
 
@@ -288,8 +300,7 @@ UMaterialInterface* UInteractableISMComponent::GetProductMaterial(int32 Material
 // -----------------------------------------------------------------------------
 int32 UInteractableISMComponent::AddInstanceWithISID(int32 InISID, const FTransform& InstanceTransform, const FPropPackedRuntimeData& InitialData, bool bWorldSpace)
 {
-	SetNotifyRigidBodyCollision(true);
-	BodyInstance.bNotifyRigidBodyCollision = true;
+	SetNotifyRigidBodyCollision(IsCollisionEnabled());
 	const int32 NewISMI = AddInstance(InstanceTransform, bWorldSpace);
 	if (NewISMI == INDEX_NONE)
 	{
@@ -784,6 +795,16 @@ void UInteractableISMComponent::UpdateInstanceCustomDataDirect(
 		SetNumCustomDataFloats(6);
 	}
 
+	// Every render refresh (including component rebuilds) uses the owning bottle's liquid state.
+	if (ProductDef && ProductDef->bLiquidVisualOnly)
+	{
+		if (const auto* Manager = Cast<APropManager>(GetOwner()))
+		{
+			const int32 Root = Manager->ResolveRootISID(FindISID(InISMI));
+			UniqueData = Manager->FindUniqueData(Root);
+			ContentDef = UniqueData ? Manager->FindContentDefinition(UniqueData->EventData.ContentID) : nullptr;
+		}
+	}
 	// Slot 0: ContentLevel [0.0 .. MaxOverfillLevel]
 	float ContentLevelValue = 1.0f;
 	if (UniqueData)
@@ -980,6 +1001,7 @@ bool UInteractableISMComponent::AddEmptyInstance(int32 InISMI)
 	}
 
 	// - Should remain at the component's Reset/Parking transform
+	for(int32 Channel=0;Channel<NumCustomDataFloats;++Channel)SetCustomDataValue(InISMI,Channel,0.f,false);
 	UpdateInstanceTransform(InISMI, GetEffectiveResetTransform(), true, true, true);
 	MarkRenderStateDirty();
 

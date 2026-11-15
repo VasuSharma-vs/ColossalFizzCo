@@ -9,7 +9,7 @@ enum class EShopCheckoutResult : uint8
 {
 	Success, AlreadyCompleted, NotAuthority, InvalidRequest, Unavailable, InvalidProduct,
 	ExpiredProduct, Unpaid, IncorrectChange, QuoteChanged, WalletFailure, NotFound, OperationConflict,
-	CompensationPending, InvalidReplacement, AlreadyResolved, CashUnavailable
+	CompensationPending, InvalidReplacement, AlreadyResolved, CashUnavailable, ContentNotSupported, CapNotSupported
 };
 
 /** Derived scanner view. Reading it never changes representation, stock, or wallet state. */

@@ -134,8 +134,18 @@ bool FNormalColaReinvestmentTest::RunTest(const FString& Parameters)
 		auto Position=[&](int32 ID,USceneComponent* Input)
 		{
 			if (auto* Actor=Manager->GetActiveActorFromISID(ID)) Actor->PropMesh->SetSimulatePhysics(false);
-			Manager->InitializeInstanceTransform(ID,FTransform(FRotator::ZeroRotator,Input->GetComponentLocation(),FVector::OneVector));
+			const auto* Def=Manager->FindProductDefinition(Manager->FindISIDData(ID)->ProductID);
+			const FVector Offset=Def && Def->bIsBottleCap && Def->StaticMesh ? Def->StaticMesh->GetBoundingBox().GetCenter() : FVector::ZeroVector;
+			Manager->InitializeInstanceTransform(ID,FTransform(FRotator::ZeroRotator,Input->GetComponentLocation()-Offset,FVector::OneVector));
 		};
+		auto* Carrier=Holder->GetOwner();
+		Carrier->SetActorLocation(Manager->GetTransform(Bottle).GetLocation()+FVector(-80,0,80));
+		if (!TestTrue(TEXT("Player picks up a real empty plastic bottle"),Manager->BeginGrab(Bottle,Carrier,Carrier->GetRootComponent()))) return false;
+		const FTransform FillingPlacement(FRotator::ZeroRotator,Station->BottleInput->GetComponentLocation(),FVector::OneVector);
+		TestTrue(TEXT("Player carries empty bottle to filling equipment"),Manager->UpdateHeldTransform(Bottle,FillingPlacement));
+		TestTrue(TEXT("Player places empty bottle on filling equipment"),Manager->ReleaseGrab(Bottle,Carrier));
+		TestEqual(TEXT("Pickup and placement preserve empty contents"),Manager->FindUniqueData(Bottle)->EventData.ContentLevel,0.f);
+		Carrier->SetActorLocation(FVector(-100,-100,200));
 		Position(Bottle,Station->BottleInput); Position(Cap,Station->CapInput); Position(Cylinder,Station->CylinderInput);
 		Manager->WorldElapsedSeconds+=1;
 		const auto Session=Station->View.SessionID;
@@ -146,6 +156,9 @@ bool FNormalColaReinvestmentTest::RunTest(const FString& Parameters)
 		const float SourceLevel=Manager->FindUniqueData(Cylinder)->EventData.ContentLevel;
 		AddInfo(FString::Printf(TEXT("%s cylinder after four portions: %.9f"),Flavor,SourceLevel));
 		TestTrue(TEXT("Cylinder loses exactly one bottle's four portions"),FMath::IsNearlyEqual(SourceLevel,.9f,1.e-5f));
+		Manager->InitializeInstanceTransform(Bottle,FTransform(Shelf->GetActorLocation())); Stock->RefreshStock();
+		TestFalse(TEXT("Full but uncapped bottle cannot register as sellable shelf stock"),Manager->ShopCheckout->IsAvailableShopStock(Bottle));
+		Position(Bottle,Station->BottleInput);
 		if (!TestEqual(TEXT("Purchased compatible cap attaches"),Station->Execute(Session,EShopProductionAction::AttachCap,Bottle,Cap),EShopCheckoutResult::Success)) return false;
 		if (!TestEqual(TEXT("Holder claims real station"),Holder->ExecuteProductionAction(Station,Session,EShopProductionAction::HoldCapRole,Bottle,0,++HoldSequence),EShopCheckoutResult::Success)) return false;
 		if (!TestEqual(TEXT("Second operator claims rotation"),Rotator->ExecuteProductionAction(Station,Session,EShopProductionAction::RotateCapRole,Bottle,0,++TurnSequence),EShopCheckoutResult::Success)) return false;

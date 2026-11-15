@@ -137,7 +137,7 @@ bool FFragmentLifecycleTest::RunTest(const FString& Parameters)
 	Recipe.Last().FragmentProductID = 111;
 	FPropContentDefinition Cola; Cola.ContentID = 7; Cola.ExpiryProfile.bHasExpiry = false;
 	Manager->RegisterContentDefinition(Cola);
-	FPropProductDefinition Bottle; Bottle.ProductID = 21; Bottle.StaticMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Assest/meshs/Cola1.Cola1"));
+	FPropProductDefinition Bottle; Bottle.ProductID = 21; Bottle.StaticMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Assest/meshs/PlasticBottle/SM_PlasticBottle.SM_PlasticBottle"));
 	Bottle.CustomActiveActorClass = AColaPropActor::StaticClass(); Bottle.bEnableInstanceUniqueData = true;
 	Bottle.ConsumableProfile.NumOfPortions = 25; Bottle.DefaultUniqueData.EventData.ContentID = 7;
 	Bottle.DefaultUniqueData.EventData.ContentLevel = .7f; Bottle.FractureFragments = Recipe;

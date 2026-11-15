@@ -34,7 +34,11 @@ bool FNormalColaNavigationTest::RunTest(const FString& Parameters)
 		GetDefault<ANormalColaNavigationData>()->GetRuntimeGenerationMode(),ERuntimeGenerationType::Dynamic);
 	auto* Data=World->SpawnActor<ANormalColaNavigationData>();
 	if (TestNotNull(TEXT("Native giant navigation data spawns"),Data))
+	{
+		Data->SetConfig(Agents[0]);
+		TestTrue(TEXT("Generation settings match giant collision dimensions"),Data->GetGenerationAgentSize().Equals(FVector2D(Agents[0].AgentRadius,Agents[0].AgentHeight),.01));
 		TestEqual(TEXT("Spawned navigation remains dynamically generated"),Data->GetRuntimeGenerationMode(),ERuntimeGenerationType::Dynamic);
+	}
 	return true;
 }
 #endif

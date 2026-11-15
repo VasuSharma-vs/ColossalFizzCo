@@ -50,6 +50,7 @@ bool FBottleRocketTravelTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Flight reaches its configured distance"),Bottle->RocketComp->GetTotalFlightDistanceTraveled()>=600.f);
 	TestEqual(TEXT("Bottle is exactly empty at travel limit"),Bottle->GetContentLevel(),0.f);
 	TestEqual(TEXT("Material is exactly empty at travel limit"),Bottle->ColaLevel,0.f);
+	TestTrue(TEXT("Physics handoff retains the authoritative settlement monitor"),Bottle->RocketComp->IsComponentTickEnabled());
 	TestTrue(TEXT("Travel limit hands off to physics falling"),Bottle->PropMesh->IsSimulatingPhysics() && Bottle->IsReplicatingMovement());
 	TestTrue(TEXT("Handoff preserves root position and rotation"),Bottle->GetActorTransform().Equals(LastPose,.001));
 	TestTrue(TEXT("Handoff preserves projectile linear velocity"),Bottle->PropMesh->GetPhysicsLinearVelocity().Equals(LastVelocity,.1));
@@ -58,6 +59,15 @@ bool FBottleRocketTravelTest::RunTest(const FString& Parameters)
 	double Released=0; for (const auto& Row:Manager->ReleasedLiquids) if (Row.SourceISID==ID) Released+=Row.Portions;
 	TestTrue(TEXT("All expelled liquid is conserved in one release ledger"),FMath::IsNearlyEqual(Released,4.0,1.e-4));
 	TestEqual(TEXT("Repeated requests cannot relaunch an uncapped empty bottle"),Bottle->StartPlasticPressureRelease(),false);
+	const int32 EarlyID=Manager->GenerateProductInstance(Manager->RegisterProductFromDataAsset(Product),FTransform(FVector(900,0,2000)));
+	if (!Manager->SetInstanceToUnsettled(EarlyID)) return false;
+	auto* Early=Cast<AColaPropActor>(Manager->GetActiveActorFromISID(EarlyID));
+	if (!Early || !Early->RocketComp) return false;
+	Manager->SetBottleAgitationPressure(EarlyID,Early->GetBottlePressureTolerance()+1); Early->AddAgitationPressure(.01f);
+	static_cast<UActorComponent*>(Early->RocketComp.Get())->TickComponent(.02f,LEVELTICK_All,nullptr);
+	Early->RocketComp->FinishPressureThrust();
+	TestEqual(TEXT("Early flight handoff also empties remaining fuel"),Early->GetContentLevel(),0.f);
+	TestTrue(TEXT("Early handoff leaves only Chaos in control"),Early->PropMesh->IsSimulatingPhysics() && !Early->RocketComp->IsPoweredFlight());
 	return true;
 }
 #endif

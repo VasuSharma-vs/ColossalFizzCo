@@ -20,10 +20,11 @@ void UShopScannerComponent::RebuildGroups()
 	ScannerState.Groups.Reset();
 	for (const auto& Item : ScannerState.Checkout.Items)
 	{
-		FShopGroupedEntry* Group = ScannerState.Groups.FindByPredicate([&Item](const auto& G) { return G.ProductID == Item.ProductID && G.ContentID == Item.ContentID; });
+		const auto* PropRegistry=ResolveManager();const int32 PID=PropRegistry ? PropRegistry->CanonicalProductPID(Item.ProductID) : Item.ProductID;
+		FShopGroupedEntry* Group = ScannerState.Groups.FindByPredicate([&Item,PID](const auto& G) { return G.ProductID == PID && G.ContentID == Item.ContentID; });
 		if (!Group)
 		{
-			FShopGroupedEntry NewGroup; NewGroup.ProductID = Item.ProductID; NewGroup.ContentID = Item.ContentID; NewGroup.DisplayName = Item.Snapshot.DisplayName;
+			FShopGroupedEntry NewGroup; NewGroup.ProductID = PID; NewGroup.ContentID = Item.ContentID; NewGroup.DisplayName = Item.Snapshot.DisplayName;
 			ScannerState.Groups.Add(NewGroup); Group = &ScannerState.Groups.Last();
 		}
 		Group->BottleISIDs.Add(Item.ISID);

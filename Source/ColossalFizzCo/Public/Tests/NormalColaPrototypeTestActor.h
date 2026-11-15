@@ -3,6 +3,8 @@
 #include "GameFramework/Actor.h"
 #include "NormalColaPrototypeTestActor.generated.h"
 class ACharacter;
+class APawn;
+class ACameraActor;
 class UShopScannerComponent;
 class APropManager;
 
@@ -19,6 +21,7 @@ public:
 	UPROPERTY(EditAnywhere,Category="Test") int32 Command=0;
 	/** Disable simulated cap inputs so actual G/R keys can be accepted on both peers. */
 	UPROPERTY(Replicated,EditAnywhere,Category="Test") bool bManualCappingInput=false;
+	UPROPERTY(Replicated,VisibleAnywhere,Category="Test") bool bManufacturingOnly=false;
 	UPROPERTY(Replicated,VisibleAnywhere,Category="Test") int32 Stage=0;
 	UPROPERTY(Replicated,VisibleAnywhere,Category="Test") int32 SalesCompleted=0;
 	UPROPERTY(Replicated,VisibleAnywhere,Category="Test") int64 ExpectedCashCents=0;
@@ -59,6 +62,11 @@ private:
 	int32 ObservedStage=0;
 	double ObservedStageAt=0;
 	double NextProgressLogAt=0;
+	bool bCapturedActive=false, bCapturedResting=false;
+	TWeakObjectPtr<ACameraActor> EvidenceCamera;
+	void CaptureBottleEvidence();
+	static void PlaceTestPawn(APawn* Pawn,const FVector& Location);
+	bool PlaceCashierAtControls(APawn* Pawn);
 	void TickReinvestment();
 	void TickPressureFlight();
 	void Fail(const FString& Message);

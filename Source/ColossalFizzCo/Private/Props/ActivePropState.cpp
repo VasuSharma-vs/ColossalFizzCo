@@ -2,7 +2,9 @@
 #include "Props/InteractablePropManager.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
 #include "Components/RocketProjectileComponent.h"
+#include "Components/StaticMeshPhysicsSimulationComponent.h"
 
 const FPropProductDefinition* AActivePropActor::ResolveProductDefinition() const
 {
@@ -59,7 +61,15 @@ void AActivePropActor::OnApplySharedDefinitions(const FPropProductDefinition* Pr
 		}
 		else RestoreAuthoredMass();
 	}
-	if (ContentDef && SkeletalMeshComponent && ContentDef->LiquidMaterial) SkeletalMeshComponent->SetMaterial(1, ContentDef->LiquidMaterial);
+	// Legacy combined meshes have a liquid section. Modular assemblies shade their child instead.
+	if ((!ProductDef || !ProductDef->LiquidVisualPID) && ContentDef && ContentDef->LiquidMaterial && SkeletalMeshComponent)
+	{
+		const auto* Skel = SkeletalMeshComponent->GetSkeletalMeshAsset();
+		if (Skel && Skel->GetMaterials().IsValidIndex(1))
+		{
+			SkeletalMeshComponent->SetMaterial(1, ContentDef->LiquidMaterial);
+		}
+	}
 }
 void AActivePropActor::RestoreAuthoredMass()
 {
@@ -103,6 +113,7 @@ void AActivePropActor::EmitPropEventUpdate(uint8 DirtyMask, uint8 ExtendedDirtyM
 		Delta.CreationTime = E.CreationTime; Delta.NewProductID = ProductID;
 		Delta.ContentCreationTime = E.ContentCreationTime; Delta.bClean = E.bClean;
 		Delta.AttachedCapISID = E.AttachedCapISID; Delta.AttachedBottleISID = E.AttachedBottleISID;
+		Delta.TemporarySealUntil=E.TemporarySealUntil; Delta.bTemporarySealUsed=E.bTemporarySealUsed; Delta.bManualFillPressure=E.bManualFillPressure; Delta.LinkedSupplyISID=E.LinkedSupplyISID;
 		PropManagerReference->SubmitInstanceEventUpdate(ISID, Delta);
 	}
 	else LocalUniqueData.EventData.EventSequence++;
@@ -112,9 +123,30 @@ bool AActivePropActor::IsKeptActiveByVolume() const
 {
 	return HasAuthority() && bIsActive && PropManagerReference && PropManagerReference->IsInstanceKeptActive(ISID);
 }
+void AActivePropActor::SetSeatedInFiller(bool bSeated)
+{
+	if (!HasAuthority() || ISID <= 0) return;
+	const int32 NewID = bSeated ? ISID : 0;
+	if (NewID != FillerSeatISID)
+	{
+		FillerSeatISID = NewID;
+		OnRep_FillerSeat();
+		ForceNetUpdate();
+	}
+}
+void AActivePropActor::OnRep_FillerSeat()
+{
+	if (!IsSeatedInFiller()) return;
+	if (PhysicsSimComponent)
+	{
+		PhysicsSimComponent->ClearUnsettledTimer();
+		if (PropManagerReference) PropManagerReference->UnregisterSettlingComponent(PhysicsSimComponent);
+	}
+	if (PropMesh && PropMesh->IsSimulatingPhysics()) PropMesh->SetSimulatePhysics(false);
+}
 bool AActivePropActor::CanDemoteToISM() const
 {
-	if (bIsHeld || bIsInMotion || bIsInterpolatingToRest || HasActiveThermalSources() || IsKeptActiveByVolume()) return false;
+	if (IsSeatedInFiller() || bIsHeld || bIsInMotion || bIsInterpolatingToRest || HasActiveThermalSources() || IsKeptActiveByVolume()) return false;
 	if (const URocketProjectileComponent* Rocket = FindComponentByClass<URocketProjectileComponent>())
 		if (Rocket->GetSimulationState() != ERocketSimulationState::Idle && Rocket->GetSimulationState() != ERocketSimulationState::AtRest) return false;
 	return true;
@@ -140,6 +172,7 @@ void AActivePropActor::OnBeforePoolDeactivate() { ResetTransientPoolState(); }
 void AActivePropActor::ResetForInstanceBinding() { ResetTransientPoolState(); }
 void AActivePropActor::ResetTransientPoolState()
 {
+	if (HasAuthority()) FillerSeatISID = 0;
 	RestoreAuthoredMass();
 	++PoolGeneration;
 	bPendingServerPromoteAck = false;

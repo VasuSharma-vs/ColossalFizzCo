@@ -76,6 +76,7 @@ void URocketProjectileComponent::FinishPressureThrust()
 		Prop->SetInMotion(false);
 		if (Prop->PhysicsSimComponent) Prop->PhysicsSimComponent->SetStateUnsettled(1.f);
 	}
+	SetComponentTickEnabled(true);
 	GetOwner()->SetReplicateMovement(true);
 	GetOwner()->ForceNetUpdate(); OnRocketStateChanged.Broadcast(CurrentState,Previous); OnRocketFuelDepleted.Broadcast();
 }
