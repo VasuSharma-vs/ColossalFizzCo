@@ -26,7 +26,8 @@ bool URocketProjectileComponent::StartPressurePhysicsFlight()
 	SavePrimitiveSettings();
 	if (auto* Prop=Cast<AActivePropActor>(GetOwner())) Prop->SetInMotion(true);
 	TargetPrimitive->SetMobility(EComponentMobility::Movable);
-	TargetPrimitive->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	ConfigureFlightCollision(true);
+	ResetWorldHitHistory();
 	TargetPrimitive->SetEnableGravity(true);
 	TargetPrimitive->SetSimulatePhysics(true);
 	if (!TargetPrimitive->IsSimulatingPhysics()) { RestorePrimitiveSettings(); return false; }
@@ -59,13 +60,9 @@ void URocketProjectileComponent::FinishPressureThrust()
 		|| (!IsPoweredFlight() && !(CurrentState==ERocketSimulationState::SpentFalling && !FlightNetState.bPhysicsSimulating))) return;
 	if (!FlightNetState.bPressurePhysicsFlight)
 	{
-		// Empty/vented bottles cannot keep following a powered flight plan. Use the
-		// component's existing momentum-preserving handoff, then authoritative root
-		// replication (the same falling channel as the pressure-physics mode).
-		HandoffToPhysicsSimulation();
-		FlightNetState.bPressurePhysicsFlight=true;
-		GetOwner()->SetReplicateMovement(true);
-		GetOwner()->ForceNetUpdate();
+		// The scripted rocket owns its falling/bounce/handoff policy; depletion must
+		// not override the Blueprint's chosen transition or select Chaos replication.
+		EndScriptedThrust();
 		return;
 	}
 	const auto Previous=CurrentState;
@@ -93,13 +90,19 @@ void URocketProjectileComponent::ReapplyReplicatedFlightState()
 
 void URocketProjectileComponent::ApplyPressurePhysicsNetState()
 {
+	SavePrimitiveSettings();
 	// Built-in actor physics replication supplies authoritative root transforms and velocity,
 	// including late joiners. Clients never run the legacy independent launch/handoff paths.
 	const auto Previous=CurrentState; CurrentState=FlightNetState.State;
 	if (TargetPrimitive)
 	{
-		TargetPrimitive->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		ConfigureFlightCollision(true);
 		TargetPrimitive->SetEnableGravity(true); TargetPrimitive->SetSimulatePhysics(true);
+		if(CurrentState==ERocketSimulationState::SpentFalling)
+		{
+			TargetPrimitive->SetLinearDamping(FMath::Max(0.f,FallingSettings.HandoffLinearDamping));
+			TargetPrimitive->SetAngularDamping(FMath::Max(0.f,FallingSettings.HandoffAngularDamping));
+		}
 	}
 	if (auto* Prop=Cast<AActivePropActor>(GetOwner()))
 	{

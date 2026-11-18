@@ -132,6 +132,9 @@ bool FBottleLoadLifecycleTest::RunTest(const FString& Parameters)
 	Bottle->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
 	Bottle->RocketMinDistance=Bottle->RocketMaxDistance=600; Bottle->RocketMinSpeed=Bottle->RocketMaxSpeed=1500;
 	Bottle->RocketDirectionVariation=0; Bottle->RocketComp->TippingSettings.bEnableTipping=false; Bottle->RocketComp->DraggingSettings.bEnableDragging=false;
+	// This save/load fixture verifies immediate physical ownership after fuel loss;
+	// the authored rebound-apex policy is exercised by RocketLifecycle tests.
+	Bottle->RocketComp->FallingSettings.PhysicsHandoffMode=ERocketPhysicsHandoffMode::OnFuelDepleted;
 	bool Inflated=false;
 	for (int32 I=0;I<150 && !Bottle->RocketComp->IsPoweredFlight();++I)
 	{

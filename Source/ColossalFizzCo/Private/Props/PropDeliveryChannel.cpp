@@ -143,8 +143,7 @@ void APropDeliveryChannel::ReceiveDefinition_Implementation(APropManager* Source
 		{
 			FPropContentDefinition Def;
 			if (!ReadDefinition(ReceivedBytes, Def) || !Def.IsValidDefinition()) return;
-			const int32 ID = Def.ContentID;
-			Source->ContentDefinitions.Add(ID, MoveTemp(Def));
+			Source->StoreContentDefinition(MoveTemp(Def));
 		}
 		ReceivedBytes.Reset();
 	}

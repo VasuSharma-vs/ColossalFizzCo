@@ -10,7 +10,7 @@ public class ColossalFizzCo : ModuleRules
 	
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "RenderCore", "RHI", "AIModule", "GameplayTags", "NavigationSystem", "UMG", "Slate", "SlateCore" });
 
-		PrivateDependencyModuleNames.AddRange(new string[] { "NetCore", "Niagara" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "NetCore", "Niagara", "Json" });
 		PublicDependencyModuleNames.Add("UniversalCrossplay");
 
 		// Uncomment if you are using Slate UI

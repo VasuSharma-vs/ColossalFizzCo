@@ -1,9 +1,14 @@
 #include "UI/ShopTerminalWidget.h"
+#include "UI/ManualFillingPressureGauge.h"
 #include "Shop/ShopProductionStationComponent.h"
+#include "Shop/ManualColaFillingMachine.h"
+#include "Shop/BottleFillingComponent.h"
 #include "Shop/ShopProcurementComponent.h"
 #include "Props/InteractablePropManager.h"
 #include "Components/VerticalBox.h"
+#include "Components/VerticalBoxSlot.h"
 #include "Components/TextBlock.h"
+#include "Components/ProgressBar.h"
 #include "Blueprint/WidgetTree.h"
 
 namespace ShopTerminal { FString Money(int64 Cents); }
@@ -12,94 +17,95 @@ void UShopTerminalWidget::RefreshProduction(UShopProductionStationComponent* Pro
 {
 	auto* Manager=APropManager::Get(this);
 	if (!Manager || !Manager->ShopSupplies) return;
-	const auto* Catalog=Manager->ShopSupplies->Catalog.LoadSynchronous();
 	const auto& View=Production->View;
-	auto BottleDescription=[](const FShopProductionItem& Bottle)
+	if (!Production->bManualLeverMode)
 	{
-		return FString::Printf(TEXT("Bottle #%d — %.0f%% full, %.0f%% sealed | Residual pressure %.2f | Temporary seal %.1fs"),Bottle.ISID,Bottle.ContentLevel*100,Bottle.CapSealed*100,Bottle.ResidualPressure,Bottle.TemporarySealSeconds);
-	};
-	for (const auto& Bottle:View.Bottles)
-		if (const auto* Label=ProductionBottleLabels.Find(Bottle.ISID); Label && IsValid(Label->Get()))
-			(*Label)->SetText(FText::FromString(BottleDescription(Bottle)));
-	FString Contents=View.SessionID.ToString()+FString::FromInt(Production->bManualLeverMode ? 0 : View.bFilling);
-	if (Production->bManualLeverMode)
-	{
-		Contents+=FString::Printf(TEXT("/seat%d/source%d"),View.SeatedBottleISID,View.ConnectedSourceISID);
-		Summary->SetText(FText::FromString(Summary->GetText().ToString()+FString::Printf(TEXT("Manual filling — no electricity\nSupply #%d | Bottle holder #%d | %s\nHold F or the lever button to fill; release to stop. Solo: temporary seal then R, or wait for residual pressure <= %.2f then R. A teammate can fill while you seal another bottle."),View.ConnectedSourceISID,View.SeatedBottleISID,View.bFilling ? TEXT("FLOWING") : TEXT("STOPPED"),Production->SafeResidualPressure)));
-	}
-	if (Production->bRequiresCooperativeCap || Production->bAllowSoloCap)
-	{
-		Contents+=FString::Printf(TEXT("/manual/%d/%s/%s"),View.ManualBottleISID,*GetNameSafe(View.CapHolder),*GetNameSafe(View.CapRotator));
-		const FString State=FString::Printf(TEXT("\nManual Wheel Rotator — manual cap control, no electricity\nHold: %s | Turn: %s\nHolding force %.2f | Effectiveness %.0f%% | Rotation %.0f%%\nSolo: tap R after applying a temporary seal or venting. Optional helper: G holds while a teammate turns R. Escape leaves your role."),
-			View.CapHolder ? (View.CapHolder==Actions->GetOwner() ? TEXT("you") : TEXT("teammate")) : TEXT("available"),
-			View.CapRotator ? (View.CapRotator==Actions->GetOwner() ? TEXT("you") : TEXT("teammate")) : TEXT("available"),
-			View.HoldingForce,View.HoldingEfficiency*100,View.RotationProgress*100);
-		Summary->SetText(FText::FromString(Summary->GetText().ToString()+State));
-	}
-	auto Describe=[&](const TArray<FShopProductionItem>& Items)
-	{
-		// Quantities change during leakage/filling. Replacing buttons on each
-		// change discards mouse-down events before mouse-up can claim a role.
-		for (const auto& Item:Items) Contents+=FString::Printf(TEXT("/%d/%d/%d/%d"),Item.ISID,Item.CapSealed>=1,Item.AttachedCapISID,Item.bTemporarySealUsed);
-	};
-	Describe(View.Bottles); Describe(View.Cylinders); Describe(View.Caps);
-	if (Contents==LastContents) return;
-	LastContents=Contents; Body->ClearChildren(); ProductionBottleLabels.Reset();
-	AddText(TEXT("Normal Cola supplies and bottling\nPlace a cylinder, bottle and compatible cap in their marked input areas."));
-	if (!View.SessionID.IsValid()) { AddText(TEXT("Waiting for station synchronization...")); AddButton(TEXT("Close"))->bClose=true; return; }
-	auto Action=[&](const FString& Label, EShopProductionAction Kind, int32 Bottle, int32 Other=0)
-	{
-		auto* Button=AddButton(Label); Button->bProduction=true; Button->ProductionAction=Kind;
-		Button->ISID=Bottle; Button->OtherISID=Other; Button->SessionID=View.SessionID;
-	};
-	if (View.bFilling) Action(TEXT("Stop filling"),EShopProductionAction::StopFilling,0);
-	if (Production->bManualLeverMode)
-		for (const auto& Source:View.Cylinders)
-			Action(FString::Printf(TEXT("Connect single supply pipe to %s #%d"),*Source.Name.ToString(),Source.ISID),EShopProductionAction::ConnectSupply,0,Source.ISID);
-	for (const auto& Bottle:View.Bottles)
-	{
-		ProductionBottleLabels.Add(Bottle.ISID,AddText(BottleDescription(Bottle)));
-		if (Production->bManualLeverMode)
-		{
-			Action(TEXT("Align and seat in bottle holder"),EShopProductionAction::AlignBottle,Bottle.ISID);
-			if (View.SeatedBottleISID==Bottle.ISID && !Bottle.AttachedCapISID)
+		if (LastContents==TEXT("SUPPLY_DEPOT")) return;
+		LastContents=TEXT("SUPPLY_DEPOT"); Body->ClearChildren();
+		AddSection(TEXT("SUPPLIES"),TEXT("Orders arrive as physical items. Carry caps and seals to the machine trays."));
+		if (const auto* Catalog=Manager->ShopSupplies->Catalog.LoadSynchronous())
+			for (const auto& Offer:Catalog->Offers)
 			{
-				auto* Lever=WidgetTree->ConstructWidget<UShopTerminalLeverButton>();
-				Lever->Configure(this,TEXT("HOLD filling lever — release to stop (or hold F)")); Lever->ISID=Bottle.ISID; Body->AddChild(Lever);
+				auto* Button=AddButton(Offer.DisplayName.ToString()+TEXT("  ")+ShopTerminal::Money(Offer.UnitCostCents));
+				Button->SupplyOfferID=Offer.OfferID; Button->SessionID=View.SessionID;
 			}
-			if (!Bottle.bTemporarySealUsed && Bottle.CapSealed<1)
-				Action(FString::Printf(TEXT("Apply temporary seal — %.1f seconds, one use per fill"),Production->TemporarySealDuration),EShopProductionAction::ApplyTemporarySeal,Bottle.ISID);
-		}
-		if (!Bottle.AttachedCapISID && Bottle.CapSealed<=0)
-		{
-			if (!Production->bManualLeverMode && !View.bFilling) for (const auto& Source:View.Cylinders)
-				Action(TEXT("Fill from ")+Source.Name.ToString()+FString::Printf(TEXT(" #%d"),Source.ISID),EShopProductionAction::Fill,Bottle.ISID,Source.ISID);
-			for (const auto& Cap:View.Caps) Action(FString::Printf(TEXT("Attach cap #%d"),Cap.ISID),EShopProductionAction::AttachCap,Bottle.ISID,Cap.ISID);
-		}
-		if (Bottle.AttachedCapISID)
-		{
-			if (Bottle.CapSealed<1)
-			{
-				if (Production->bRequiresCooperativeCap || Production->bAllowSoloCap)
-				{
-					Action(TEXT("Hold cap role — tap G"),EShopProductionAction::HoldCapRole,Bottle.ISID);
-					Action(TEXT("Twist cap — tap R"),EShopProductionAction::TurnCap,Bottle.ISID);
-					if (View.CapHolder==Actions->GetOwner() || View.CapRotator==Actions->GetOwner()) Action(TEXT("Leave cap role"),EShopProductionAction::LeaveCapRole,Bottle.ISID);
-				}
-				else Action(TEXT("Close compatible cap"),EShopProductionAction::CloseCap,Bottle.ISID);
-			}
-			Action(TEXT("Open / remove cap"),EShopProductionAction::OpenCap,Bottle.ISID);
-		}
+		return;
 	}
-	if (Production->bOffersSupplies && Catalog)
+	const auto* Bottle=View.Bottles.FindByPredicate([&](const auto& Item){return Item.ISID==View.SeatedBottleISID;});
+	const auto* Selected=View.SupplyPorts.FindByPredicate([&](const auto& Port){return Port.PortIndex==View.SelectedContentPort;});
+	const FString Content=Selected && !Selected->ContentName.IsEmpty() ? Selected->ContentName.ToString() : TEXT("No hose connected");
+	const auto* Filler=Production->GetOwner()->FindComponentByClass<UBottleFillingComponent>();
+	Summary->SetText(FText::FromString(FString::Printf(TEXT("INPUT %02d  /  %s\nFLOW %.2f portions/s  |  SUPPLY PRESSURE %.2f"),View.SelectedContentPort+1,*Content,
+		Filler ? Filler->DeliveredPortionsPerSecond : 0.f,Filler ? Filler->DeliveredSupplyPressure : 0.f)));
+	const bool Safe=View.bSafeToRelease;
+	const float SealSeconds=Bottle ? Bottle->TemporarySealSeconds : 0;
+	if (PressureGauge) { PressureGauge->Pressure=Bottle ? Bottle->ResidualPressure : 0; PressureGauge->SafePressure=Bottle ? Bottle->SafeResidualPressure : .1f; }
+	if (FillProgress) FillProgress->SetPercent(Bottle ? FMath::Clamp(Bottle->ContentLevel,0.f,1.f) : 0);
+	if (FillReadout) FillReadout->SetText(FText::FromString(FString::Printf(TEXT("%.0f%% FULL"),Bottle ? Bottle->ContentLevel*100 : 0)));
+	if (SealReadout) SealReadout->SetText(FText::FromString(Bottle && Bottle->bTemporarySealArmed ? TEXT("SEAL READY") : SealSeconds>0 ? FString::Printf(TEXT("SEAL %.1f s"),SealSeconds) : TEXT("SEAL INACTIVE")));
+	if (SealProgress) SealProgress->SetPercent(Bottle ? Bottle->TemporarySealIntegrity : 0);
+	if (SupplyTrayReadout) SupplyTrayReadout->SetText(FText::FromString(FString::Printf(TEXT("Caps   %d / %d%s\nSeals   %d / %d%s"),View.CapTrayCount,Production->CapTrayCapacity,
+		View.CapTrayCount>=Production->CapTrayCapacity ? TEXT("  FULL") : TEXT(""),View.SealTrayCount,Production->SealTrayCapacity,View.SealTrayCount>=Production->SealTrayCapacity ? TEXT("  FULL") : TEXT(""))));
+	FString Status,Hint; FLinearColor Color(.91f,.93f,.87f);
+	const auto* Machine=Cast<AManualColaFillingMachine>(Production->GetOwner());
+	if (!Bottle) { Status=TEXT("Ready for a bottle"); Hint=TEXT("Lay a bottle in the cradle. Connect a supply hose and load the cap and seal trays."); }
+	else if (View.bLeverHeld && Machine && !Machine->IsCradleInFillPosition())
+	{ Status=TEXT("Tilting into filling position"); Hint=TEXT("Keep F held. Filling starts when the bottle neck reaches the nozzle."); }
+	else if (View.bFilling)
 	{
-		for (const auto& Offer:Catalog->Offers)
-		{
-			auto* Button=AddButton(TEXT("Buy ")+Offer.DisplayName.ToString()+TEXT(" — ")+ShopTerminal::Money(Offer.UnitCostCents));
-			Button->SupplyOfferID=Offer.OfferID; Button->SessionID=View.SessionID;
-		}
-		AddText(TEXT("Purchases use the shop bank. Deposit sale cash at the ATM to reinvest it."));
+		Status=Bottle->ContentLevel>=1 ? TEXT("FULL — PRESS X NOW") : TEXT("Filling — hold F");
+		Hint=TEXT("Press X to stop the flow at the desired level. Overfilling can cause a pressure failure.");
+		Color=Bottle->ContentLevel>=1 ? FLinearColor(.95f,.32f,.3f) : FLinearColor(.23f,.85f,.65f);
 	}
-	AddButton(TEXT("Close"))->bClose=true;
-	if (Production->bRequiresCooperativeCap || Production->bAllowSoloCap || Production->bManualLeverMode) SetKeyboardFocus();
+	else if (View.bLeverHeld && !Safe) { Status=TEXT("Venting — keep holding F"); Hint=TEXT("Flow is stopped. Keep the lever pulled until the needle returns to the green normal-pressure zone."); Color=FLinearColor(.94f,.7f,.36f); }
+	else if (View.bLeverHeld && !View.bFlowStopped) { Status=TEXT("Waiting for supply"); Hint=TEXT("Check the selected hose and open the container valve gradually."); }
+	else if (Bottle->CapSealed>=1) { Status=TEXT("Cap secured"); Hint=TEXT("The bottle is ready to remove from the cradle."); Color=FLinearColor(.23f,.85f,.65f); }
+	else if (Safe && Bottle->ContentLevel>0) { Status=TEXT("Normal — safe to release"); Hint=TEXT("Release F safely. Press R to fit a cap from the tray, then tap R to tighten it."); Color=FLinearColor(.23f,.85f,.65f); }
+	else if (SealSeconds>0) { Status=TEXT("Seal degrading — fit and tighten cap"); Hint=TEXT("The seal buys time to secure the cap. Unsafe pressure when it reaches zero triggers this bottle's failure reaction."); Color=FLinearColor(.94f,.7f,.36f); }
+	else { Status=TEXT("Bottle seated"); Hint=TEXT("Hold F to fill, press X to stop flow, then keep holding until pressure is normal."); }
+	if (ProductionStatus) { ProductionStatus->SetText(FText::FromString(Status)); ProductionStatus->SetColorAndOpacity(Color); }
+	if (ProductionHint) ProductionHint->SetText(FText::FromString(Hint));
+	if (StopFlowButton) StopFlowButton->SetIsEnabled(View.bLeverHeld && !View.bFlowStopped);
+	if (ResumeFlowButton) ResumeFlowButton->SetIsEnabled(View.bLeverHeld && View.bFlowStopped);
+	for (const auto& Item:View.Bottles)
+		if (const auto* Label=ProductionBottleLabels.Find(Item.ISID); Label && IsValid(Label->Get()))
+			(*Label)->SetText(FText::FromString(FString::Printf(TEXT("Bottle #%d  /  %.0f%% full"),Item.ISID,Item.ContentLevel*100)));
+	FString Structure=View.SessionID.ToString()+FString::FromInt(View.SeatedBottleISID);
+	for (const auto& Item:View.Bottles) Structure+=FString::Printf(TEXT("/B%d/%d/%d/%d"),Item.ISID,Item.AttachedCapISID,Item.CapSealed>=1,Item.bTemporarySealUsed);
+	for (const auto& Item:View.Caps) Structure+=FString::Printf(TEXT("/C%d"),Item.ISID);
+	for (const auto& Port:View.SupplyPorts) Structure+=FString::Printf(TEXT("/P%d/%d/%d/%d/%d"),Port.PortIndex,Port.SourceISID,Port.ContentID,Port.bInRange,Port.PortIndex==View.SelectedContentPort);
+	if (Structure==LastContents || (!LastContents.IsEmpty() && (LocalLeverBottle>0 || View.bLeverHeld))) return;
+	LastContents=Structure; Body->ClearChildren(); ProductionSidebar->ClearChildren(); ProductionBottleLabels.Reset(); StopFlowButton=nullptr; ResumeFlowButton=nullptr;
+	if (!View.SessionID.IsValid()) { AddText(TEXT("Waiting for station synchronization...")); return; }
+	if (View.Bottles.IsEmpty()) AddText(TEXT("Place one bottle in the bottle input volume."));
+	for (const auto& Item:View.Bottles)
+	{
+		ProductionBottleLabels.Add(Item.ISID,AddText(FString::Printf(TEXT("Bottle #%d"),Item.ISID)));
+		if (Item.ISID!=View.SeatedBottleISID) { AddProductionAction(TEXT("Lay bottle in cradle"),EShopProductionAction::AlignBottle,Item.ISID); continue; }
+		if (!Item.AttachedCapISID)
+		{
+			auto* Lever=WidgetTree->ConstructWidget<UShopTerminalLeverButton>(); Lever->Configure(this,TEXT("F   HOLD LEVER")); Lever->ISID=Item.ISID; Body->AddChildToVerticalBox(Lever)->SetPadding(FMargin(0,3));
+			StopFlowButton=AddProductionAction(TEXT("X   STOP LIQUID FLOW"),EShopProductionAction::StopFilling,Item.ISID);
+			ResumeFlowButton=AddProductionAction(TEXT("V   Resume liquid flow"),EShopProductionAction::ResumeFilling,Item.ISID);
+			if (!Item.bTemporarySealUsed) AddProductionAction(TEXT("Apply temporary seal"),EShopProductionAction::ApplyTemporarySeal,Item.ISID);
+			if (!View.Caps.IsEmpty()) AddProductionAction(TEXT("R   Fit a tray cap"),EShopProductionAction::AttachCap,Item.ISID,View.Caps[0].ISID);
+		}
+		else
+		{
+			if (Item.CapSealed<1) AddProductionAction(TEXT("R   Twist cap closed"),EShopProductionAction::TurnCap,Item.ISID);
+			AddProductionAction(TEXT("Remove cap"),EShopProductionAction::OpenCap,Item.ISID);
+		}
+	}
+	AddSection(TEXT("ROTATING CONTENT DIAL"),TEXT("Choose a connected input. Buy supplies at the separate depot."),ProductionSidebar);
+	const int32 Count=Production->GetSupportedContentCount();
+	AddProductionAction(TEXT("<   Previous content"),EShopProductionAction::SelectContentPort,(View.SelectedContentPort+Count-1)%Count,0,ProductionSidebar);
+	AddProductionAction(TEXT("Next content   >"),EShopProductionAction::SelectContentPort,(View.SelectedContentPort+1)%Count,0,ProductionSidebar);
+	for (const auto& Port:View.SupplyPorts)
+	{
+		const FString Name=Port.ContentID>0 ? Port.ContentName.ToString() : TEXT("Attach a physical hose");
+		AddProductionAction(FString::Printf(TEXT("%s%02d  %s%s"),Port.PortIndex==View.SelectedContentPort ? TEXT("> ") : TEXT(""),Port.PortIndex+1,*Name,
+			Port.ContentID>0 && !Port.bInRange ? TEXT("  [out of reach]") : TEXT("")),EShopProductionAction::SelectContentPort,Port.PortIndex,0,ProductionSidebar);
+	}
+	if (Selected && Selected->ContentID>0) AddProductionAction(TEXT("Disconnect selected hose"),EShopProductionAction::DisconnectSupply,View.SelectedContentPort,0,ProductionSidebar);
+	AddSection(TEXT("CONNECT A HOSE"),TEXT("E: grab the container hose end. Aim at an input sphere and press E again to connect."),ProductionSidebar);
 }

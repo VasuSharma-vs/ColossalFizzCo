@@ -8,7 +8,7 @@
 class UInteractablePropDataAsset;
 
 UENUM(BlueprintType)
-enum class EShopSupplyKind : uint8 { EmptyBottle, Cap, ColaCylinder, ManualFillingMachine };
+enum class EShopSupplyKind : uint8 { EmptyBottle, Cap, ColaCylinder, ManualFillingMachine, TemporarySeal };
 
 UENUM(BlueprintType)
 enum class ENormalColaFlavor : uint8 { Lemonade, Mint, Sweet, Spicy, ZeroCalorie };

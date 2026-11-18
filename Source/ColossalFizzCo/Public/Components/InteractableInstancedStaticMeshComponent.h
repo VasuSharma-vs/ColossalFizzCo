@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Props/InteractablePropDatabase.h"
+#include "Interfaces/WorldInteractionHitInterface.h"
 #include "InteractableInstancedStaticMeshComponent.generated.h"
 
 class UInteractablePropDataAsset;
@@ -22,12 +23,13 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(FOnISMInstanceHit, int32, ISMI, in
  * All Category 1 ProductDefinitions/ContentDefinitions and Category 2 UniqueData live centrally in APropManager.
  */
 UCLASS(ClassGroup = (Rendering, Common), meta = (BlueprintSpawnableComponent))
-class COLOSSALFIZZCO_API UInteractableISMComponent : public UInstancedStaticMeshComponent
+class COLOSSALFIZZCO_API UInteractableISMComponent : public UInstancedStaticMeshComponent, public IWorldInteractionHitInterface
 {
 	GENERATED_BODY()
 
 public:
 	UInteractableISMComponent();
+	virtual void ReceiveWorldHit_Implementation(const FWorldInteractionHit& Data) override;
 
 protected:
 	virtual void OnRegister() override;

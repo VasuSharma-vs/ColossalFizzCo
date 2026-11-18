@@ -41,7 +41,7 @@ The existing generic plugin sample menu remains available for plugin demonstrati
 
 ## Validation
 
-Recorded evidence is under `MarryByMidnight/Saved/FrontendWork` in the shared workspace. The native build, rendered solo loop, real two-account flow and installed-copy widget test passed.
+Recorded evidence is under `Saved/FrontendWork` in the shared workspace. The native build, rendered solo loop, real two-account flow and installed-copy widget test passed.
 
 - Isolated Editor build: succeeded (BuildMenu12 (production cleanup fix in BuildMenu10; cached source-list refresh and cleanup test compiled in BuildMenu12)).
 - Plugin automation: **5/5 clean passes**.
@@ -65,6 +65,6 @@ The online driver sends a real private invitation to the other owned test accoun
 
 The first duplicate-account login attempt was rejected by QA. An early automated session-name entry did not reliably follow the real typing event path; the adapter now explicitly broadcasts the text-change event. Post-kick diagnostics identified the underlying sign-out blocker: EOS reported LeaveLobby EOS_NotFound after the local named session had already been removed, but cleanup left the service in Leaving. Cleanup now treats an already-absent local session as complete; a real retained-session failure restores a retryable lobby state. A new native plugin regression tests missing, repeated, signed-out, retained and removed-record cleanup cases through a local provider. A separate native menu regression prevents leftover standalone rosters from hiding browsing/sign-out, and late roster replication cannot reopen a closed session. The QA driver waits for the actual enabled Sign out button after travel. Failed/incomplete diagnostic runs are preserved and are not counted as passing acceptance.
 
-Live rollback backup: `C:\Users\PC\Documents\Unreal Projects\ColossalFizzCo\Saved\FrontendInstallation\20261115_005840`. Pre-task source/configuration/native-module/save baseline location: `MarryByMidnight/Saved/FrontendWork/BaselineLocation.json`. All backed-up save files, original gameplay source outside the explicit frontend patch, the project descriptor and the old14120 module were hash-verified unchanged. Existing gameplay map/content were not copied or rewritten.
+Live rollback backup: `C:\Users\PC\Documents\Unreal Projects\ColossalFizzCo\Saved\FrontendInstallation\20261115_005840`. Pre-task source/configuration/native-module/save baseline location: `Saved/FrontendWork/BaselineLocation.json`. All backed-up save files, original gameplay source outside the explicit frontend patch, the project descriptor and the old14120 module were hash-verified unchanged. Existing gameplay map/content were not copied or rewritten.
 
 Launcher online/offline dry runs passed; both generated profile directories, including pending files, are confirmed ignored by Git. Targeted git diff --check passed. The new reusable-plugin cleanup regression is in `Plugins/UniversalCrossplay/Source/UniversalCrossplay/Private/Tests/CrossplayCleanupTests.cpp`.

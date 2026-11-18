@@ -31,6 +31,7 @@ public:
 	bool RefreshLoadedCatalog();
 	bool IsNormalContent(int32 ContentID) const;
 	bool IsCylinderProduct(int32 ProductID) const;
+	bool IsTemporarySealProduct(int32 ProductID) const;
 	bool IsNormalPrototypeActive() const { return bCatalogInitialized; }
 	EShopPurchaseResult Purchase(FGuid OperationID, FName OfferID, int32 Quantity, const FTransform& DeliveryTransform, TArray<int32>& DeliveredISIDs);
 private:

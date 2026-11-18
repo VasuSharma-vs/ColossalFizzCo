@@ -50,6 +50,12 @@ void UInteractableISMComponent::OnRegister()
 	OnComponentHit.AddUniqueDynamic(this, &UInteractableISMComponent::HandleComponentHit);
 }
 
+void UInteractableISMComponent::ReceiveWorldHit_Implementation(const FWorldInteractionHit& Data)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority() || GetNetMode()==NM_Client || Data.TargetComponent!=this) return;
+	if (auto* Manager=APropManager::Get(this)) Manager->ReceiveWorldHitByICID(IISMComponentID,Data.ISMI,Data);
+}
+
 void UInteractableISMComponent::BeginPlay()
 {
 	Super::BeginPlay();

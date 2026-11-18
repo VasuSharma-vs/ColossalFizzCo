@@ -35,6 +35,22 @@
 #include "Shop/ShopProcurementComponent.h"
 #include "Props/FragmentDestructionActor.h"
 
+namespace
+{
+bool CanReuseClientASM(const APropManager& Manager, const AActivePropActor* Actor, int32 ISID, int32 ProductID)
+{
+	// Pool slots are local bookkeeping, not a cross-machine actor identity. A
+	// server slot can collide with a client's machine, bottle, or another prop.
+	if (!IsValid(Actor) || !Manager.FindProductDefinition(ProductID)
+		|| (Actor->ISID != ISID && (Actor->ISID > 0 || Actor->bIsActive))) return false;
+	const auto* Definition = Manager.FindProductDefinition(ProductID);
+	const auto DesiredClass = Manager.ASMComponent
+		? Manager.ASMComponent->GetEffectiveActivePropActorClass(ProductID)
+		: (Definition->CustomActiveActorClass ? Definition->CustomActiveActorClass : Manager.ActivePropActorClass);
+	return Actor->GetClass() == (DesiredClass ? DesiredClass.Get() : AActivePropActor::StaticClass());
+}
+}
+
 APropManager::APropManager()
 {
  ProductCatalog=TSoftObjectPtr<UPropProductCatalog>(FSoftObjectPath(TEXT("/Game/Props/Products/DA_ProductCatalog.DA_ProductCatalog")));
@@ -3917,17 +3933,21 @@ void APropManager::Multicast_NotifyBatchISMConvertedToASM_Implementation(const T
 			continue;
 		}
 
-		// Resolve ASM actor directly via ASMID, with fallback to ISID, ASMActors search, or AcquireActiveActor
-		AActivePropActor* ASM = GetActiveActorFromASMID(InASMID);
-		if (!IsValid(ASM))
-		{
-			ASM = GetActiveActorFromISID(InISID);
-		}
+		const FISIDRuntimeIndex* ExistingRecord = FindISIDData(InISID);
+		UInteractableISMComponent* ExistingComponent = GetComponentFromISID(InISID);
+		const int32 ExpectedProductID = ExistingRecord && ExistingRecord->ProductID > 0
+			? ExistingRecord->ProductID : (ExistingComponent ? ExistingComponent->ProductID : 0);
+		// Wait for the product/instance snapshot rather than borrowing a different
+		// product's class from a coincidentally matching local pool slot.
+		if (!FindProductDefinition(ExpectedProductID)) continue;
+		AActivePropActor* ASM = GetActiveActorFromISID(InISID);
+		if (!CanReuseClientASM(*this, ASM, InISID, ExpectedProductID)) ASM = GetActiveActorFromASMID(InASMID);
+		if (!CanReuseClientASM(*this, ASM, InISID, ExpectedProductID)) ASM = nullptr;
 		if (!IsValid(ASM) && ASMComponent)
 		{
 			for (AActivePropActor* Candidate : ASMComponent->ASMActors)
 			{
-				if (IsValid(Candidate) && Candidate->ASMID == InASMID)
+				if (CanReuseClientASM(*this, Candidate, InISID, ExpectedProductID) && Candidate->ASMID == InASMID)
 				{
 					ASM = Candidate;
 					ASMComponent->ActiveActorByASMID.Add(InASMID, ASM);
@@ -3938,25 +3958,7 @@ void APropManager::Multicast_NotifyBatchISMConvertedToASM_Implementation(const T
 		}
 		if (!IsValid(ASM))
 		{
-			UInteractableISMComponent* FallbackComp = GetComponentFromISID(InISID);
-			int32 ProductID = FallbackComp ? FallbackComp->ProductID : 0;
-			if (ProductID <= 0)
-			{
-				if (const FISIDRuntimeIndex* Rec = FindISIDData(InISID))
-				{
-					ProductID = Rec->ProductID;
-				}
-			}
-			ASM = AcquireActiveActor(ProductID);
-			if (IsValid(ASM))
-			{
-				ASM->ASMID = InASMID;
-				if (ASMComponent)
-				{
-					ASMComponent->ActiveActorByASMID.Add(InASMID, ASM);
-				}
-				ActiveActorByASMID.Add(InASMID, ASM);
-			}
+			ASM = AcquireActiveActor(ExpectedProductID);
 		}
 
 		if (!IsValid(ASM))
@@ -4016,7 +4018,7 @@ void APropManager::Multicast_NotifyBatchISMConvertedToASM_Implementation(const T
 		{
 			Record->Representation = EPropRepresentation::ASM;
 			Record->ActiveActor = ASM;
-			Record->ASMID = (InASMID > 0) ? InASMID : ASM->ASMID;
+			Record->ASMID = ASM->ASMID;
 			if (InstTransform.GetLocation().Z > -50000.0f && InstTransform.GetScale3D().GetMin() >= 0.005f)
 			{
 				Record->ActiveTransform = InstTransform;
@@ -4049,10 +4051,8 @@ void APropManager::Multicast_NotifyBatchISMConvertedToASM_Implementation(const T
 		// Register and initialize the authoritative ASM directly on the client
 		ASM->PropManagerReference = this;
 		ASM->ISID = InISID;
-		if (InASMID > 0)
-		{
-			ASM->ASMID = InASMID;
-		}
+		// Acquired client actors retain their unique local slot. The logical
+		// ISID reconciles them with the replicated actor when it arrives.
 		if (Record && Record->ProductID > 0)
 		{
 			ASM->ProductID = Record->ProductID;
@@ -4182,11 +4182,13 @@ void APropManager::Multicast_NotifyISMConvertedToASM_Implementation(
 
 	// Acquire/activate client ASM representation
 	AActivePropActor* ASM = GetActiveActorFromISID(InISID);
+	if (!CanReuseClientASM(*this, ASM, InISID, InProductID)) ASM = nullptr;
 	if (!ASM && InASMID > 0)
 	{
 		ASM = GetActiveActorFromASMID(InASMID);
+		if (!CanReuseClientASM(*this, ASM, InISID, InProductID)) ASM = nullptr;
 	}
-	if (!ASM)
+	if (!ASM && FindProductDefinition(InProductID))
 	{
 		ASM = AcquireActiveActor(InProductID);
 	}
@@ -4194,7 +4196,6 @@ void APropManager::Multicast_NotifyISMConvertedToASM_Implementation(
 	if (ASM)
 	{
 		ASM->ISID = InISID;
-		ASM->ASMID = InASMID;
 		if (InProductID > 0)
 		{
 			ASM->ProductID = InProductID;
@@ -4244,11 +4245,13 @@ void APropManager::Multicast_NotifyASMConvertedToISM_Implementation(
 
 	EnsureLevelPropsInitialized();
 
-	// Deactivate any ASM actor currently associated with this ISID or ASMID
+	// A delayed demotion may name a slot now occupied by another local prop.
 	AActivePropActor* ASM = GetActiveActorFromISID(InISID);
+	if (ASM && ASM->ISID != InISID) ASM = nullptr;
 	if (!ASM && InASMID > 0)
 	{
 		ASM = GetActiveActorFromASMID(InASMID);
+		if (ASM && ASM->ISID != InISID) ASM = nullptr;
 	}
 
 	if (ASM)
@@ -4257,7 +4260,7 @@ void APropManager::Multicast_NotifyASMConvertedToISM_Implementation(
 		ASM->OnRestInterpComplete = nullptr;
 		ASM->ISID = 0;
 		ASM->bIsActive = false;
-		ASM->DeactivateToPoolState(GetResetTransformForSlot(InASMID > 0 ? InASMID : ASM->ASMID));
+		ASM->DeactivateToPoolState(GetResetTransformForSlot(ASM->ASMID));
 
 		UnregisterActiveActor(InISID);
 		if (ASM->ASMID > 0)
@@ -6436,7 +6439,8 @@ bool APropManager::SetInstanceToUnsettled(
 	int32 InISID,
 	FVector HitImpulse,
 	FVector ImpactPoint,
-	float UnsettledDelay)
+	float UnsettledDelay,
+	bool bApplyHitForce)
 {
 	InISID = ResolveRootISID(InISID);
 	if (InISID <= 0) return false;
@@ -6481,7 +6485,7 @@ bool APropManager::SetInstanceToUnsettled(
 			{
 				ExistingASM->PhysicsSimComponent->SetStateUnsettled(UnsettledDelay);
 			}
-			if (!HitImpulse.IsNearlyZero())
+			if (bApplyHitForce && !HitImpulse.IsNearlyZero())
 			{
 				ExistingASM->ApplyUnsettlingImpulse(HitImpulse);
 			}
@@ -6503,7 +6507,7 @@ bool APropManager::SetInstanceToUnsettled(
 			{
 				PredictedASM->PhysicsSimComponent->SetStateUnsettled(UnsettledDelay);
 			}
-			if (!HitImpulse.IsNearlyZero())
+			if (bApplyHitForce && !HitImpulse.IsNearlyZero())
 			{
 				PredictedASM->ApplyUnsettlingImpulse(HitImpulse);
 			}
@@ -6515,7 +6519,7 @@ bool APropManager::SetInstanceToUnsettled(
 
 		if (GetNetConnection() != nullptr)
 		{
-			Server_SetInstanceState(InISID, EPropState::Unsettled, HitImpulse, ImpactPoint, UnsettledDelay, PredictedASM);
+			Server_SetInstanceState(InISID, EPropState::Unsettled, HitImpulse, ImpactPoint, UnsettledDelay, PredictedASM, bApplyHitForce);
 		}
 		return true;
 	}
@@ -6532,7 +6536,7 @@ bool APropManager::SetInstanceToUnsettled(
 		PromotedASM->PhysicsSimComponent->SetStateUnsettled(UnsettledDelay);
 	}
 
-	if (!HitImpulse.IsNearlyZero() && PromotedASM->PropMesh)
+	if (bApplyHitForce && !HitImpulse.IsNearlyZero() && PromotedASM->PropMesh)
 	{
 		PromotedASM->ApplyUnsettlingImpulse(HitImpulse);
 		PromotedASM->LinearVelocity = PromotedASM->PropMesh->GetComponentVelocity();
@@ -6756,7 +6760,8 @@ void APropManager::Server_SetInstanceState_Implementation(
 	FVector HitImpulse,
 	FVector_NetQuantize ImpactPoint,
 	float CustomParam,
-	AActor* HolderActor)
+	AActor* HolderActor,
+	bool bApplyHitForce)
 {
 	AActivePropActor* ClientPredictedASM = (TargetState != EPropState::Held) ? Cast<AActivePropActor>(HolderActor) : nullptr;
 	FISIDRuntimeIndex* Record = FindISIDData(InISID);
@@ -6791,7 +6796,7 @@ void APropManager::Server_SetInstanceState_Implementation(
 				}
 				else if (TargetState == EPropState::Unsettled)
 				{
-					SetInstanceToUnsettled(InISID, HitImpulse, ImpactPoint, CustomParam);
+					SetInstanceToUnsettled(InISID, HitImpulse, ImpactPoint, CustomParam, bApplyHitForce);
 				}
 				else if (TargetState == EPropState::Settling)
 				{
@@ -6822,7 +6827,7 @@ void APropManager::Server_SetInstanceState_Implementation(
 		SetInstanceToRest(InISID);
 		break;
 	case EPropState::Unsettled:
-		SetInstanceToUnsettled(InISID, HitImpulse, ImpactPoint, CustomParam);
+		SetInstanceToUnsettled(InISID, HitImpulse, ImpactPoint, CustomParam, bApplyHitForce);
 		break;
 	case EPropState::Settling:
 		SetInstanceToSettling(InISID, CustomParam);
@@ -6862,7 +6867,8 @@ bool APropManager::Server_SetInstanceState_Validate(
 	FVector HitImpulse,
 	FVector_NetQuantize ImpactPoint,
 	float CustomParam,
-	AActor* HolderActor)
+	AActor* HolderActor,
+	bool bApplyHitForce)
 {
 	return InISID > 0;
 }
@@ -7083,11 +7089,13 @@ void APropManager::UpdateClientASM(int32 InISID)
 	if (!Record) return;
 
 	AActivePropActor* ASM = GetActiveActorFromISID(InISID);
+	if (ASM && Record->Representation == EPropRepresentation::ASM
+		&& !CanReuseClientASM(*this, ASM, InISID, Record->ProductID)) ASM = nullptr;
 	if (!ASM && Record->Representation == EPropRepresentation::ASM && Record->ASMID > 0)
 	{
 		if (AActivePropActor* ByASMID = GetActiveActorFromASMID(Record->ASMID))
 		{
-			if (IsValid(ByASMID) && (ByASMID->ISID == InISID || ByASMID->ISID <= 0))
+			if (CanReuseClientASM(*this, ByASMID, InISID, Record->ProductID))
 			{
 				RegisterActiveActor(InISID, ByASMID);
 				ASM = ByASMID;
@@ -7098,7 +7106,8 @@ void APropManager::UpdateClientASM(int32 InISID)
 	{
 		for (AActivePropActor* Candidate : ASMComponent->ASMActors)
 		{
-			if (Candidate && ((Candidate->ISID == InISID && Candidate->bIsActive) || (Record->ASMID > 0 && Candidate->ASMID == Record->ASMID)))
+			if (CanReuseClientASM(*this, Candidate, InISID, Record->ProductID)
+				&& ((Candidate->ISID == InISID && Candidate->bIsActive) || (Record->ASMID > 0 && Candidate->ASMID == Record->ASMID)))
 			{
 				RegisterActiveActor(InISID, Candidate);
 				ASM = Candidate;
@@ -7437,13 +7446,14 @@ void APropManager::ApplyInstanceDelta(const FPropInstanceDelta& Delta)
 	const int32 UnpackedASMID = (Delta.CustomFlags >> 16) & 0xFFFF;
 	const int32 UnpackedCustomFlags = Delta.CustomFlags & 0xFFFF;
 
-	// If the Client had predicted a DIFFERENT ASMID than the Server's authoritative UnpackedASMID,
-	// return the Client's mispredicted ASM back to the pool so the Server's authoritative ASM takes over cleanly.
+	// A matching local receiver may have a different pool slot. Keep it until the
+	// replicated actor reconciles by ISID; only discard an incompatible prediction.
 	if (Delta.Representation == EPropRepresentation::ASM && UnpackedASMID > 0)
 	{
 		if (AActivePropActor* CurrentClientASM = GetActiveActorFromISID(Delta.ISID))
 		{
-			if (CurrentClientASM->ASMID != UnpackedASMID)
+			if (CurrentClientASM->ASMID != UnpackedASMID
+				&& !CanReuseClientASM(*this, CurrentClientASM, Delta.ISID, Delta.ProductID))
 			{
 				UnregisterActiveActor(Delta.ISID);
 				CurrentClientASM->ISID = 0;
@@ -7548,7 +7558,7 @@ void APropManager::Multicast_ReceiveBulkBatch_Implementation(const FPropBulkUpda
 
 	EnsureLevelPropsInitialized();
 
-	for (const auto& Content : Batch.ContentDefinitions) ContentDefinitions.Add(Content.ContentID, Content);
+	for (const auto& Content : Batch.ContentDefinitions) StoreContentDefinition(Content);
 	// 1. Register or update any product definitions included in the batch on the client
 	for (const FPropProductDefinition& Def : Batch.ProductDefinitions)
 	{
@@ -7729,7 +7739,7 @@ void APropManager::ApplyPropInitializationBatch(const FPropBulkUpdateBatch& Batc
 	}
 
 	WorldElapsedSeconds = FMath::Max(WorldElapsedSeconds, Batch.SnapshotWorldElapsedSeconds);
-	for (const auto& Content : Batch.ContentDefinitions) ContentDefinitions.Add(Content.ContentID, Content);
+	for (const auto& Content : Batch.ContentDefinitions) StoreContentDefinition(Content);
 	// Register all product definitions from server so client can generate products & IISM components
 	for (const FPropProductDefinition& Def : Batch.ProductDefinitions)
 	{
@@ -8071,6 +8081,7 @@ bool APropManager::LoadPropDatabase(const FString& SlotName, int32 UserIndex)
 	PendingReleasedToEmptyISIDs.Empty();
 
 	ProductDefinitions.Empty(); ContentDefinitions.Empty();
+	++ContentDefinitionRevision;
 	for (const FPropContentDefinition& Definition : WorldSaveData.ContentDefinitions) RegisterContentDefinition(Definition);
 	for (const FPropProductDefinition& Definition : WorldSaveData.ProductDefinitions) RegisterProductDefinition(Definition);
  if(ProductCatalog.LoadSynchronous() && !InitializeProductCatalog())return false;
@@ -8719,9 +8730,11 @@ void APropManager::Multicast_SyncActivePhysicsBatch_Implementation(const TArray<
 	for (const FActivePropPhysicsSync& Item : Batch)
 	{
 		AActivePropActor* ASM = GetActiveActorFromISID(Item.ISID);
+		if (ASM && ASM->ISID != Item.ISID) ASM = nullptr;
 		if (!ASM && Item.ASMID > 0)
 		{
 			ASM = GetActiveActorFromASMID(Item.ASMID);
+			if (ASM && ASM->ISID != Item.ISID) ASM = nullptr;
 		}
 
 		if (ASM && ASM->bIsActive)

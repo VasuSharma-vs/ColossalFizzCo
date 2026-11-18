@@ -69,7 +69,7 @@ The six warning-bearing native tests retain known fixture collision/physics and 
 
 ## Saved progress and deployment
 
-Changes were validated in `MarryByMidnight/Saved/ModularWork`, then installed into the authorized `ColossalFizzCo` project with hash guards and backups of only the deployment whitelist. Original progress files were not migrated in place or deleted. Save compatibility was checked using copies. Installed tests preserved all three exact originals, with no test-modified original requiring restoration:
+Changes were validated in `Saved/ModularWork`, then installed into the authorized `ColossalFizzCo` project with hash guards and backups of only the deployment whitelist. Original progress files were not migrated in place or deleted. Save compatibility was checked using copies. Installed tests preserved all three exact originals, with no test-modified original requiring restoration:
 
 | Original save | SHA-256 after validation |
 | --- | --- |
@@ -77,7 +77,7 @@ Changes were validated in `MarryByMidnight/Saved/ModularWork`, then installed in
 | NormalColaPrototypeAutosave.sav |`8fdc4c1679ac52440ab105a5890ac4dfa61fb26b7af7bae61fb2dc6de3bb0995`|
 | NPC_CulturalKnowledge.sav |`e7adf45d7f9f0ef09bf81407475c9cda15d40201b65bba4c301e674c775b41d1`|
 
-Deployment backups are `BeforeLiveDeployment_141649` (initial), `_143756` (quantity conservation), and `_144812` (named-reference/empty-refill completion), under `MarryByMidnight/Saved/ProductCatalog_20261115`. The installed editor modules are `UnrealEditor-ColossalFizzCo.dll` and `UnrealEditor-ColossalFizzCoProductEditor.dll`, engine BuildId 55116800. The isolated CrossplayChecks QA plugin/module is not installed. Existing source-control changes predating this task are retained; no blanket Git staging, commit, reset or push was performed.
+Deployment backups are `BeforeLiveDeployment_141649` (initial), `_143756` (quantity conservation), and `_144812` (named-reference/empty-refill completion), under `Saved/ProductCatalog_20261115`. The installed editor modules are `UnrealEditor-ColossalFizzCo.dll` and `UnrealEditor-ColossalFizzCoProductEditor.dll`, engine BuildId 55116800. The isolated CrossplayChecks QA plugin/module is not installed. Existing source-control changes predating this task are retained; no blanket Git staging, commit, reset or push was performed.
 
 ProjectVersion is 0.1.6, product assets are included in the cook directory settings, and private local Epic profiles retain their credentials with only their compatibility ID updated. Secrets were not added to tracked public config. The existing launcher remains the entry point: `Play_ColossalFizzCo.cmd`.
 

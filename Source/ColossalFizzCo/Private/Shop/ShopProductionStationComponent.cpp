@@ -1,8 +1,11 @@
 #include "Shop/ShopProductionStationComponent.h"
 #include "Shop/BottleFillingComponent.h"
 #include "Shop/ShopProcurementComponent.h"
+#include "Shop/SharedTeamWalletComponent.h"
 #include "Shop/ShopInstanceVolumeQuery.h"
 #include "Props/InteractablePropManager.h"
+#include "Props/InteractableProp.h"
+#include "Props/ColaPropActor.h"
 #include "Props/InteractablePropDataAsset.h"
 #include "Components/BoxComponent.h"
 #include "Engine/World.h"
@@ -23,6 +26,7 @@ void UShopProductionStationComponent::BeginPlay()
 		if (!BottleInput && Box->ComponentHasTag(TEXT("ShopBottleInput"))) BottleInput=Box;
 		if (!CylinderInput && Box->ComponentHasTag(TEXT("ShopCylinderInput"))) CylinderInput=Box;
 		if (!CapInput && Box->ComponentHasTag(TEXT("ShopCapInput"))) CapInput=Box;
+		if (!SealInput && Box->ComponentHasTag(TEXT("ShopSealInput"))) SealInput=Box;
 	}
 	if (!SupplyOutput)
 	{
@@ -30,7 +34,7 @@ void UShopProductionStationComponent::BeginPlay()
 		for (auto* Component:Components) if (Component->ComponentHasTag(TEXT("ShopSupplyOutput"))) { SupplyOutput=Component; break; }
 	}
 	if (!Filler) Filler=GetOwner()->FindComponentByClass<UBottleFillingComponent>();
-	if (Filler && bManualLeverMode) { Filler->bRequireLever=true; Filler->PressurePerContentLevel=FillPressurePerLevel; }
+	if (Filler && bManualLeverMode) { bOffersSupplies=false; Filler->bRequireLever=true; Filler->TargetContentLevel=0; }
 	if (GetOwner()->HasAuthority() && GetNetMode()!=NM_Client)
 	{
 		if (auto* Manager=APropManager::Get(this)) if (Manager->ShopSupplies) Manager->ShopSupplies->InitializeCatalog();
@@ -41,6 +45,7 @@ void UShopProductionStationComponent::BeginPlay()
 void UShopProductionStationComponent::EndPlay(const EEndPlayReason::Type Reason)
 {
 	if (auto* ComponentWorld=GetWorld()) ComponentWorld->GetTimerManager().ClearTimer(RefreshTimer);
+	if (GetOwner() && GetOwner()->HasAuthority()) EndManualLever();
 	if (IsValid(Filler)) Filler->StopFilling();
 	if (GetOwner() && GetOwner()->HasAuthority()) { ReleaseSeatedBottle(); ResetManualCapping(); }
 	Super::EndPlay(Reason);
@@ -53,10 +58,13 @@ void UShopProductionStationComponent::RefreshInputs()
 	LastManualUpdate=Now;
 	if (bRequiresCooperativeCap || bAllowSoloCap) UpdateManualCapping(Elapsed);
 	auto* Manager=APropManager::Get(this); if (!Manager) return;
+	if (bManualLeverMode) RefreshSupplyTrays();
 	auto Read=[&](const UBoxComponent* Box, EShopSupplyKind Kind)
 	{
 		TArray<FShopProductionItem> Items;
 		TArray<int32> IDs=ShopInstanceVolumeQuery::Query(Box).Array();
+		if (bManualLeverMode && Kind==EShopSupplyKind::Cap)
+			if (const auto* Machine=Cast<AActivePropActor>(GetOwner())) if (const auto* Equipment=Manager->FindUniqueData(Machine->ISID)) IDs=Equipment->EventData.LoadedCapISIDs;
 		if (bManualLeverMode && Kind==EShopSupplyKind::ColaCylinder && Filler)
 		{
 			IDs.Reset();
@@ -68,7 +76,7 @@ void UShopProductionStationComponent::RefreshInputs()
 		{
 			const auto* Record=Manager->FindISIDData(ID); const auto* Unique=Manager->FindUniqueData(ID);
 			const auto* Def=Record ? Manager->FindProductDefinition(Record->ProductID) : nullptr;
-			if (!Unique || !Def || Items.Num()>=16) continue;
+			if (!Unique || !Def || Items.Num()>=(bManualLeverMode && Kind==EShopSupplyKind::Cap ? FMath::Clamp(CapTrayCapacity,1,64) : 16)) continue;
 			const bool Cylinder=Manager->ShopSupplies && Manager->ShopSupplies->IsCylinderProduct(Record->ProductID);
 			if (Kind==EShopSupplyKind::Cap ? (!Def->bIsBottleCap || Unique->EventData.AttachedBottleISID)
 				: Kind==EShopSupplyKind::ColaCylinder ? !Cylinder : (Def->bIsBottleCap || Cylinder || Def->ConsumableProfile.NumOfPortions<=0)) continue;
@@ -76,13 +84,20 @@ void UShopProductionStationComponent::RefreshInputs()
 			Item.ContentLevel=Unique->EventData.ContentLevel; Item.CapSealed=Unique->EventData.CapSealed; Item.AttachedCapISID=Unique->EventData.AttachedCapISID;
 			Item.ResidualPressure=Unique->ContinuousData.SealedPressure;
 			Item.TemporarySealSeconds=float(FMath::Max(0.,Unique->EventData.TemporarySealUntil-Manager->WorldElapsedSeconds));
+			Item.bTemporarySealArmed=Unique->EventData.bTemporarySealArmed;
+			if (const auto* Bottle=Cast<AColaPropActor>(Manager->GetActiveActorFromISID(ID)))
+			{
+				Item.TemporarySealSeconds=Bottle->GetManufacturingSealSecondsRemaining();
+				Item.TemporarySealIntegrity=Bottle->GetManufacturingSealIntegrity();
+				Item.SafeResidualPressure=Bottle->SafeResidualPressure;
+			}
 			Item.bTemporarySealUsed=Unique->EventData.bTemporarySealUsed;
 			Items.Add(Item);
 		}
 		return Items;
 	};
 	View.Bottles=Read(BottleInput,EShopSupplyKind::EmptyBottle); View.Cylinders=Read(CylinderInput,EShopSupplyKind::ColaCylinder); View.Caps=Read(CapInput,EShopSupplyKind::Cap);
-	if (Filler && Filler->bIsFilling
+	if (!bManualLeverMode && Filler && Filler->bIsFilling
 		&& (!View.Bottles.ContainsByPredicate([&](const auto& Item){return Item.ISID==Filler->TargetISID;})
 			|| !View.Cylinders.ContainsByPredicate([&](const auto& Item){return Item.ISID==Filler->SourceISID;}))) Filler->StopFilling();
 	if (bManualLeverMode) UpdateManualEquipment();
@@ -91,6 +106,7 @@ void UShopProductionStationComponent::RefreshInputs()
 EShopCheckoutResult UShopProductionStationComponent::Purchase(FGuid Session, FGuid ID, FName Offer, int32 Quantity)
 {
 	if (!GetOwner()->HasAuthority() || GetNetMode()==NM_Client) return EShopCheckoutResult::NotAuthority;
+	if (bManualLeverMode) return EShopCheckoutResult::Unavailable;
 	if (!Session.IsValid() || Session!=View.SessionID) return EShopCheckoutResult::OperationConflict;
 	auto* Manager=APropManager::Get(this);
 	if (!bOffersSupplies || !SupplyOutput || !Manager || !Manager->ShopSupplies) return EShopCheckoutResult::Unavailable;
@@ -116,7 +132,12 @@ EShopCheckoutResult UShopProductionStationComponent::ExecuteForPlayer(FGuid Sess
 	if (Action>=EShopProductionAction::HoldCapRole && Action<=EShopProductionAction::LeaveCapRole) return bRequiresCooperativeCap || bAllowSoloCap ? ManualCapAction(Action,BottleID,Player) : EShopCheckoutResult::Unavailable;
 	if (bManualLeverMode && Action==EShopProductionAction::Fill) return EShopCheckoutResult::Unavailable;
 	auto* Manager=APropManager::Get(this); if (!Manager) return EShopCheckoutResult::Unavailable;
-	if (Action==EShopProductionAction::StopFilling) { if (!Filler) return EShopCheckoutResult::Unavailable; Filler->StopFilling(); RefreshInputs(); return EShopCheckoutResult::Success; }
+	if (Action==EShopProductionAction::StopFilling)
+	{
+		if (!Filler) return EShopCheckoutResult::Unavailable;
+		if (bManualLeverMode) return ManualEquipmentAction(EShopProductionAction::StopFilling,0,0,Player);
+		Filler->StopFilling(); RefreshInputs(); return EShopCheckoutResult::Success;
+	}
 	if (!ShopInstanceVolumeQuery::Query(BottleInput).Contains(BottleID)) return EShopCheckoutResult::Unavailable;
 	bool Success=false;
 	switch (Action)
@@ -135,13 +156,29 @@ EShopCheckoutResult UShopProductionStationComponent::ExecuteForPlayer(FGuid Sess
   if(const auto* B=Manager->FindISIDData(BottleID))if(const auto* C=Manager->FindISIDData(OtherID))
    if(const auto* U=Manager->FindUniqueData(BottleID))
     if(!Manager->IsAssemblyCompatible(B->ProductID,U->EventData.ContentID,C->ProductID))return EShopCheckoutResult::CapNotSupported;
-		if ((!Filler || !Filler->bIsFilling || Filler->TargetISID!=BottleID) && ShopInstanceVolumeQuery::Query(CapInput).Contains(OtherID)) Success=Manager->AttachPhysicalCap(BottleID,OtherID);
+		if ((!Filler || !Filler->bIsFilling || Filler->TargetISID!=BottleID)
+			&& (bManualLeverMode ? View.Caps.ContainsByPredicate([&](const auto& Cap){return Cap.ISID==OtherID;}) : ShopInstanceVolumeQuery::Query(CapInput).Contains(OtherID)))
+		{
+			auto* TrayCap=bManualLeverMode ? Manager->GetActiveActorFromISID(OtherID) : nullptr;
+			// The assembly service recycles the cap's independent actor. Release the
+			// tray's demotion guard for that transfer, restoring it if fitting fails.
+			if (TrayCap) TrayCap->SetSeatedInFiller(false);
+			if (auto* Bottle=Cast<AColaPropActor>(Manager->GetActiveActorFromISID(BottleID))) Success=Bottle->AttachManufacturingCap(OtherID);
+			else Success=Manager->AttachPhysicalCap(BottleID,OtherID);
+			if (Success && bManualLeverMode) ReleaseStoredSupply(OtherID,false);
+			else if (IsValid(TrayCap) && TrayCap->ISID==OtherID) TrayCap->SetSeatedInFiller(true);
+		}
 		break;
 	case EShopProductionAction::CloseCap:
 	{
 		if (bRequiresCooperativeCap || bAllowSoloCap) return EShopCheckoutResult::Unavailable;
 		const auto* Record=Manager->FindISIDData(BottleID); const auto* Def=Record ? Manager->FindProductDefinition(Record->ProductID) : nullptr;
-		if (Def) Success=Manager->ClosePhysicalCap(BottleID,FMath::Lerp(Def->TorqueSweetSpotMin,Def->TorqueSweetSpotMax,.5f));
+		if (Def)
+		{
+			const float Torque=FMath::Lerp(Def->TorqueSweetSpotMin,Def->TorqueSweetSpotMax,.5f);
+			if (auto* Bottle=Cast<AColaPropActor>(Manager->GetActiveActorFromISID(BottleID))) Success=Bottle->CloseManufacturingCap(Torque);
+			else Success=Manager->ClosePhysicalCap(BottleID,Torque);
+		}
 		break;
 	}
 	case EShopProductionAction::OpenCap: Success=Manager->DetachPhysicalCap(BottleID); break;

@@ -346,16 +346,17 @@ int32 UASMComponent::RemoveExcessEmptyASMs(int32 MaxToRemove)
 	const int32 TargetRemove = (MaxToRemove > 0) ? FMath::Min(MaxToRemove, MaxRemovable) : MaxRemovable;
 
 	int32 RemovedCount = 0;
-	while (RemovedCount < TargetRemove && EmptyASMIDs.Num() > 0 && ASMActors.Num() > ClampedMin)
+	for (int32 Index = EmptyASMIDs.Num() - 1; Index >= 0 && RemovedCount < TargetRemove && ASMActors.Num() > ClampedMin; --Index)
 	{
-		const int32 CandidateASMID = EmptyASMIDs.Last();
+		const int32 CandidateASMID = EmptyASMIDs[Index];
+		const AActivePropActor* Candidate = GetActiveActorFromASMID(CandidateASMID);
+		// Placed and replicated actors also register their slots here. Shrinking
+		// the spare pool must never destroy those externally owned scene actors.
+		if (!IsValid(Candidate) || Candidate->GetOwner() != GetOwner() || Candidate->bIsActive
+			|| Candidate->ISID > 0 || ASMIDToISID.Contains(CandidateASMID)) continue;
 		if (RemoveASMByASMID(CandidateASMID))
 		{
 			++RemovedCount;
-		}
-		else
-		{
-			EmptyASMIDs.Pop(EAllowShrinking::No);
 		}
 	}
 

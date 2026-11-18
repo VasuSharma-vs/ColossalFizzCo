@@ -2,6 +2,8 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "BottleFillingComponent.generated.h"
+class UHoseTransferComponent;
+class UResourceTransferEndpointComponent;
 
 /** Add to filling equipment. Its owner supplies placement; Prop Manager owns the liquid transaction. */
 UCLASS(ClassGroup = (Shop), meta = (BlueprintSpawnableComponent))
@@ -21,6 +23,11 @@ public:
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Filling") bool bIsFilling = false;
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Filling") int32 SourceISID = 0;
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Filling") int32 TargetISID = 0;
+	/** Measured receiver delivery, after the valve, hose and socket have accepted the flow. */
+	UPROPERTY(Replicated, BlueprintReadOnly, Category="Filling") float DeliveredPortionsPerSecond=0.f;
+	UPROPERTY(Replicated, BlueprintReadOnly, Category="Filling") float DeliveredSupplyPressure=0.f;
+	UFUNCTION(BlueprintPure,Category="Filling") bool IsHoseFilling() const { return bIsFilling && ActiveHose.IsValid(); }
+	void NotifyHoseDelivery(UHoseTransferComponent* Hose,float ActualUnits,float IncomingPressure,float ActualRate);
 
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Filling") bool StartFilling(int32 Source, int32 Target);
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Filling") void StopFilling();
@@ -36,5 +43,8 @@ private:
 	FGuid SessionID;
 	float AccumulatedSeconds = 0;
 	TWeakObjectPtr<class APropManager> Manager;
+	TWeakObjectPtr<UHoseTransferComponent> ActiveHose;
+	TWeakObjectPtr<UResourceTransferEndpointComponent> ActiveReceivingPort;
+	bool bRestoreHoseTick=false;
 	bool ConnectionsInRange() const;
 };

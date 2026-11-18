@@ -146,6 +146,7 @@ void ANormalColaPrototypeTestActor::Fail(const FString& Message)
 void ANormalColaPrototypeTestActor::Tick(float Dt)
 {
 	Super::Tick(Dt);
+	if (TickMachineVisualTest()) return;
 	CaptureBottleEvidence();
 	if (!Manager.IsValid()) Manager=APropManager::Get(this);
 	if (!Manager.IsValid() || !Manager->SharedWallet || !Manager->ShopCheckout) return;

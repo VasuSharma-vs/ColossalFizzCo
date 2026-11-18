@@ -5,6 +5,10 @@
 #include "Shop/ShopProcurementComponent.h"
 #include "Shop/ShopProductionStationComponent.h"
 #include "Shop/BottleFillingComponent.h"
+#include "Shop/ShopSupplyDepot.h"
+#include "Shop/ColaSupplyContainer.h"
+#include "Shop/ManualColaFillingMachine.h"
+#include "Components/SphereComponent.h"
 #include "Shop/ShopShelfStockComponent.h"
 #include "Shop/SharedTeamWalletComponent.h"
 #include "Props/InteractablePropManager.h"
@@ -68,9 +72,16 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
 	{
 		if (const auto* Prop=Cast<AActivePropActor>(*It)) if (!Prop->bIsActive || Prop->ISID<=0) continue;
-		if ((Bench=It->FindComponentByClass<UShopProductionStationComponent>())) break;
+		if (auto* Candidate=It->FindComponentByClass<UShopProductionStationComponent>(); Candidate && Candidate->Filler) { Bench=Candidate; break; }
 	}
 	if (!Bench) return;
+	UShopProductionStationComponent* Supplier=Bench;
+	if (Bench->bManualLeverMode)
+	{
+		Supplier=nullptr;
+		for (TActorIterator<AShopSupplyDepot> It(GetWorld());It;++It) { Supplier=It->Supplies; break; }
+		if (!Supplier) return;
+	}
 	// A slower opt-in validation fixture allows several rendered frames at partial fill.
 	if (HasAuthority() && Stage==140 && Bench->Filler && FParse::Param(FCommandLine::Get(),TEXT("BottleVisualTest")))
 		Bench->Filler->PortionsPerSecond=FMath::Min(Bench->Filler->PortionsPerSecond,1.f);
@@ -88,12 +99,13 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 		{
 			if (LastSentStage!=Stage || Bench->View.ConnectedSourceISID!=TestSupplyISIDs[2] || Bench->View.SeatedBottleISID!=TestSupplyISIDs[0])
 			{
-				Actions->RequestProductionAction(Bench,Bench->View.SessionID,EShopProductionAction::ConnectSupply,0,TestSupplyISIDs[2]);
 				Actions->RequestProductionAction(Bench,Bench->View.SessionID,EShopProductionAction::AlignBottle,TestSupplyISIDs[0],0);
 				LastSentStage=Stage;
 			}
 			const auto* Data=Manager->FindUniqueData(TestSupplyISIDs[0]);
-			Actions->RequestProductionAction(Bench,Bench->View.SessionID,Data && Data->EventData.ContentLevel>=1 ? EShopProductionAction::ReleaseFillingLever : EShopProductionAction::HoldFillingLever,TestSupplyISIDs[0],0);
+			if (Data && Data->EventData.ContentLevel>=1 && Bench->View.bFilling) Actions->RequestProductionAction(Bench,Bench->View.SessionID,EShopProductionAction::StopFilling,TestSupplyISIDs[0],0);
+			const bool Safe=Data && Data->EventData.ContentLevel>=1 && Data->ContinuousData.SealedPressure<=Bench->SafeResidualPressure;
+			Actions->RequestProductionAction(Bench,Bench->View.SessionID,Safe ? EShopProductionAction::ReleaseFillingLever : EShopProductionAction::HoldFillingLever,TestSupplyISIDs[0],0);
 			++LocalRequestsSent; return;
 		}
 		if (Stage==160 && Bench->bAllowSoloCap && Actions && TestSupplyISIDs.Num()==3)
@@ -112,7 +124,7 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 		if (Stage==110 || Stage==120 || Stage==130)
 		{
 			const FName Offer=Stage==110 ? TEXT("EmptyBottle") : Stage==120 ? TEXT("TwistCap") : TEXT("CylinderMint");
-			Actions->RequestSupplyPurchase(Bench,Bench->View.SessionID,Offer,1);
+			Actions->RequestSupplyPurchase(Supplier,Supplier->View.SessionID,Offer,1);
 		}
 		else if (TestSupplyISIDs.Num()==3 && Stage>=140 && Stage<=160)
 		{
@@ -139,7 +151,7 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 		ATM->CollectDeposits(); ExpectedBankCents=ExpectedCashCents;
 		if (Manager->SharedWallet->GetWalletState().BalanceCents!=ExpectedBankCents || Manager->ShopCheckout->GetTeamCashCents()!=0)
 		{ Fail(TEXT("Banking sale proceeds did not conserve physical cash")); return; }
-		PlaceTestPawn(Pawn,Bench->GetOwner()->GetActorLocation()+FVector(0,-180,100));
+		PlaceTestPawn(Pawn,Supplier->GetOwner()->GetActorLocation()+FVector(0,-180,100));
 		for (const auto& Pair:Manager->ISIDData) KnownInstances.Add(Pair.Key);
 		TestSupplyISIDs.Init(0,3); ProductionStartedAt=GetWorld()->GetTimeSeconds(); Stage=110; ForceNetUpdate(); return;
 	}
@@ -167,7 +179,7 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 		const auto* Catalog=Manager->ShopSupplies->Catalog.Get(); const auto* Offer=Catalog ? Catalog->FindOffer(OfferID) : nullptr;
 		if (!Offer) { Fail(TEXT("Missing configured prototype supply offer")); return; }
 		int32 NewID=0;
-		for (int32 ID : Bench->LastDeliveredSupplies)
+		for (int32 ID : Supplier->LastDeliveredSupplies)
 		{
 			const auto* R=Manager->FindISIDData(ID);
 			const auto* Product=R ? Manager->FindProductDefinition(R->ProductID) : nullptr;
@@ -183,6 +195,16 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 		const FVector Scale=Manager->GetTransform(NewID).GetScale3D();
 		const FVector Offset=Index==1 && Definition && Definition->StaticMesh ? Definition->StaticMesh->GetBoundingBox().GetCenter()*Scale : FVector::ZeroVector;
 		Manager->InitializeInstanceTransform(NewID,FTransform(FRotator::ZeroRotator,Input->GetComponentLocation()-Offset,Scale));
+		if (Index==2)
+		{
+			PlaceTestPawn(Pawn,Bench->GetOwner()->GetActorLocation()+FVector(0,-180,100));
+			if (auto* Machine=Cast<AManualColaFillingMachine>(Bench->GetOwner()))
+			{
+				auto* Container=Cast<AColaSupplyContainer>(Manager->GetActiveActorFromISID(NewID));
+				if (!Container || !Machine->AttachSupplyNozzle(FHitResult(Machine,Machine->HosePorts[0],Machine->GetHosePortTransform(0).GetLocation(),FVector::UpVector),Container->SupplyNozzle,NewID,Pawn))
+				{ Fail(TEXT("Physical supply hose failed to attach")); return; }
+			}
+		}
 		Stage+=10; ForceNetUpdate(); return;
 	}
 	if (TestSupplyISIDs.Num()!=3) return;
@@ -200,9 +222,13 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 		if (Data && Bench->bManualLeverMode) UE_LOG(LogTemp,Display,TEXT("MANUAL_FILLING_TRACE session=%s seat=%d source=%d filling=%d aligned=%d bottle=%s holder=%s operator=%s"),*Bench->View.SessionID.ToString(),Bench->View.SeatedBottleISID,Bench->View.ConnectedSourceISID,Bench->Filler->bIsFilling,Bench->IsBottleAligned(TestSupplyISIDs[0]),*Manager->GetTransform(TestSupplyISIDs[0]).GetLocation().ToCompactString(),Bench->BottleHolder ? *Bench->BottleHolder->GetComponentLocation().ToCompactString() : TEXT("none"),Pawn ? *Pawn->GetActorLocation().ToCompactString() : TEXT("none"));
 	};
 	if (Stage>=140 && Stage<=160) TraceBottle(TEXT("production"));
-	if (Stage==140 && Bottle->EventData.ContentLevel>=1 && Bench->Filler && !Bench->Filler->bIsFilling)
+	if (Stage==140 && Bottle->EventData.ContentLevel>=1 && Bench->Filler && !Bench->Filler->bIsFilling
+		&& (!Bench->bManualLeverMode || (!Bench->View.bLeverHeld && Bottle->ContinuousData.SealedPressure<=Bench->SafeResidualPressure)))
 	{
-		if (!FMath::IsNearlyEqual(Cylinder->EventData.ContentLevel,.9f,1.e-5f)) { Fail(TEXT("Normal fill did not conserve cylinder portions")); return; }
+		const auto* BDef=Manager->FindProductDefinition(Manager->FindISIDData(TestSupplyISIDs[0])->ProductID);
+		const auto* CDef=Manager->FindProductDefinition(Manager->FindISIDData(TestSupplyISIDs[2])->ProductID);
+		const float Expected=1.f-Bottle->EventData.ContentLevel*BDef->ConsumableProfile.NumOfPortions/CDef->ConsumableProfile.NumOfPortions;
+		if (!FMath::IsNearlyEqual(Cylinder->EventData.ContentLevel,Expected,1.e-5f)) { Fail(TEXT("Normal fill did not conserve cylinder portions")); return; }
 		Stage=150; ForceNetUpdate();
 	}
 	else if (Stage==150 && Bottle->EventData.AttachedCapISID==TestSupplyISIDs[1]) { Stage=160; ForceNetUpdate(); }

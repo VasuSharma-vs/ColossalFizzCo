@@ -1,10 +1,12 @@
 #include "Props/InteractableProp.h"
+#include "Interfaces/WorldInteractionHitLibrary.h"
 #include "Props/InteractablePropManager.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
 #include "Components/RocketProjectileComponent.h"
 #include "Components/StaticMeshPhysicsSimulationComponent.h"
+#include "Components/ResourceTransferEndpointComponent.h"
 
 const FPropProductDefinition* AActivePropActor::ResolveProductDefinition() const
 {
@@ -85,6 +87,19 @@ void AActivePropActor::OnApplyEventData(const FPropEventUpdateData& InEventData,
 	RemainingPortions = GetRemainingPortions();
 	QuantityLevel = GetContentLevel();
 	bIsGrabbable = InEventData.bIsGrabbable;
+	const auto* Definition=ResolveProductDefinition();
+	const bool StoredSupply=InEventData.StoredInMachineISID>0 && Definition && Definition->ConsumableProfile.NumOfPortions<=0;
+	if (PropMesh && StoredSupply)
+	{
+		if (!bStoredSupplyCollisionDisabled) StoredSupplyCollisionMode=uint8(PropMesh->GetCollisionEnabled());
+		bStoredSupplyCollisionDisabled=true;
+		PropMesh->SetSimulatePhysics(false); PropMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
+	else if (PropMesh && bStoredSupplyCollisionDisabled)
+	{
+		bStoredSupplyCollisionDisabled=false;
+		if (!InEventData.AttachedBottleISID) PropMesh->SetCollisionEnabled(ECollisionEnabled::Type(StoredSupplyCollisionMode));
+	}
 	UpdateMaterialCustomPrimitiveData();
 	if (PreviousBottle>0 && InEventData.AttachedBottleISID==0) DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
 	if (bIsActive && PropManagerReference) PropManagerReference->SynchronizeCapAssembly(ISID);
@@ -113,7 +128,9 @@ void AActivePropActor::EmitPropEventUpdate(uint8 DirtyMask, uint8 ExtendedDirtyM
 		Delta.CreationTime = E.CreationTime; Delta.NewProductID = ProductID;
 		Delta.ContentCreationTime = E.ContentCreationTime; Delta.bClean = E.bClean;
 		Delta.AttachedCapISID = E.AttachedCapISID; Delta.AttachedBottleISID = E.AttachedBottleISID;
-		Delta.TemporarySealUntil=E.TemporarySealUntil; Delta.bTemporarySealUsed=E.bTemporarySealUsed; Delta.bManualFillPressure=E.bManualFillPressure; Delta.LinkedSupplyISID=E.LinkedSupplyISID;
+		Delta.TemporarySealUntil=E.TemporarySealUntil; Delta.bTemporarySealUsed=E.bTemporarySealUsed; Delta.bTemporarySealArmed=E.bTemporarySealArmed; Delta.bManualFillPressure=E.bManualFillPressure; Delta.LinkedSupplyISID=E.LinkedSupplyISID;
+		Delta.ConnectedSupplyISIDs=E.ConnectedSupplyISIDs; Delta.SelectedSupplyPort=E.SelectedSupplyPort; Delta.TemporarySealCharges=E.TemporarySealCharges;
+		Delta.LoadedCapISIDs=E.LoadedCapISIDs; Delta.LoadedSealISIDs=E.LoadedSealISIDs; Delta.StoredInMachineISID=E.StoredInMachineISID;
 		PropManagerReference->SubmitInstanceEventUpdate(ISID, Delta);
 	}
 	else LocalUniqueData.EventData.EventSequence++;
@@ -143,6 +160,9 @@ void AActivePropActor::OnRep_FillerSeat()
 		if (PropManagerReference) PropManagerReference->UnregisterSettlingComponent(PhysicsSimComponent);
 	}
 	if (PropMesh && PropMesh->IsSimulatingPhysics()) PropMesh->SetSimulatePhysics(false);
+	const auto* Definition=ResolveProductDefinition();
+	if (PropMesh && LocalUniqueData.EventData.StoredInMachineISID>0 && Definition && Definition->ConsumableProfile.NumOfPortions<=0)
+		PropMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 }
 bool AActivePropActor::CanDemoteToISM() const
 {
@@ -168,10 +188,26 @@ void AActivePropActor::ApplyInitialImpactFromPromotion(FVector Location, const F
 	LocalUniqueData.EventData.Strength = FMath::Clamp(GetStrength() - Damage, 0.0f, 1.0f);
 	EmitPropEventUpdate(EPropEventDirtyMask::Strength);
 }
+void AActivePropActor::ReceiveWorldHit_Implementation(const FWorldInteractionHit& Data)
+{
+	if (!HasAuthority() || GetNetMode()==NM_Client || Data.TargetActor!=this || !Data.EventID.IsValid()
+		|| Data.Impulse.ContainsNaN() || ReceivedWorldHitEvents.Contains(Data.EventID)) return;
+	if (ReceivedWorldHitEvents.Num()>=128) ReceivedWorldHitEvents.Reset();
+	ReceivedWorldHitEvents.Add(Data.EventID);
+	if (bApplyWorldHitForce) UWorldInteractionHitLibrary::ApplyBoundedWorldHitImpulse(PropMesh,Data,WorldHitImpulseScale,MaxWorldHitSpeedChange);
+	const int32 DamageEventID=static_cast<int32>(GetTypeHash(Data.EventID) | 1u);
+	ApplyInitialImpactFromPromotion(Data.Hit.ImpactPoint,Data.Impulse,Data.SourceActor,DamageEventID);
+}
 void AActivePropActor::OnBeforePoolDeactivate() { ResetTransientPoolState(); }
 void AActivePropActor::ResetForInstanceBinding() { ResetTransientPoolState(); }
 void AActivePropActor::ResetTransientPoolState()
 {
+	if (HasAuthority())
+	{
+		TInlineComponentArray<UResourceTransferEndpointComponent*> ResourcePorts(this);
+		for (auto* Port:ResourcePorts) if (Port) Port->ClearManagedContentBinding();
+	}
+	ReceivedWorldHitEvents.Reset();
 	if (HasAuthority()) FillerSeatISID = 0;
 	RestoreAuthoredMass();
 	++PoolGeneration;

@@ -8,6 +8,9 @@
 class UShopTerminalWidget;
 class UVerticalBox;
 class UTextBlock;
+class UProgressBar;
+class UManualFillingPressureGauge;
+class UCanvasPanel;
 
 UCLASS()
 class COLOSSALFIZZCO_API UShopTerminalButton : public UButton
@@ -29,6 +32,14 @@ private:
 	UFUNCTION() void HandleClick();
 	UFUNCTION() void HandlePress();
 	UFUNCTION() void HandleRelease();
+};
+
+UCLASS()
+class COLOSSALFIZZCO_API UShopTerminalProductionButton : public UShopTerminalButton
+{
+	GENERATED_BODY()
+public:
+	UShopTerminalProductionButton() { InitIsFocusable(false); }
 };
 
 UCLASS()
@@ -65,6 +76,18 @@ private:
 	UPROPERTY(Transient) TObjectPtr<UVerticalBox> Body;
 	UPROPERTY(Transient) TObjectPtr<UTextBlock> Summary;
 	UPROPERTY(Transient) TObjectPtr<UTextBlock> ResultText;
+	UPROPERTY(Transient) TObjectPtr<UVerticalBox> ProductionSidebar;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> ProductionStatus;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> ProductionHint;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FillReadout;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> SealReadout;
+	UPROPERTY(Transient) TObjectPtr<UProgressBar> FillProgress;
+	UPROPERTY(Transient) TObjectPtr<UProgressBar> SealProgress;
+	UPROPERTY(Transient) TObjectPtr<UManualFillingPressureGauge> PressureGauge;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> SupplyTrayReadout;
+	UPROPERTY(Transient) TObjectPtr<UShopTerminalButton> StopFlowButton;
+	UPROPERTY(Transient) TObjectPtr<UShopTerminalButton> ResumeFlowButton;
+	UPROPERTY(Transient) TArray<TObjectPtr<UWidget>> CornerPanels;
 	UPROPERTY(Transient) TMap<int32,TObjectPtr<UTextBlock>> ProductionBottleLabels;
 	UPROPERTY(Transient) TArray<TObjectPtr<UTextBlock>> CheckoutTextRows;
 	TWeakObjectPtr<UShopPlayerInteractionComponent> Actions;
@@ -77,5 +100,8 @@ private:
 	void RefreshProduction(UShopProductionStationComponent* Production);
 	UTextBlock* AddText(const FString& Text);
 	UShopTerminalButton* AddButton(const FString& Label);
+	void BuildProductionDashboard(UCanvasPanel* Canvas);
+	UTextBlock* AddSection(const FString& Title,const FString& Description,UVerticalBox* Target=nullptr);
+	UShopTerminalButton* AddProductionAction(const FString& Label,EShopProductionAction Action,int32 BottleID=0,int32 OtherID=0,UVerticalBox* Target=nullptr);
 	UFUNCTION() void ActionResult(int64 Sequence, EShopCheckoutResult Result);
 };

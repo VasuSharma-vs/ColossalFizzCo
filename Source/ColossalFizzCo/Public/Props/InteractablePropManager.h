@@ -4,6 +4,7 @@
 #include "GameFramework/Actor.h"
 #include "Props/InteractablePropDatabase.h"
 #include "Props/FragmentTypes.h"
+#include "Interfaces/WorldInteractionHitInterface.h"
 #include "InteractablePropManager.generated.h"
 
 class AActivePropActor;
@@ -26,6 +27,7 @@ class UFragmentAssemblyDataAsset;
 class UStaticMeshComponent;
 class UPropActivationVolumeComponent;
 class UPropProductCatalog;
+struct FHoseResourceBuffer;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnSettlingObjectRested, UStaticMeshPhysicsSimulationComponent*, SimComp, AActor*, OwnerActor);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPropRepresentationChanged, int32, ISID, EPropRepresentation, NewRepresentation, AActivePropActor*, ActiveActor);
@@ -66,6 +68,8 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Prop Manager|Database")
 	TMap<int32,FPropContentDefinition> ContentDefinitions;
+	/** Advances on authoritative registration and on receipt of a replacement definition. */
+	uint32 GetContentDefinitionRevision() const { return ContentDefinitionRevision; }
 	UPROPERTY(Transient) TMap<int32,FPropInstanceUniqueData> UniqueDataByISID;
 	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category="Prop Manager|Time")
 	double WorldElapsedSeconds = 0.0;
@@ -109,6 +113,10 @@ public:
 	FGuid BeginLiquidTransfer(int32 SourceISID, int32 TargetISID);
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Shop|Filling")
 	float TransferLiquid(FGuid SessionID, float RequestedPortions);
+	/** Atomic transfers between canonical content inventory and a server-owned hose buffer. */
+	float IntakeHoseContent(int32 SourceISID, FHoseResourceBuffer& Buffer, float Capacity, float Requested);
+	float DeliverHoseContent(FHoseResourceBuffer& Buffer, int32 TargetISID, float Requested);
+	float ReleaseHoseContent(FHoseResourceBuffer& Buffer, FGuid ReleaseEpisode, FVector Location);
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Shop|Filling")
 	void EndLiquidTransfer(FGuid SessionID);
 	void CancelLiquidTransfers();
@@ -1400,7 +1408,8 @@ public:
 		int32 InISID,
 		FVector HitImpulse = FVector::ZeroVector,
 		FVector ImpactPoint = FVector::ZeroVector,
-		float UnsettledDelay = -1.0f);
+		float UnsettledDelay = -1.0f,
+		bool bApplyHitForce = true);
 
 	/** Sets an instance by ISID to Settling (promotes to ASM if needed and monitors velocity until at rest) */
 	UFUNCTION(BlueprintCallable, Category = "Prop Manager|Instance State")
@@ -1428,11 +1437,19 @@ public:
 		FVector HitImpulse,
 		FVector_NetQuantize ImpactPoint,
 		float CustomParam,
-		AActor* HolderActor);
+		AActor* HolderActor,
+		bool bApplyHitForce = true);
 
 	// =====================================================================
 	// ISM Hit Forwarding (Send Hit Info from FirstPerson/Actor to PropManager)
 	// =====================================================================
+	/** Incoming momentum threshold for waking a resting instance, in kg cm/s. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Prop Manager|World Hits", meta=(ClampMin="0")) float WorldHitPromotionImpulseThreshold = 20.f;
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Prop Manager|World Hits")
+	bool ReceiveWorldHitByICID(int32 InICID, int32 InISMI, const FWorldInteractionHit& Data);
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Prop Manager|World Hits")
+	bool ReceiveWorldHitByISID(int32 InISID, const FWorldInteractionHit& Data);
+	TMap<FGuid,double> RecentWorldHitEvents;
 	/**
 	 * Sends hit info from a hitting actor/component (such as FirstPersonCharacter's OnComponentHit / Event Hit)
 	 * directly to PropManager with the hit ISM component, ISMI (Hit.Item), ImpactPoint, and Normals.
@@ -1738,5 +1755,9 @@ protected:
 	TSet<TWeakObjectPtr<AActor>> BoundHitActors;
 
 	FPropInstanceDelta BuildDeltaForRecord(const FISIDRuntimeIndex& Record) const;
+
+private:
+	void StoreContentDefinition(FPropContentDefinition Definition);
+	uint32 ContentDefinitionRevision = 0;
 };
 

@@ -558,8 +558,25 @@ bool FPropEventSyncDelta::NetSerialize(FArchive& Ar, class UPackageMap* Map, boo
 	if (ExtendedDirtyMask & EPropExtendedEventMask::ContentCreationTime) Ar << ContentCreationTime;
 	if (ExtendedDirtyMask & EPropExtendedEventMask::AttachedCap) Ar << AttachedCapISID;
 	if (ExtendedDirtyMask & EPropExtendedEventMask::AttachedBottle) Ar << AttachedBottleISID;
-	if (ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal) { Ar << TemporarySealUntil; Ar << bTemporarySealUsed; Ar << bManualFillPressure; }
+	if (ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal) { Ar << TemporarySealUntil; Ar << bTemporarySealUsed; Ar << bManualFillPressure; Ar << bTemporarySealArmed; }
 	if (ExtendedDirtyMask & EPropExtendedEventMask::LinkedSupply) Ar << LinkedSupplyISID;
+	if (ExtendedDirtyMask & EPropExtendedEventMask::ManualEquipment)
+	{
+		uint8 Count = uint8(FMath::Min(ConnectedSupplyISIDs.Num(),32));
+		Ar << Count;
+		if (Count>32) { bOutSuccess=false; return false; }
+		if (Ar.IsLoading()) ConnectedSupplyISIDs.SetNum(Count);
+		for (int32 I=0; I<Count; ++I) Ar << ConnectedSupplyISIDs[I];
+		Ar << SelectedSupplyPort; Ar << TemporarySealCharges;
+		for (TArray<int32>* IDs:{&LoadedCapISIDs,&LoadedSealISIDs})
+		{
+			uint8 SupplyCount=uint8(FMath::Min(IDs->Num(),64)); Ar << SupplyCount;
+			if (SupplyCount>64) { bOutSuccess=false; return false; }
+			if (Ar.IsLoading()) IDs->SetNum(SupplyCount);
+			for (int32 I=0; I<SupplyCount; ++I) Ar << (*IDs)[I];
+		}
+		Ar << StoredInMachineISID;
+	}
 
 	if (HasFlag(EPropEventDirtyMask::ContentLevel))
 	{

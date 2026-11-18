@@ -32,6 +32,7 @@ bool FBottleRocketTravelTest::RunTest(const FString& Parameters)
 	Bottle->RocketMinSpeed=Bottle->RocketMaxSpeed=1500; Bottle->RocketAcceleration=0;
 	Bottle->RocketComp->TippingSettings.bEnableTipping=false;
 	Bottle->RocketComp->DraggingSettings.bEnableDragging=false;
+	Bottle->RocketComp->FallingSettings.PhysicsHandoffMode=ERocketPhysicsHandoffMode::OnFuelDepleted;
 	Manager->SetBottleAgitationPressure(ID,Bottle->GetBottlePressureTolerance()+1); Bottle->AddAgitationPressure(.01f);
 	if (!TestTrue(TEXT("Real cap release starts projectile flight"),Bottle->RocketComp->IsPoweredFlight())) return false;
 	TestEqual(TEXT("Configured distance is respected"),Bottle->RocketLaunchConfiguration.Distance,600.f);
@@ -47,7 +48,7 @@ bool FBottleRocketTravelTest::RunTest(const FString& Parameters)
 	for (int32 I=0;I<200 && Bottle->RocketComp->IsPoweredFlight();++I)
 		static_cast<UActorComponent*>(Bottle->RocketComp.Get())->TickComponent(.02f,LEVELTICK_All,nullptr);
 	TestTrue(TEXT("Flight includes gradual fractional depletion"),WasPartial);
-	TestTrue(TEXT("Flight reaches its configured distance"),Bottle->RocketComp->GetTotalFlightDistanceTraveled()>=600.f);
+	TestTrue(TEXT("Flight consumes the complete powered path including the dying climb"),Bottle->RocketComp->GetTotalFlightDistanceTraveled()>=Bottle->RocketComp->GetPoweredTravelDistance()-.1f);
 	TestEqual(TEXT("Bottle is exactly empty at travel limit"),Bottle->GetContentLevel(),0.f);
 	TestEqual(TEXT("Material is exactly empty at travel limit"),Bottle->ColaLevel,0.f);
 	TestTrue(TEXT("Physics handoff retains the authoritative settlement monitor"),Bottle->RocketComp->IsComponentTickEnabled());
@@ -63,6 +64,7 @@ bool FBottleRocketTravelTest::RunTest(const FString& Parameters)
 	if (!Manager->SetInstanceToUnsettled(EarlyID)) return false;
 	auto* Early=Cast<AColaPropActor>(Manager->GetActiveActorFromISID(EarlyID));
 	if (!Early || !Early->RocketComp) return false;
+	Early->RocketComp->FallingSettings.PhysicsHandoffMode=ERocketPhysicsHandoffMode::OnFuelDepleted;
 	Manager->SetBottleAgitationPressure(EarlyID,Early->GetBottlePressureTolerance()+1); Early->AddAgitationPressure(.01f);
 	static_cast<UActorComponent*>(Early->RocketComp.Get())->TickComponent(.02f,LEVELTICK_All,nullptr);
 	Early->RocketComp->FinishPressureThrust();

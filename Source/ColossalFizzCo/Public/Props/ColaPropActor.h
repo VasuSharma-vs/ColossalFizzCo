@@ -34,7 +34,7 @@ enum class ECapRemovalOperation : uint8
 /**
  * Native C++ Base Class for Cola Bottles (BP_Cola, BP_SpicyCola, BP_SugerCrushCola).
  * Handles portion tracking, liquid material parameter driving, foam pressure & agitation physics,
- * quadratic underfill penalty, cap ejection, and erratic rocket launches.
+ * portion-based sale quotes, cap ejection, and erratic rocket launches.
  */
 UCLASS(Blueprintable, ClassGroup = (Props))
 class COLOSSALFIZZCO_API AColaPropActor : public AActivePropActor
@@ -84,11 +84,48 @@ public:
 	void AddAgitationPressure(float Amount);
 	void UpdatePlasticPressure(float DeltaSeconds);
 	bool StartPlasticPressureRelease(bool bTemporarySealFailure=false);
-	bool HasTemporaryManufacturingSeal() const;
+	UFUNCTION(BlueprintPure, Category="Cola|Manufacturing|Seal") bool HasTemporaryManufacturingSeal() const;
+	/** Bottle-owned manufacturing rules. The machine supplies input and presentation only. */
+	UFUNCTION(BlueprintPure, Category="Cola|Manufacturing") bool CanAcceptManufacturingContent(int32 ContentID) const;
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cola|Manufacturing") void OnManufacturingLiquidReceived(float PreviousLevel);
+	/** Hose delivery supplies line pressure separately from the canonical liquid/temperature transaction. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cola|Manufacturing") void OnManufacturingSupplyReceived(float ActualUnits,float IncomingPressure,float ActualRate);
+	UFUNCTION(BlueprintPure, Category="Cola|Manufacturing") bool IsManufacturingFlowActive() const;
+	UFUNCTION(BlueprintPure, Category="Cola|Manufacturing|Seal") bool CanApplyManufacturingSeal() const;
+	bool BuildManufacturingSealDelta(FPropEventSyncDelta& OutDelta) const;
+	/** Applies the bottle state; stations use BuildManufacturingSealDelta for atomic consumption of a physical seal. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cola|Manufacturing|Seal") bool AddManufacturingSeal();
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cola|Manufacturing|Seal") void NotifyManufacturingLeverReleased();
+	UFUNCTION(BlueprintPure, Category="Cola|Manufacturing|Seal") float GetManufacturingSealSecondsRemaining() const;
+	UFUNCTION(BlueprintPure, Category="Cola|Manufacturing|Seal") float GetManufacturingSealIntegrity() const;
+	UFUNCTION(BlueprintPure, Category="Cola|Manufacturing") bool IsManufacturingSafeToRelease() const;
+	UFUNCTION(BlueprintPure, Category="Cola|Manufacturing|Cap") bool CanManufacturingCap() const;
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cola|Manufacturing|Cap") bool AttachManufacturingCap(int32 CapISID);
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cola|Manufacturing|Cap") bool AdvanceManufacturingCap(float ProgressDelta, bool bSufficientHold);
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cola|Manufacturing|Cap") bool CloseManufacturingCap(float Torque);
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cola|Manufacturing|Cap") void UpdateManufacturingCapLeakage(float DeltaSeconds, bool bSufficientHold, FGuid ReleaseEpisode);
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cola|Manufacturing") bool EvaluateManufacturingPressureFailure(bool bOverfill=false);
+	/** Override in each cola Blueprint to choose its failure reaction; normal plastic cola launches its rocket. */
+	UFUNCTION(BlueprintNativeEvent, BlueprintAuthorityOnly, Category="Cola|Manufacturing|Failure") bool HandleManufacturingPressureFailure(bool bTemporarySealFailure, bool bOverfill);
+	virtual bool HandleManufacturingPressureFailure_Implementation(bool bTemporarySealFailure, bool bOverfill);
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Cola|Manufacturing|Seal") bool bSupportsTemporarySeal=true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Cola|Manufacturing|Seal", meta=(ClampMin="0.1",Units="s")) float TemporarySealDuration=4.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Cola|Manufacturing", meta=(ClampMin="0")) float SafeResidualPressure=.1f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Cola|Manufacturing", meta=(ClampMin="0")) float ManufacturingPressurePerContentLevel=.6f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Cola|Manufacturing", meta=(ClampMin="0")) float ManufacturingMaxSupplyPressure=3.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Cola|Manufacturing", meta=(ClampMin="1.01")) float ManufacturingOverfillFailureLevel=1.1f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Cola|Manufacturing|Cap", meta=(ClampMin="0")) float ManufacturingLeakageLevelPerSecond=.05f;
+	bool IsManufacturingFailureActive() const;
+	bool bManufacturingFailureDispatched=false;
 	UPROPERTY(EditAnywhere, Category="Cola|Pressure|Manual Filling",meta=(ClampMin="0.01")) float ManualFillVentRate=.15f;
 	/** Current prototype choice: reuse BP_Cola's original projectile flight. False selects Chaos thrust. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Cola|Pressure|Rocket")
 	bool bUseOriginalRocketFlight = true;
+	/** Optional nozzle socket on the shell. Without a socket, use the cap mount or the top of the shell. */
+	UPROPERTY(EditDefaultsOnly, Category="Cola|Pressure|Rocket")
+	FName RocketNozzleSocket = TEXT("Nozzle");
+	/** False while waiting for a replicated content definition. OutColor remains a usable fallback. */
+	bool TryGetRocketSprayColor(FLinearColor& OutColor) const;
 	bool LaunchOriginalBottleRocket(bool bHighAccuracy = false);
 	UPROPERTY(EditAnywhere, Category="Cola|Pressure|Rocket", meta=(ClampMin="1", Units="cm")) float RocketMinDistance = 2000.f;
 	UPROPERTY(EditAnywhere, Category="Cola|Pressure|Rocket", meta=(ClampMin="1", Units="cm")) float RocketMaxDistance = 8000.f;
@@ -101,6 +138,9 @@ public:
 	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category="Cola|Pressure|Rocket") FColaRocketLaunchConfiguration RocketLaunchConfiguration;
 	void UpdateOriginalRocketDischarge(float DeltaSeconds);
 	TWeakObjectPtr<UShopProductionStationComponent> CapHoldingStation;
+	TWeakObjectPtr<UShopProductionStationComponent> ManualFillingStation;
+	/** A temporary seal bleeds slowly; holding the machine lever provides the faster controlled vent. */
+	UPROPERTY(EditAnywhere,Category="Cola|Pressure|Manual Filling",meta=(ClampMin="0")) float TemporarySealVentRate=.08f;
 	UPROPERTY(EditAnywhere, Category="Cola|Pressure") float ImpactPressureGain = .8f;
 	UPROPERTY(EditAnywhere, Category="Cola|Pressure") float ShakePressureGain = .4f;
 	UPROPERTY(EditAnywhere, Category="Cola|Pressure") float JetLiquidLevelPerSecond = .15f;
@@ -111,8 +151,14 @@ public:
 protected:
 	virtual void PostInitializeComponents() override;
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+private:
+	void UpdateRocketPlume();
+	void StopRocketPlume();
+	bool bRocketNozzleRegistered = false;
 
 public:
 	// -------------------------------------------------------------
@@ -145,18 +191,18 @@ public:
 	// -------------------------------------------------------------
 	// Liquid & Portions
 	// -------------------------------------------------------------
-	/** Current fill level (0.0 = empty, 1.0 = standard full, > 1.0 = overfilled up to 2.0) */
+	/** Compatibility mirror of canonical EventData.ContentLevel; capacity comes from the product definition. */
 	UPROPERTY(ReplicatedUsing = OnRep_ColaLevel, EditAnywhere, BlueprintReadWrite, Category = "Cola|Liquid")
 	float ColaLevel = 1.0f;
 
 	UFUNCTION()
 	virtual void OnRep_ColaLevel();
 
-	/** Stability tolerance threshold before bottle detonates into a rocket (default 2.0, SugarCrush 1.8, Spicy 1.6) */
+	/** Non-plastic fill-plus-foam launch threshold. Plastic uses product pressure tolerance scaled by strength. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cola|Liquid")
 	float StabilityTolerance = 2.0f;
 
-	/** Base price for selling a full bottle */
+	/** Compatibility fallback for CalculateUnderfillPenalty when no content definition is available. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cola|Economy")
 	float BasePrice = 10.0f;
 
@@ -191,7 +237,7 @@ public:
 	// -------------------------------------------------------------
 	virtual bool OnPlayerGrab_Implementation(USceneComponent* AttachToParent, FName SocketName = NAME_None) override;
 
-	/** Adds liquid to bottle, updates morph targets and checks for detonation */
+	/** Compatibility wrapper calling FillBottleAtRate(FillStrength, 1.0f). */
 	UFUNCTION(BlueprintCallable, Category = "Cola|Liquid")
 	virtual void FillBottle(float FillStrength);
 
@@ -207,7 +253,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Cola|Cap")
 	virtual void AddCap(int32 InProductID);
 
-	/** Detaches cap, adds physical impulse upwards and destroys after delay */
+	/** Detaches the physical cap through the manager; fallback mesh debris expires after five seconds. */
 	UFUNCTION(BlueprintCallable, Category = "Cola|Cap")
 	virtual void RemoveCap(float RemovingStrength = 1.0f, ECapRemovalOperation Operation = ECapRemovalOperation::EjectPhysics);
 
@@ -219,7 +265,7 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Cola|Economy")
 	virtual float CalculateSalePayout(float TargetFill = 1.0f) const;
 
-	/** Safely updates dynamic material instance on material slot 1 of SkeletalMeshComponent */
+	/** Updates modular liquid material slot 0, or slot 1 of the legacy combined bottle mesh. */
 	UFUNCTION(BlueprintCallable, Category = "Cola|Rendering")
 	virtual void UpdateDynamicMaterial(bool bUpdateVelocity);
 

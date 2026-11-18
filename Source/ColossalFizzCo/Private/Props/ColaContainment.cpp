@@ -10,7 +10,7 @@
 bool AColaPropActor::CanDemoteToISM() const
 {
 	const auto* Def=ResolveProductDefinition();
-	return Super::CanDemoteToISM() && LiquidMotion.IsSettled()
+	return Super::CanDemoteToISM() && LiquidMotion.IsSettled() && !HasTemporaryManufacturingSeal()
 		&& !(GetContentLevel()>UE_SMALL_NUMBER && GetCapSealed()<1.f
 			&& (!Def || !Def->bAllowUncappedFilledISMDemotion || LocalUniqueData.EventData.AttachedCapISID>0))
 		&& SmoothedPressureExpansion<=.001f
@@ -19,12 +19,14 @@ bool AColaPropActor::CanDemoteToISM() const
 }
 void AColaPropActor::ResetTransientPoolState()
 {
+	StopRocketPlume();
 	Super::ResetTransientPoolState();
 	LiquidMotion.Reset(); LastLiquidLocalNormal=FVector::ZeroVector; LastLiquidFill=-1;
 	SmoothedPressureExpansion=0; bMorphInitialized=false; ContentMass=0;
 	RocketInitialContentLevel=RocketInitialPressure=0; RocketLaunchConfiguration=FColaRocketLaunchConfiguration();
 	InteractionPressure = FoamPressure = 0;
 	AcceptedFailureType = EContainmentFailureType::None;
+	bManufacturingFailureDispatched=false;
 	ProcessedImpactIDs.Empty(); LastImpactTime = -1;
 	bDebugBottleImpacts=false;
 	AssemblyLiquidMesh = nullptr;
@@ -33,7 +35,7 @@ void AColaPropActor::ResetTransientPoolState()
 	DynamicMaterialInstance = nullptr;
 	if (CapMeshComponent) { CapMeshComponent->DestroyComponent(); CapMeshComponent = nullptr; }
 	if (RocketComp) RocketComp->ResetRocketSimulation();
-	CapHoldingStation.Reset(); PressureReleaseEpisode.Invalidate(); PressurePublishElapsed=0; LastPublishedPressure=0;
+	CapHoldingStation.Reset(); ManualFillingStation.Reset(); PressureReleaseEpisode.Invalidate(); PressurePublishElapsed=0; LastPublishedPressure=0;
 }
 void AColaPropActor::OnApplyContinuousData(const FPropContinuousUpdateData& Data,float NewStrength,bool bStrengthChanged)
 {

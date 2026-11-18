@@ -9,18 +9,25 @@ const FPropContentDefinition* APropManager::FindContentDefinition(int32 ContentI
 	return ContentDefinitions.Find(ContentID);
 }
 
+void APropManager::StoreContentDefinition(FPropContentDefinition Definition)
+{
+	const int32 ContentID = Definition.ContentID;
+	ContentDefinitions.Add(ContentID, MoveTemp(Definition));
+	++ContentDefinitionRevision;
+}
+
 bool APropManager::RegisterContentDefinition(const FPropContentDefinition& Definition)
 {
 	if (!HasAuthority() || !Definition.IsValidDefinition() || !FMath::IsFinite(Definition.BasePortionPrice) || Definition.BasePortionPrice < 0
 		|| !FMath::IsFinite(Definition.DensityGPerMl) || Definition.DensityGPerMl<=0) return false;
-	ContentDefinitions.Add(Definition.ContentID, Definition);
+	StoreContentDefinition(Definition);
 	for (const auto& Peer : DeliveryChannels) if (Peer.Value) Peer.Value->QueueContent(Definition.ContentID);
 	return true;
 }
 
 void APropManager::Multicast_RegisterContentDefinition_Implementation(const FPropContentDefinition& Definition)
 {
-	if (!HasAuthority()) ContentDefinitions.Add(Definition.ContentID, Definition);
+	if (!HasAuthority()) StoreContentDefinition(Definition);
 }
 
 void APropManager::Multicast_RegisterProductDefinition_Implementation(const FPropProductDefinition& Definition)
@@ -87,7 +94,13 @@ namespace
 			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::AttachedCap) || D.AttachedCapISID >= 0)
 			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::AttachedBottle) || D.AttachedBottleISID >= 0)
 			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal) || (FMath::IsFinite(D.TemporarySealUntil) && D.TemporarySealUntil >= 0))
-			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::LinkedSupply) || D.LinkedSupplyISID >= 0);
+			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::LinkedSupply) || D.LinkedSupplyISID >= 0)
+			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::ManualEquipment) || (D.ConnectedSupplyISIDs.Num()<=32
+				&& D.SelectedSupplyPort>=0 && D.SelectedSupplyPort<32 && D.TemporarySealCharges>=0
+				&& !D.ConnectedSupplyISIDs.ContainsByPredicate([](int32 ID){return ID<0;})
+				&& D.LoadedCapISIDs.Num()<=64 && D.LoadedSealISIDs.Num()<=64 && D.StoredInMachineISID>=0
+				&& !D.LoadedCapISIDs.ContainsByPredicate([](int32 ID){return ID<=0;})
+				&& !D.LoadedSealISIDs.ContainsByPredicate([](int32 ID){return ID<=0;})));
 	}
 	void ApplyEvent(FPropEventUpdateData& E, const FPropEventSyncDelta& D)
 	{
@@ -102,8 +115,11 @@ namespace
 		if (D.ExtendedDirtyMask & EPropExtendedEventMask::Clean) E.bClean = D.bClean;
 		if (D.ExtendedDirtyMask & EPropExtendedEventMask::AttachedCap) E.AttachedCapISID = D.AttachedCapISID;
 		if (D.ExtendedDirtyMask & EPropExtendedEventMask::AttachedBottle) E.AttachedBottleISID = D.AttachedBottleISID;
-		if (D.ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal) { E.TemporarySealUntil=D.TemporarySealUntil; E.bTemporarySealUsed=D.bTemporarySealUsed; E.bManualFillPressure=D.bManualFillPressure; }
+		if (D.ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal) { E.TemporarySealUntil=D.TemporarySealUntil; E.bTemporarySealUsed=D.bTemporarySealUsed; E.bManualFillPressure=D.bManualFillPressure; E.bTemporarySealArmed=D.bTemporarySealArmed; }
 		if (D.ExtendedDirtyMask & EPropExtendedEventMask::LinkedSupply) E.LinkedSupplyISID=D.LinkedSupplyISID;
+		if (D.ExtendedDirtyMask & EPropExtendedEventMask::ManualEquipment)
+		{ E.ConnectedSupplyISIDs=D.ConnectedSupplyISIDs; E.SelectedSupplyPort=D.SelectedSupplyPort; E.TemporarySealCharges=D.TemporarySealCharges;
+		  E.LoadedCapISIDs=D.LoadedCapISIDs; E.LoadedSealISIDs=D.LoadedSealISIDs; E.StoredInMachineISID=D.StoredInMachineISID; }
 		E.EventSequence = D.EventSequence;
 	}
 }
@@ -201,7 +217,7 @@ bool APropManager::ChangePropProductWithMode(int32 InISID, int32 NewProductID, E
 		Preserved.EventData.ContentID = 0;
 		Preserved.EventData.CapType = 0;
 		Preserved.EventData.CapSealed = 0;
-		Preserved.EventData.TemporarySealUntil=0; Preserved.EventData.bTemporarySealUsed=false; Preserved.EventData.bManualFillPressure=false;
+		Preserved.EventData.TemporarySealUntil=0; Preserved.EventData.bTemporarySealUsed=false; Preserved.EventData.bTemporarySealArmed=false; Preserved.EventData.bManualFillPressure=false;
 	}
 	Preserved.EventData.EventSequence = NextEventSequence;
 	if (NewDef->bEnableInstanceUniqueData) UniqueDataByISID.Add(InISID, Preserved);

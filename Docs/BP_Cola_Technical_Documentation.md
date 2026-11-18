@@ -1,294 +1,307 @@
-# BP_Cola & AColaPropActor — Technical Architecture & Gameplay Specification
+# BP_Cola technical architecture
 
-**Project:** Midnight Fizz: Giant Thirst (*ColossalFizzCo*)  
-**Source Location:** [`ColaPropActor.h`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Source/ColossalFizzCo/Public/Props/ColaPropActor.h) & [`ColaPropActor.cpp`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Source/ColossalFizzCo/Private/Props/ColaPropActor.cpp)  
-**Blueprint Class:** `/Game/Props/Colas/BP_Cola` (derives from [`AColaPropActor`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Source/ColossalFizzCo/Public/Props/ColaPropActor.h#L26))  
-**Parent C++ Class:** [`AActivePropActor`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Source/ColossalFizzCo/Public/Props/InteractableProp.h#L32) : `AActor`, `IWorldAffordanceInterface`  
-**Interface Implementations:** `IWorldAffordanceInterface`, `BPI_World_Intractions_System`  
-**Companion Docs:** [`ISM_Data_Architecture.md`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Docs/ISM_Data_Architecture.md) | [`ActivePropActor_ASM_Architecture.md`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Docs/ActivePropActor_ASM_Architecture.md) | [`PropManager_ISM_ASM_Architecture.md`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Docs/PropManager_ISM_ASM_Architecture.md) | [`Bottle_Damage_Transformation_and_Fragments.md`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Docs/Bottle_Damage_Transformation_and_Fragments.md)
+Updated: 2026-11-18. This document describes the current Blueprint and C++ implementation. Product catalogs and data assets supply runtime configuration; native defaults remain editable settings. The pressurized-supply update builds as Editor 18103 and passes 70/70 selected native regressions (19 with warnings). Rendered and real remote-client acceptance remains pending; earlier subsystem verification is recorded separately below.
 
----
+The [pressurized container and hose path](Pressurized_Cola_Container_2026-11-18.md) delivers actual accepted units into the seated bottle through the Prop Manager. `OnManufacturingSupplyReceived` receives the incoming pressure and delivered rate; `ManufacturingMaxSupplyPressure` defaults to 3. Exceeding that limit after delivery triggers the bottle's existing failure immediately, even with the filling lever held. Normal plastic cola uses its existing rocket path. The machine stops flow and releases the bottle; it does not choose or create the bottle's failure behavior.
 
-## 1. Executive Summary & Purpose
+The [manual filler client visual repair](Manual_Filler_Client_Visuals_2026-11-18.md) validates prop class and logical instance identity during client pool reuse, keeps local slots distinct, and protects placed machines from automatic pool shrinking. Its separate host/client/late-join checks pass on 18103. This does not replace the pending rendered and remote acceptance for the new hot-supply gameplay itself.
 
-`AColaPropActor` is the authoritative native C++ base class governing all drinkable and volatile soda bottles in *Midnight Fizz: Giant Thirst*. Represented in content as `BP_Cola` and subclassed by specialized variants (`BP_SpicyCola`, `BP_FireCola`, `BP_SugerCrushCola`), this actor unifies the **Bottle Containment & Failure System** with the **zero-copy ISM <-> ASM pooling architecture**:
+## 1. Ownership and inheritance
 
-1. **Fractional Liquid Volume, Content Identity & Morph Targets:** Continuous fill tracking via `ContentLevel` (`0.0` empty, `1.0` normal capacity, up to `MaxOverfillLevel = 1.7` by default), paired with central `ContentID` lookups, driving `"EmptyLevel"` / `"OverfullLevel"` morph targets, 4-float Custom Primitive Data, and velocity-reactive Slot `1` liquid shaders (`UpdateBottleMaterial`).
-2. **Separated Base vs. Interaction Pressure & Structural Integrity (`Strength`):** Resting `BasePressure = ContentLevel`, interaction agitation (`AccumulatedInteractionPressure`) scaled by `Content.PressureStrengthMultiplier / Product.PressureResistanceMultiplier` with `InteractionEventID` deduplication, plus monotonic persistent `Strength` (`0.0 .. MaxStrength`) separating permanent dents/cracks from recoverable `TemporaryDeformation`.
-3. **Dual Thermal Solver & Equilibration Gate:** Multi-source exponential heat transfer solving both bottle shell (`CurrentTemperature`) and liquid (`ContentTemperature`), draining `Strength` above/below thermal thresholds, and gating ASM -> ISM demotion via [`CanDemoteToISM()`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Docs/ActivePropActor_ASM_Architecture.md#L103) until shell and content equilibrate.
-4. **Centralized Containment Failure Manager & Catastrophic Rocket Flight:** Prioritized server-authoritative failure handling (`BottleBreakage > OverpressureBurst > ThermalFailure > PressureRelease > CapFailure`), duplicate `FailureEventID` protection, erratic 3D zig-zag `URocketProjectileComponent` launches, hazard spawning, and PID conversion to `BurstBrokenProductID`.
-5. **4-Stage Capping & 5-Mode Uncapping Lifecycle:** `AddCap` (`Validate -> Attach -> Close & Seal -> Auto/Event Validation` updating float `CapSealed` `0.0 .. 1.0`) and `RemoveCap` (`Twist`, `Pop`, `Break`, `Pull`, `Cut`) with `SafeOpenPressureThreshold` containment checks and `PoolGeneration`-safe cleanup timers.
-6. **Precision Filling (`FillBottle(FillStrength, DeltaSeconds)`) & Decoupled Failures:** Frame-rate-independent flow with `FillSlowdownCurve`, `OverfillWarningThreshold`, strict return of exact accepted fractional portions, and decoupled `OverpressureBurst` vs. optional `bEnableOverfillFailure`.
-7. **Commercial Economy & Quadratic Underfill Penalty:** Non-linear pricing calculations rewarding chilled full bottles and penalizing underfilled bottles scanned at checkout.
+The master Blueprint is `/Game/Props/Colas/BP_Cola`. Its native parent is `AColaPropActor`, declared in [ColaPropActor.h](../Source/ColossalFizzCo/Public/Props/ColaPropActor.h).
 
----
-
-## 2. Class Hierarchy & Architecture Diagram
-
-```mermaid
-flowchart TD
-    UObj["UObject / AActor"] --> ActiveProp["AActivePropActor (Zero-Copy ASM Base + Event/Continuous Mirrors)"]
-    Iface1["IWorldAffordanceInterface"] --> ActiveProp
-    BPI["BPI_World_Intractions_System"] --> BPCola
-    ActiveProp -->|"CanDemoteToISM, 4-Float CPD, PoolGeneration"| ColaActor["AColaPropActor (Pressure, Thermal, Cap, FailureManager)"]
-    ColaActor --> BPCola["BP_Cola (Master Blueprint)"]
-    BPCola --> Spicy["BP_SpicyCola (Tolerance 1.6, Heat Hazard)"]
-    BPCola --> Fire["BP_FireCola (Fiery Jet Detonation)"]
-    BPCola --> Sugar["BP_SugerCrushCola (Tolerance 1.8, Sticky Hazard)"]
+```text
+AActor
+  AActivePropActor : IWorldAffordanceInterface
+    AColaPropActor
+      BP_Cola
+        BP_PlastickBottel
+        BP_SpicyCola
+        BP_SugerCrushCola
 ```
 
----
+These three child Blueprints were verified in the editor. Their names do not define flavor, pressure thresholds, prices or hazards by themselves; inspect the resolved product and content definitions.
 
-## 3. Component Architecture
-
-| Component | Class Type | Role & Configuration |
-| :--- | :--- | :--- |
-| **`SkeletalMeshComponent`** | `USkeletalMeshComponent` | Visual mesh (e.g. `SKM_ColaBottel`). Hosts transient Slot `1` dynamic liquid material (`UMaterialInstanceDynamic`) only when `ContentID > 0 && ContentLevel > 0`, receives 4-float Custom Primitive Data, and drives `"EmptyLevel"` / `"OverfullLevel"` + deformation morph targets. |
-| **`PropMesh`** | `UStaticMeshComponent` | Physics collision body for drop/collision impacts (`SetNotifyRigidBodyCollision(true)` bound to `HandleBottleComponentHit`) and static mesh visual fallback carrying the same 4-float Custom Primitive Data. |
-| **`CapMeshComponent`** | `UStaticMeshComponent` | Detachable bottle cap (`BottleCap`) attached at neck socket `(0, 0, 170)`. Tracks attachment, closing alignment, and sealing state (`CapSealed` `0.0 .. 1.0`). When attached/sealed (`CapSealed > 0`), blocks filling and drinking. |
-| **`RocketComp`** | `URocketProjectileComponent` | Erratic 3D zig-zag rocket flight simulation (`LaunchRocket`), ricochets, fuel depletion, and post-flight settling delegates. |
-| **`PhysicsSimComponent`** | `UStaticMeshPhysicsSimulationComponent` | Manages physics sleep/wake transitions, `UnsettledDelay` (3.0s) timers, and settling handoffs to `UASMComponent` + `CanDemoteToISM()`. |
-| **`DynamicMaterialInstance`** | `UMaterialInstanceDynamic` *(Transient)* | Created lazily on Slot `1` only for filled bottles (`ContentID > 0 && ContentLevel > 0`); cleared and original material restored in `ResetTransientPoolState()`. |
-| **`DebugText`** | `UTextRenderComponent` | Development billboard text showing `ISID`, `PID`, `CID`, `ContentLevel`, `Temperature`, `Strength`, and `CapSealed`. |
-
----
-
-## 4. Detailed Feature Breakdown & Implementation Mechanics
-
-### 4.1 Liquid Identity (`ContentID`), `ContentLevel`, Morph Targets & 4-Float Shader Driving
-
-Every bottle separates its **physical container product (`ProductID`)** from its **liquid flavor (`ContentID`)**:
-- `ContentID == 0`: Empty container (no liquid shader parameters ticked, Slot `1` liquid material cleared).
-- `ContentID > 0`: Looks up shared `FPropContentDefinition` from [`APropManager::ContentDefinitions`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Docs/ISM_Data_Architecture.md#L146-L167) (`LiquidMaterial`, `LiquidColor`, `PressureStrengthMultiplier`, `BasePortionPrice`, `IdealServingTemperature`, taste/stimuli/expiry).
-
-Liquid volume is tracked natively as continuous `EventData.ContentLevel` (mirrored to replicated `ColaLevel` in ASM — **never** floored to integers inside active gameplay):
-- `0.0`: Empty (`RemainingPortions = 0`).
-- `0.0 .. 1.0`: Partial to `NormalCapacity` (`1.0`).
-- `> 1.0` up to `ProductDef->MaxOverfillLevel` (`1.7` default): Overfilled neck/headspace range.
-- Fractional portion derivation on demand: $\text{RemainingPortions} = \text{ContentLevel} \times \text{MaxPortions}$.
-
-#### Morph Targets (`UpdateMorphTargets`)
-Drives both liquid fill level and reversible vs. permanent shell deformation (`TotalDeformation = TemporaryDeformation + (1.0 - Strength / MaxStrength)`):
-
-$$\text{FoamRatio} = \text{MapRangeClamped}(\text{FoamPressure}, [0, 10], [0, 1])$$
-
-$$\text{TotalVolume} = \text{ContentLevel} + \text{FoamRatio}$$
-
-$$\text{EmptyLevel} = \text{Clamp}(1.0 - \text{TotalVolume}, 0.0, 1.0)$$
-
-$$\text{OverfullLevel} = \text{Clamp}(\text{TotalVolume} - 1.0, 0.0, 1.0)$$
-
-- While warming up (`bIsFirstActiveFrame || WarmupFramesRemaining > 0`), morph targets hard-snap to avoid residual deformation from the previous pooled bottle; afterward they smoothly `FInterpTo(..., 12.0f)`.
-
-#### Unified 4-Float Custom Primitive Data & Dynamic Liquid Shader (`UpdateBottleMaterial`)
-All ISM slots (`PerInstanceSMCustomData`) and active ASM mesh components (`SetCustomPrimitiveDataFloat`) expose **4 consistent floats**:
-- **Slot `0`:** `ContentLevel` (`0.0 .. MaxOverfillLevel`)
-- **Slot `1`:** `ExpiryAge` (`Clamp((WorldElapsedSeconds - CreationTime) / ExpiryLifetimeSec, 0.0, 1.0)`)
-- **Slot `2`:** `Temperature` (raw `°C`, letting materials compute both frost `< 15°C` and heat shimmer/scorch `> 45°C`)
-- **Slot `3`:** Normalized `Strength` (`Clamp(Strength / MaxStrength, 0.0, 1.0)`). Materials compute `DamageAlpha = 1.0 - Slot3`:
-  - **Glass Bottles (`EBottleMaterialType::Glass`):** Drives crack opacity, normal intensity, and micro-fracture roughness via **`Lerp` nodes** until `Strength <= BreakageFailureThreshold` triggers fracture.
-  - **Plastic Bottles (`EBottleMaterialType::Plastic`):** Drives permanent dents and body bends via **World Position Offset (WPO)** sampling a **Vertex Deformation Texture**, preserving dents natively when demoted back to ISM.
-
-For Slot `1` `DynamicMaterialInstance` (created only when `ContentID > 0 && ContentLevel > 0`):
-- `ScalarParameter "Liquid Level"` $\leftarrow \text{ContentLevel}$
-- `ScalarParameter "Current Pressure"` $\leftarrow P_{\text{total}}$
-- `ScalarParameter "Temperature"` $\leftarrow \text{ContentTemperature}$ *(or equilibrium `Temperature`)*
-- `ScalarParameter "Age Strength"` $\leftarrow \text{ExpiryAge}$ *(shader freshness/spoilage factor from Slot `1`)*
-- `ScalarParameter "Structural Strength"` $\leftarrow \frac{\text{Strength}}{\text{MaxStrength}}$ *(or direct shader read from CPD Slot `3` for permanent dents/cracks)*
-- `ScalarParameter "Use Dynamic Values"` $\leftarrow 1.0$
-- `VectorParameter "Object Velocity"` $\leftarrow \text{LinearVelocity}$ (clamped to max `3000 cm/s`)
-- `VectorParameter "Object Angular Velocity"` $\leftarrow \text{AngularVelocity}$ (clamped to max `720 deg/s`)
-
----
-
-### 4.2 Pressure System (`Base` vs `Interaction`), Impulse Dedup & Strength Degradation
-
-To comply with `Bottle_Containment_&_Failure_System.txt`, pressure is strictly separated into persistent `BasePressure` and transient `AccumulatedInteractionPressure`:
-
-$$P_{\text{base}} = \text{ContentLevel}$$
-
-$$P_{\text{total}} = P_{\text{base}} + P_{\text{interaction}}$$
-
-#### 1. Continuous Agitation & Drop Impulse Generation (`UpdateFoamPressure` / `HandleBottleComponentHit`)
-- **Warmup, Transit & Teleport Guards (plus ISM Hit Bypass):** Normal `HandleBottleComponentHit` bypasses agitation during `WarmupFramesRemaining` (`20`), `HeldGracePeriod` (`0.5s`), rest interpolation, or jumps $> 200^2\text{ cm}^2$ / $Z < -50,000$. When promoted by an external ISM collision via [`SendISMHitByICIDToPropManager`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Source/ColossalFizzCo/Private/Props/InteractablePropManager.cpp#L263-L294) -> [`SetInstanceToUnsettled`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Source/ColossalFizzCo/Private/Props/InteractablePropManager.cpp#L6198-L6307), the **authoritative server (`HasAuthority()`)** invokes `ApplyInitialImpactFromPromotion(EffectiveImpulse, ...)` passing the **unclamped `EffectiveImpulse`** (bypassing both warmup and the `220.0f` `SafeImpulse` velocity clamp) so heavy impacts crack or shatter resting glass bottles reliably. *(Additional Phase B Fix: [`ColaPropActor.cpp#L163`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Source/ColossalFizzCo/Private/Props/ColaPropActor.cpp#L163) zeros local finite-difference velocities without overwriting replicated `FoamPressure` on clients, and [`ColaPropActor.cpp#L236-L237`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Source/ColossalFizzCo/Private/Props/ColaPropActor.cpp#L236-L237) removes the stray `bWasHeldLastFrame = true` overwrite.)*
-- **Continuous Pressure Generation (when `Abs(DeltaJerk) > AgitationJerkThreshold` while held & attached):**
-  $$\Delta P = \frac{\text{PressureGenerationRate} \times \Delta t \times \text{Content.PressureStrengthMultiplier}}{\text{Product.PressureResistanceMultiplier}}$$
-- **One-Time Impulse (`HandleBottleComponentHit` / `ApplyInitialImpactFromPromotion`) with Server Deduplication:**
-  $$\Delta P_{\text{impulse}} = \frac{\text{PressureImpulse} \times \text{Content.PressureStrengthMultiplier}}{\text{Product.PressureResistanceMultiplier}}$$
-  Guarded on the server by unique `InteractionEventID` (`LastProcessedInteractionEventID`, `ProcessedInteractionEventIDs`, `LastImpulseTimestamp`, `ImpulseCooldown`) so duplicate physics hit callbacks within a frame never double-charge pressure impulses.
-- **Stationary / Unheld Pressure Decay (`Decrease Pressure`):**
-  $$P_{\text{interaction}} = \max(0.0,\ P_{\text{interaction}} - \text{PressureDecayRate} \times \Delta t)$$
-  Decay **never** reduces $P_{\text{base}} = \text{ContentLevel}$ and **never** restores permanent `Strength` or permanent dents/cracks; only `TemporaryDeformation` eases back toward equilibrium.
-
-#### 2. Two Immediate Pressure Release Modes (`ReleasePressure`)
-- **Mode A (`ReleaseInteractionPressure`):** Instantly clears `AccumulatedInteractionPressure = 0.0` (e.g., careful micro-venting cap) while keeping $P_{\text{total}} = P_{\text{base}} = \text{ContentLevel}$.
-- **Mode B (`FullPressureVent`):** Clears `AccumulatedInteractionPressure = 0.0` and vents sealed headspace to atmospheric equilibrium (`P_total = VentedBasePressure`, typically `0.0`), clearing pending impulse queues while preserving `Strength` and `ContentLevel` (unless spray/spill occurred).
-
-#### 3. Structural Integrity (`Strength`) & Material Deformation Separation
-- When $P_{\text{total}} > \text{ProductDef->PressureDamageThreshold}$:
-  $$\Delta \text{Strength} = (P_{\text{total}} - \text{PressureDamageThreshold}) \times \text{StrengthDamageRate} \times \Delta t$$
-  $$\text{Strength} = \max(0.0,\ \text{Strength} - \Delta \text{Strength})$$
-- Extreme temperature (`< LowTempDamageThreshold` or `> HighTempDamageThreshold`) and high-energy impacts (`DamageEventID`-deduped) reduce the exact same persistent `EventData.Strength`.
-- **Invariants:** Neither pressure decay, emptying content, nor cooling back to room temperature restores `Strength`. Only `RepairBottle()` (when `bSupportsRepair`) or `FullReset` restores `Strength`.
-- If `Strength <= ProductDef->BreakageFailureThreshold` (default `0.0f`), `ContainmentFailureManager` immediately receives **`BottleBreakage`** (Priority 1, beating `PressureRelease` if both happen in the same tick).
-
----
-
-### 4.3 Dual Thermal Solver (Bottle Shell vs. Liquid Contents)
-
-While active in ASM, `AColaPropActor` simulates multi-source heat exchange across both the container shell (`CurrentTemperature`) and internal liquid (`ContentTemperature`):
-
-$$Q = \sum_{i} G_i (T_i - T_{\text{shell}}) + P_{\text{direct}}, \qquad T_{\text{new}} = T_{\text{target}} + (T_{\text{prev}} - T_{\text{target}}) \cdot e^{-K \Delta t}$$
-
-- Uses shared `WorldElapsedSeconds` (double precision) and a single shared `DeltaSeconds` across all active sources (`Ambient`, `Hot/Cold Contents`, `DirectHeating`/`IceBath`, gameplay heat inputs) so multi-source transfers never double-count elapsed time.
-- **Thermal Tolerance & Damage:** Below `LowTempDamageThreshold` or above `HighTempDamageThreshold` monotonically drains `Strength`; breaching `[MinTemperatureThreshold, MaxTemperatureThreshold]` submits **`ThermalFailure`** to `ContainmentFailureManager`.
-- **Equilibration Gate Before ISM Demotion:** `CanDemoteToISM()` returns `false` while `Abs(ContentTemperature - CurrentTemperature) > ThermalEquilibriumEpsilon`, keeping the bottle in ASM until shell and liquid converge so ISM stores one equilibrium `Temperature` safely.
-
----
-
-### 4.4 Containment Failure Manager & Product Transformations (`LaunchBottle` / `Breakage`)
-
-All failure conditions route through a single authoritative **`SubmitFailureRequest(FContainmentFailureRequest)`** entry point on the server (`FailureEventID`, `FailureType`, `Severity`, `Location`, `Direction`, `bReleaseContent`, `bReleasePressure`) instead of independent uncoordinated explosions:
-
-```mermaid
-flowchart LR
-    Dmg["Strength <= BreakageThreshold / Impact"] -->|"1. BottleBreakage"| CFM["ContainmentFailureManager (Dedup + Priority)"]
-    Fill["Overpressure / Overfill"] -->|"2. OverpressureBurst"| CFM
-    Temp["Temp Threshold Breach"] -->|"3. ThermalFailure"| CFM
-    Press["Pressure > Tolerance"] -->|"4. PressureRelease"| CFM
-    Cap["Bad Seal Validation"] -->|"5. CapFailure"| CFM
-    CFM -->|"Volatile Uncap / Pressurized"| Rocket["RemoveCap(EjectPhysics) + LaunchBottle (RocketComp)"]
-    CFM -->|"1-to-1 Burst or Melt"| SinglePID["ChangePropProductWithMode (BurstBrokenPID / MeltedPID)"]
-    CFM -->|"1-to-Many Glass Fracture"| FracturePID["RequestProductTransformation -> BrokenGlass ASM -> Glass Fragment 1..N"]
-```
-
-- **Priority & Lockout:** `1. BottleBreakage > 2. OverpressureBurst > 3. ThermalFailure > 4. PressureRelease > 5. CapFailure > 6. Other`. Once an equal or higher priority failure is accepted (`bFailureExecutionInProgress` / `bFailureExecuted`), lower-priority or duplicate `FailureEventID` callbacks are ignored.
-- **Ballistic Rocket Configuration (`LaunchBottle`):**
-  1. **Cap Detonation:** `RemoveCap(EBottleCapRemovalType::Pop, 1.0f, ECapRemovalOperation::EjectPhysics)` detaches/ejects the cap (`+Up * 1500` impulse) and clears `CapType = 0`, `CapSealed = 0.0f`.
-  2. **Flight Trajectory Setup:** `bEnableErraticPath = true`, `ZigZagMode = ERocketZigZagMode::Random3D`, `Min/MaxWaypointSpacing = 350..650 cm`, `Min/MaxPathDeviation = 35..90 deg`, `8` flight ricochets, `4` falling bounces.
-  3. **Impulse Cone:** $25^\circ$ cone around local `UpVector`; Speed `Clamp(ContentLevel * 3500.0, 1500.0, 4500.0) cm/s`; Distance `Clamp(ContentLevel * 6000.0, 2000.0, 8000.0) cm`.
-  4. **Hazard & Product Transformation ([`Bottle_Damage_Transformation_and_Fragments.md`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Docs/Bottle_Damage_Transformation_and_Fragments.md)):** Spawns variant hazard puddles/clouds/jets (and ejects attached cap debris on shatter), then executes either:
-     - **1-to-1 (`OverpressureBurst` / `ThermalFailure`):** Calls `ChangePropProductWithMode(BurstBrokenProductID / MeltedProductID, EPropProductResetMode::PreserveUniqueState)` keeping `ISID`, `CreationTime`, `Temperature`, and `ContentID`.
-     - **1-to-Many (`BottleBreakage` on Glass):** Guards `BrokenProductID != ProductID`, retires `SourceISID` via `ReleaseInstanceToEmpty`, and invokes `RequestProductTransformation` -> `Broken Glass Bottle` (`ABrokenBottlePropActor`) -> `Glass Fragment 1..N` independent `FragISID` lifecycles.
-
----
-
-### 4.5 Bottle Capping (`AddCap` 4 Stages) & Uncapping (`RemoveCap` 5 Modes)
-
-Capping state in ISM/ASM is persisted cleanly via **`CapType` (`uint8` `EBottleCapType`)** and float **`CapSealed` (`0.0 .. 1.0`)** plus transient ASM validation states:
-
-- **`AddCap` 4-Stage Pipeline:**
-  1. **Stage 1 — Validate Cap:** Verify `EBottleCapType` compatibility (`CapType` bit) against `ProductDef->SupportedCapMask` and cap mesh validity.
-  2. **Stage 2 — Attach Cap:** Activate/attach `CapMeshComponent` at neck socket `(0, 0, 170)`, align rotation, disable cap physics (`Attached`).
-  3. **Stage 3 — Close & Seal (`FVector ActionDirection, float ActionStrength`):** Drive F1 torque/rotation toward `[TorqueSweetSpotMin, TorqueSweetSpotMax]` (`Closing` -> `Closed`).
-  4. **Stage 4 — Validate & Lock (`AutoTrigger` retriggerable delay OR `EventTrigger`):** Evaluate final rotation, position, closing strength, and seal integrity -> either commit **`CapType`** + **`CapSealed = 1.0f`** (`Sealed`, syncing Event Delta) OR partial/failed seal (`0.01 .. 0.99` -> triggers **`CapFailure`** leakage).
-- **`RemoveCap(EBottleCapRemovalType RemovalType, float RemovingStrength)` — 5 Modes (`Twist`, `Pop`, `Break`, `Pull`, `Cut`):**
-  1. Checks `CapMeshComponent` is attached and `RemovalType` matches cap hardware (`Twist`, `Pop`, `Break`, `Pull`, `Cut`).
-  2. **Containment Gate:** If `ContentLevel <= KINDA_SMALL_NUMBER`, skips containment check and removes cleanly. If `ContentLevel > 0.0f`, tests `bIsInSuitableContainmentEnvironment` AND `TotalPressure <= SafeOpenPressureThreshold`.
-  3. Unsafe removal submits **`PressureRelease`** to `ContainmentFailureManager`; safe removal sets `CapType = 0`, `CapSealed = 0.0f`, emits Event Delta, and cleans up the ejected cap cleanly using **`PoolGeneration`-guarded timers** or standalone temporary debris *(fixing [`ColaPropActor.cpp#L423-L431`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Source/ColossalFizzCo/Private/Props/ColaPropActor.cpp#L423-L431) so pooled bottle reuse within 5 seconds never destroys the next bottle's cap)*.
-
----
-
-### 4.6 Commercial Economy & Quadratic Underfill Penalty
-
-When customers purchase cola bottles at `BP_CheckoutScanner`, `BasePrice` resolves from `ContentDef->BasePortionPrice * NumOfPortions` (falling back to `ProductDef->ConsumableProfile.Price`) and applies non-linear underfill penalty math:
-
-#### Quadratic Penalty Formula (`CalculateUnderfillPenalty`)
-$$\text{If } \text{ContentLevel} \ge \text{TargetFill}: \quad \text{Penalty} = 0.00$$
-
-$$\text{If } \text{ContentLevel} < \text{TargetFill}: \quad \text{Penalty} = \text{BasePrice} \times (\text{TargetFill} - \text{ContentLevel})^2$$
-
-#### Customer Payout Formula (`CalculateSalePayout`)
-$$\text{Payout} = \max\left(0.0,\ \text{BasePrice} - \text{Penalty}\right)$$
-
-#### Economic Penalty Curve Table (`BasePrice` = \$10.00, `TargetFill` = `1.0`)
-| Fill Level (`ContentLevel`) | Fill Ratio | Underfill Difference | Penalty | Final Payout | Revenue Retained |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **1.00 (Standard)** | 100% | 0.00 | \$0.00 | **\$10.00** | 100.0% |
-| **0.90 (Slight Underfill)** | 90% | 0.10 | \$0.10 | **\$9.90** | 99.0% |
-| **0.75 (3/4 Fill)** | 75% | 0.25 | \$0.625 | **\$9.38** | 93.8% |
-| **0.50 (Half Fill)** | 50% | 0.50 | \$2.50 | **\$7.50** | 75.0% |
-| **0.25 (Quarter Fill)** | 25% | 0.75 | \$5.625 | **\$4.38** | 43.8% |
-| **0.10 (Near Empty)** | 10% | 0.90 | \$8.10 | **\$1.90** | 19.0% |
-| **0.00 (Empty)** | 0% | 1.00 | \$10.00 | **\$0.00** | 0.0% |
-
----
-
-### 4.7 Content Operations (`SetBottleContentType`, `FillBottle`, `RemoveBottleContent`) & Zero-Copy Pooling Cycle
-
-1. **`SetBottleContentType(int32 NewContentID)`:** Pre-configures a bottle before filling when `ContentLevel <= 0.0f` and `NewContentID` is permitted by `ProductDef->SupportedContentIDs`. Binds Slot `1` material and pressure/thermal rules from `APropManager::ContentDefinitions` without changing `ContentLevel` or `CreationTime`.
-2. **`float FillBottle(float FillStrength, float DeltaSeconds)` (Returns `AcceptedPortions`):**
-   - Rejects if `CapSealed > 0.0f`, `FailureState >= Failing`, or `ContentID <= 0`.
-   - Computes `RawFill = FillStrength * DeltaSeconds * SlowdownCurve(ContentLevel)`.
-   - Clamps against `RemainingCapacity = MaxOverfillLevel - ContentLevel`; accepts `AcceptedFill` and returns `AcceptedPortions = AcceptedFill * NumOfPortions` so the dispenser subtracts only accepted volume.
-   - Emits warning cue at `OverfillWarningThreshold`; above `1.0` adds compression pressure (`OverpressureBurst` occurs only at `PressureFailureThreshold`, while optional `bEnableOverfillFailure` handles hard capacity overflow independently).
-3. **`RemoveBottleContent()` & `ConsumePortion()`:**
-   - Instant reset (`RemoveBottleContent`) or gradual drinking (`ConsumePortion`) updates `ContentLevel`, keeps `Strength` & `CreationTime` intact, and when `ContentLevel <= 0.0f` on a reusable bottle converts PID cleanly via `ChangeProduct(EmptyBottleProductID, EPropProductResetMode::ContentReset)` rather than calling `ReleaseInstanceToEmpty(ISID)`.
-
-```mermaid
-sequenceDiagram
-    participant ISM as UInteractableISMComponent (AtRest)
-    participant PM as APropManager (Zero-Copy Registries)
-    participant Cola as AColaPropActor (Pooled ASM)
-
-    Note over ISM,PM: Resting ISM stores ONLY UniqueData (no shared copies) + 4-float GPU CPD
-    PM->>Cola: Promote: ++PoolGeneration; ApplySharedDefs + EventData + ContinuousData
-    Note over Cola: Restore ContentLevel float, CapMesh from CapSealed, Slot 1 MID if ContentLevel > 0
-    Cola->>PM: EmitPropEventUpdate on Fill / Cap / Damage / Consume / ProductID swap
-    Note over Cola: UASMComponent requests settle -> Checks Cola->CanDemoteToISM()
-    alt Abs(ContentTemp - Temp) > Eps OR InteractionPressure > Eps OR Leaking OR ClosingTimer
-        Cola-->>PM: Return false (Stay in ASM until normalized)
-    else All Transient Simulation Settled
-        Cola->>PM: WriteToISIDRecord (Preserve CreationTime; never floor ContentLevel)
-        Cola->>Cola: ResetTransientPoolState() (++PoolGeneration, detach/clear Cap & Slot 1 MID)
-        PM->>ISM: Restore slot at RestTransform & update 4-float GPU CPD
-    end
-```
-
----
-
-## 5. Network Replication Breakdown
-
-Under the split zero-copy architecture, persistent ISM/ASM fields sync through [`APropManager`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Docs/PropManager_ISM_ASM_Architecture.md#L72-L91) (`Registry`, `Event` ordered by `EventSequence`, and `Continuous`), while live ASM gameplay variables replicate for active presentation:
-
-| Property / Channel / RPC | Net Mode | Description |
-| :--- | :--- | :--- |
-| **`ProductDefinitions` & `ContentDefinitions`** | Initial Snapshot + On-Register Reliable Multicast | Central Category 1 registries; never duplicated per instance or resent per delta batch. |
-| **Event Channel (`FPropEventSyncDelta`)** | Server -> Client Reliable (`EventSequence` Guard) | Syncs `ContentLevel`, `ContentID`, `CapType`, `CapSealed`, discrete `Strength`, `bIsGrabbable`, `CreationTime`, and `ProductID` transformations. |
-| **Continuous Channel (`FPropContinuousSyncItem`)** | Server -> Client Unreliable Batch | Syncs `Temperature`, `LastUpdatedTime`, and optional thermal `Strength` drain; never mutates `CreationTime`. |
-| **`ColaLevel` (ASM Mirror)** | `ReplicatedUsing = OnRep_ColaLevel` | Active mirror of `ContentLevel` while filling/drinking in ASM; drives morph targets and liquid material height. |
-| **`FoamPressure` (ASM Transient)** | `ReplicatedUsing = OnRep_FoamPressure` | Active server-authoritative agitation foam (`0..10`); clients never overwrite it locally during Tick warmup. |
-| **`CapState` & `CapSealed` (ASM Mirror)** | `ReplicatedUsing = OnRep_CapState` | Synchronizes live 4-stage torque closing, sealing validation, and 5-mode cap removal visuals. |
-| **`FailureState` & `AcceptedFailureType`** | `ReplicatedUsing = OnRep_FailureState` | Synchronizes `ContainmentFailureManager` execution (`Normal` -> `Failing` -> `Broken`) so FX trigger once per `FailureEventID`. |
-| **`LinearVelocity` / `AngularVelocity` / `State` / `bIsHeld` / `bIsActive`** | Replicated (`AActivePropActor`) | Slosh shader velocities and ASM pool activation/visibility transitions. |
-| **`Server_ConsumePortion` / `Multicast_OnPortionConsumed`** | Server Reliable RPC / NetMulticast | Client consume requests and audio/UI broadcast. |
-
----
-
-## 6. Cola Variants Comparison Table
-
-| Property / Behavior | Standard (`BP_Cola`) | Sugar Crush (`BP_SugerCrushCola`) | Spicy / Fire (`BP_SpicyCola` / `BP_FireCola`) |
-| :--- | :--- | :--- | :--- |
-| **Data Asset / ContentID** | `DA_BasicCola` / `CID = 1` | `DA_SweetCola` / `CID = 2` | `DA_SpicyCola` / `CID = 3` |
-| **Base Price** | \$2.50 - \$10.00 | \$3.25 | \$4.50 |
-| **Max Overfill / Burst Tolerance** | `MaxOverfillLevel = 1.7` / `PressureFailureThreshold = 2.0` | `MaxOverfillLevel = 1.7` / `PressureFailureThreshold = 1.8` *(More Volatile)* | `MaxOverfillLevel = 1.7` / `PressureFailureThreshold = 1.6` *(Extremely Volatile)* |
-| **Ideal Temperature** | $4.0^\circ\text{C}$ | $3.0^\circ\text{C}$ | $8.0^\circ\text{C}$ |
-| **Agitation Jerk Threshold** | `1.5` | `1.2` | `1.0` |
-| **Overfill Surge Multiplier** | `3.0` | `4.0` | `4.5` |
-| **Detonation Hazard (`HazardType`)** | Ballistic unguided rocket | Sticky foam geyser (50% floor slow) | Scorching jet fire patches on counters |
-
----
-
-## 7. C++ Header, Implementation Reference & Revision History
-
-- Header File: [`ColaPropActor.h`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Source/ColossalFizzCo/Public/Props/ColaPropActor.h)
-- Implementation File: [`ColaPropActor.cpp`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Source/ColossalFizzCo/Private/Props/ColaPropActor.cpp)
-- Base Class: [`InteractableProp.h`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Source/ColossalFizzCo/Public/Props/InteractableProp.h)
-- Rocket Component: [`RocketProjectileComponent.h`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Source/ColossalFizzCo/Public/Components/RocketProjectileComponent.h)
-
-| Iteration | Focus Completed |
+| Owner | Responsibility |
 |---|---|
-| **Iteration 1** | Aligned `BP_Cola` / `AColaPropActor` documentation with the zero-copy ISM <-> ASM architecture (`ContentLevel`, `ContentID`, `CapSealed`, `Strength`, 4-float CPD, split Event/Continuous channels) and full `Bottle_Containment_&_Failure_System.txt` specification (`AddCap` 4 stages, `RemoveCap` 5 modes, `FillBottle` fractional return, `ContainmentFailureManager`, `BurstBrokenProductID`). |
-| **Iteration 2** | Audited pricing formulas, KaTeX `$` escaping (`\$` in tables), `CanDemoteToISM()` equilibration conditions, and exact Phase B bug fixes (`ColaPropActor.cpp#L163`, `L236-L237`, `L423-L431`, `L547-L609`). |
-| **Iteration 3** | Replaced ASCII pooling/hierarchy diagrams with Mermaid diagrams and verified all clickable `file:///` links against source headers/implementations. |
-| **Iteration 4** | Integrated [`Bottle_Damage_Transformation_and_Fragments.md`](file:///c:/Users/PC/Documents/Unreal%20Projects/ColossalFizzCo/Docs/Bottle_Damage_Transformation_and_Fragments.md): specified Glass crack `Lerp` vs Plastic WPO Vertex Texture in `Slot 3`, added server-only `ApplyInitialImpactFromPromotion` bypass (`WarmupFramesRemaining` + unclamped `EffectiveImpulse`), separated 1-to-1 (`Burst`/`Melted`) vs 1-to-Many (`Broken Glass -> Glass Fragment 1..N`) transformations with recursion guard, and unified `CapType` / `SupportedCapMask` / `EBottleCapRemovalType`. |
+| `BP_Cola` | Authored component settings and `BPI_World_Intractions_System` interaction wrappers. No Blueprint-declared gameplay variables remain after cleanup. |
+| `AActivePropActor` | Identity, interaction/carrying, active lifecycle, consumption, local state mirrors, custom primitive data and base replication. |
+| `AColaPropActor` | Bottle mass, supported filling content, cap closure, temporary seals, pressure/failure policy, impact damage, liquid motion, materials, morph targets and rocket integration. |
+| `APropManager` | Persistent instance records, shared definitions, assemblies, liquid transfers/releases, representation changes, saves and synchronization. |
+| Manager-owned `UASMComponent` | Pool of active prop actors used when promoting resting instances. |
+| Manager-owned `UPropBatchUpdateComponent` | Batched temperature, thermal damage, expiry and representation updates. |
+
+ASM means the active pooled actor representation. A resting ISM is an instanced static mesh representation. `UASMComponent` belongs to the manager, not each bottle.
+
+## 2. Components and configuration
+
+The Blueprint has four default components:
+
+| Component | Type | Purpose |
+|---|---|---|
+| `PropMesh` | `UStaticMeshComponent` | Actor root and collision/physics body. Receives hit callbacks and is moved by rocket flight. Also provides a static visual fallback. |
+| `SkeletalMeshComponent` | `USkeletalMeshComponent` | Visual child of `PropMesh`, with collision disabled by the native constructor. Displays deformation through morph targets. |
+| `PhysicsSimComponent` | `UStaticMeshPhysicsSimulationComponent` | Targets `PropMesh`; coordinates `AtRest`, `InMotion`, `Held`, `Unsettled` and `Settling`. Native defaults: 3-second unsettled delay, 10 cm/s linear tolerance and 15 deg/s angular tolerance. |
+| `RocketProjectile` | `URocketProjectileComponent` | Authored Blueprint component assigned to native `RocketComp`. Handles flight, collisions, fuel depletion, falling and settling. |
+
+`AActivePropActor` creates the first three components. `PostInitializeComponents()` finds the authored rocket or creates a replicated `NativeBottleRocket` fallback, then binds native lifecycle, impact and rocket delegates.
+
+The verified master references `/Game/Assest/DataAssets/DA_Cola`. That asset supplies `SM_PlasticBottle`, `SKM_PlasticBottle`, plastic material type, nominal capacity of 135 portions, empty mass of 0.05 kg and `MaxOverfillLevel` of 1.7. Construction/product-definition application assigns meshes; a null static mesh on the unconstructed class default object is not the runtime configuration.
+
+Additional runtime objects:
+
+- `AssemblyLiquidMesh` / `AssemblyLiquidSkeletalMesh`: presentation for an attached liquid product. The manager creates assembly components and may add a skeletal visual for deformation.
+- Physical cap: an attached product with its own ISID, reciprocal bottle/cap IDs and assembly edge. It can have its own active actor when detached. `CapMeshComponent` is the compatibility mesh fallback.
+- `DynamicMaterialInstance`: transient material created/rebound for the selected liquid mesh and slot.
+- `FColaLiquidMotion`: cosmetic C++ struct holding motion history, tilt, waves and fluid spin; not an Actor Component or saved product state.
+- `DebugText`: optional base-class debug presentation, null by default; not a fifth default Blueprint component.
+
+## 3. Data ownership
+
+`ISID` identifies an individual instance. `ProductID` selects its product definition; `ContentID` selects its liquid definition. `ASMID` identifies an active actor pool slot. Assembly children have independent instance identities.
+
+| Data | Contents |
+|---|---|
+| `FPropProductDefinition` | Shared meshes, physics, mass, portion capacity, bottle material, cap compatibility, liquid visual product and failure transformations. |
+| `FPropContentDefinition` | Shared liquid material, density, pressure multiplier, specific heat, price, serving temperature, taste, stimuli and expiry. |
+| `FPropEventUpdateData` | Discrete persistent fill, content ID, strength, cap seal/type/links, cleanliness, creation times, manufacturing seal/supply fields and `EventSequence`. |
+| `FPropContinuousUpdateData` | One `Temperature`, `SealedPressure` and thermal integration timestamp `LastUpdatedTime`. |
+| `FPropInstanceUniqueData` | Event/continuous state container for products that enable unique instance data. |
+
+The manager maintains `UniqueDataByISID`; an active actor holds a `LocalUniqueData` mirror. `EmitPropEventUpdate()` submits changed fields through dirty masks. External event updates reject older sequences; continuous updates reject timestamps older than accepted discrete/continuous state.
+
+`EventData.ContentLevel` is canonical normalized fill: 0 empty, 1 nominal full, above 1 overfill within configured capacity. Fractional portions derive from fill and nominal capacity. Native `ColaLevel` is a replicated compatibility/presentation mirror; setting it directly does not perform a fill operation.
+
+Native `FoamPressure`, `InteractionPressure`, `StabilityTolerance` and compatibility methods remain. The cleanup removed Blueprint duplicates, not native API signatures.
+
+## 4. Retained Blueprint graphs
+
+The ten retained graphs preserve their previous executable flow:
+
+| Graph | Behavior |
+|---|---|
+| `UserConstructionScript` | Empty custom body; native construction still applies configuration. |
+| `EventGraph` | `EventMoveActorToLocation(Location)` calls `MoveHeldToLocation(Location)`. |
+| `Request Attach to Component` | Calls `AttachForInteraction(Component, Socket Name)` and returns its result. |
+| `Request Detach from Component` | Calls `DetachForInteraction()` and returns its result plus `self`. |
+| `Can grab` | Returns `PhysicsSimComponent.IsGrabbable()`. |
+| `Can Intract` | Returns whether physics state differs from `Held`, plus the instance ISID. |
+| `Get Product Name` | Queries `PropManagerReference.GetPropData()` for the actor's ISID; returns the name or `None` on failure. |
+| `Get Rope Tenction` | Interface implementation returning zero vector and scalar. |
+| `is being traced` | Interface implementation returning `true`. |
+| `Get Empty Pocket` | Interface implementation returning `false` and `0`. |
+
+Constant-return interface functions remain because interface callers can invoke them. Their simple bodies do not make them removable. The empty construction graph remains as the normal construction entry point.
+
+## 5. Initialization, tick and pooling
+
+`PostInitializeComponents()` binds activation/rest delegates, `PropMesh.OnComponentHit`, and rocket movement/hit/fuel-depleted/settled callbacks to native handlers.
+
+Promotion restores contents/cap presentation, resets motion history and rebinds materials. Warmup frames, pickup grace, rest interpolation and teleport guards prevent pool relocation or hand interpolation from producing false agitation.
+
+Active tick runs the base implementation, skips inactive pooled actors, updates plastic or manufacturing pressure on the server, advances cosmetic liquid motion, samples velocities, calculates server agitation, and updates materials/morphs. Contact impulses are calibrated against reference mass before pressure/damage evaluation. Gameplay mass includes empty bottle, actual liquid and installed cap.
+
+```text
+Resting ISM -> manager promotion / pooled actor binding
+            -> active interaction / physics / liquid presentation
+            -> physics and cosmetic settling -> CanDemoteToISM()
+            -> persist state / reset transients / restore ISM
+```
+
+The base demotion gate rejects held, moving, filler-seated, interpolating, volume-kept-active or still-flying actors. The cola override requires settled liquid motion, negligible pressure expansion and agitation, and no accepted failure. Filled uncapped bottles also check `bAllowUncappedFilledISMDemotion` and attached-cap state.
+
+`ResetTransientPoolState()` clears liquid motion, material/assembly pointers, foam/interaction mirrors, launch configuration, impact history, release episode and fallback cap, and resets the rocket. Initial client binding can preserve an already-received flight snapshot through `ResetForInstanceBinding()`.
+
+## 6. Filling and liquid transfer
+
+```cpp
+bool SetBottleContentType(int32 NewContentID);
+float FillBottleAtRate(float Rate, float DeltaSeconds);
+void FillBottle(float FillStrength); // Calls FillBottleAtRate(FillStrength, 1.0f)
+void RemoveBottleContent();
+```
+
+`FillBottleAtRate()` runs on authority and rejects invalid/non-positive inputs, positive cap seal, missing content identity/definition and accepted failure state. Rate is normalized bottle fill per second:
+
+```text
+Capacity = MaxOverfillLevel * StrengthRatio   // Plastic or HeavyMetal
+Capacity = MaxOverfillLevel                   // Other materials
+Flow = max(0, FillSlowdownCurve(CurrentFill))  // 1 without a curve
+AcceptedLevel = min(Rate * DeltaSeconds * Flow, max(0, Capacity - CurrentFill))
+ReturnedPortions = AcceptedLevel * NominalPortions
+```
+
+An accepted first fill restarts `ContentCreationTime`, preserves container creation time and emits the content-level update. `SetBottleContentType()` requires empty/clean state, strength strictly greater than 0.70 and no greater than 1, and assembly compatibility. `RemoveBottleContent()` clears fill and content identity.
+
+Shop/source filling uses manager `BeginLiquidTransfer`, `TransferLiquid` and `EndLiquidTransfer` in [PropLiquidTransfer.cpp](../Source/ColossalFizzCo/Private/Props/PropLiquidTransfer.cpp). These validate supply, target, cap/temporary seal, cleanliness, strength, compatibility and stock/session ownership, and conserve accepted portions through atomic source/target updates. Same-content partial filling can resume. Filling changes the liquid child/amount while preserving physical bottle ProductID.
+
+### Manual manufacturing and temporary seals
+
+`BP_Cola` inherits the manufacturing API from `AColaPropActor`. `CanAcceptManufacturingContent()` checks the bottle's resolved product/content compatibility. `OnManufacturingLiquidReceived()` accounts for pressure and overfill. Cap attachment, tightening, leakage and failure evaluation also belong to the bottle. Persistent identities and conserved transfers still belong to `APropManager`.
+
+The manual machine supplies player input, source/tray selection and visuals. Its cradle holds the bottle neck upward at rest and tilts the neck downward before liquid flow is permitted. The lever, cradle and capping-head visuals follow station/bottle state; they do not select the bottle's failure reaction.
+
+In **Cola > Manufacturing**, configure seal support, seal duration (default 4 seconds), safe residual pressure (0.1), pressure per filled level (0.6), overfill failure level (1.1) and cap leakage. `AddManufacturingSeal()` installs protection on the bottle; the station consumes a physical seal atomically. A seal installed before filling or while the lever is held remains armed at full integrity. First lever release starts its deadline. Regrabbing the lever cannot renew it. `bTemporarySealArmed`, `bTemporarySealUsed`, `TemporarySealUntil` and `bManualFillPressure` persist in per-instance event state. An active seal prevents ISM demotion.
+
+At expiry, unsafe pressure without a secured cap or station restraint invokes **Handle Manufacturing Pressure Failure**, a Blueprint-overridable event. Normal plastic cola uses rocket release; other materials use the containment-failure path. A secured cap ends temporary protection and remains subject to total-pressure tolerance. See [manufacturing behavior and controls](Cola_Manufacturing_Ownership_2026-11-17.md) for the complete sequence and editable settings.
+
+## 7. Pressure, damage and flight
+
+### Plastic pressure
+
+`UsesPlasticPressure()` selects the path by resolved bottle material. While liquid remains:
+
+```text
+TotalPressure = max(0, SealedPressure)
+              + ContentLevel * max(0, Content.PressureStrengthMultiplier)
+Tolerance = max(epsilon, Product.PressureFailureThreshold * StrengthRatio)
+```
+
+`SealedPressure` stores agitation. Acceleration, rotation, running while held and calibrated impacts add pressure through `AddAgitationPressure()`, scaled by product pressure resistance. The manager clamps agitation to 100. `InteractionPressure` mirrors it; `FoamPressure` mirrors `clamp(InteractionPressure * 5, 0, 10)`.
+
+`UpdatePlasticPressure()` handles decay, temporary manufacturing seals and rocket discharge; it also integrates manufacturing pressure for other bottle materials. Filling suppresses decay. Native settings are 0.5 per second while sealed/held closed, 4 per second when open, 0.15 per second for the manual-fill vent and 0.08 per second through a released temporary seal. Holding the lever with flow stopped uses the faster manual vent. Changed pressure normally publishes every 0.2 seconds, with a one-second nonzero heartbeat and a reliable final record at zero.
+
+When sealed pressure exceeds tolerance and a station is not holding the cap closed, `StartPlasticPressureRelease()` releases a held bottle, detaches/ejects its cap and starts flight. Temporary-seal expiry has separate admission checks. This launch path does not inherently turn the bottle into a broken product.
+
+### Other materials and impact damage
+
+The compatibility foam path uses held/attached velocity jerk and drop impacts. Foam contributes to apparent volume, decays when agitation stops, and calls `LaunchBottle()` when `ContentLevel + FoamRatio` reaches `StabilityTolerance`. Plastic uses pressure tolerance instead.
+
+`ApplyBottleImpact()` runs on authority, filters repeated nonzero impact IDs and applies a 0.05-second contact cooldown. Above-threshold impacts reduce persistent strength. Glass/concrete at zero strength submit breakage; diamond bypasses impact damage. Thermal damage runs through the batch updater. Pressure decay does not repair strength.
+
+`SubmitFailureRequest()` accepts enum priority: breakage, overpressure burst, thermal failure, pressure release, cap failure, then other. Once accepted, equal/lower priority requests are rejected. It uses `AcceptedFailureType`, not a separate replicated failure-state machine or failure-GUID deduplication set.
+
+Configured brittle fracture creates fragment assemblies/recipes, accounts for released liquid, separates an attached cap and releases the source instance. Other transformations choose `BrokenProductID` for breakage, `MeltedProductID` for thermal failure or `BurstBrokenProductID` for other requests when configured. Content/pressure removal follows request flags. Variant names alone do not spawn sticky/fire hazards in this class.
+
+### Rocket integration
+
+`bUseOriginalRocketFlight` defaults to `true`; plastic release can alternatively use Chaos pressure-thrust flight. Original flight moves `PropMesh`, configures random 3D zigzags and uses a server seed. Native default ranges are 2,000-8,000 cm travel and 1,500-4,500 cm/s speed, with 1,600 acceleration and a 25-degree direction cone. Distance/speed are sampled from those ranges, not multiplied by fill.
+
+The component supports idle, tipping, dragging, rocketing, low-fuel sputter, spent falling and rest; configuration determines which stages run. Bottle launch now preserves authored flight and falling-bounce limits instead of forcing eight ricochets and four falling bounces.
+
+`FallingSettings.PhysicsHandoffMode` selects `UseLegacySettings`, `Disabled`, `OnFuelDepleted` or `AfterBounceApex`. Legacy mode honors the three older physics/depletion switches; all false keeps scripted falling. An explicit enum choice overrides those switches. BP_Cola's preset uses `AfterBounceApex` with `HandoffAfterBounces = 1`: scripted fall, one scripted floor bounce, then physics at the rebound apex. Fuel depletion no longer forces an immediate Chaos handoff from the Cola callback; `EndScriptedThrust()` owns the policy.
+
+`PoweredMotionSettings` provides an optional inline speed curve and separate acceleration/deceleration limits (2,200/1,800 cm/s²). Its X ranges are tipping 0–0.1, dragging 0.1–0.25, flight 0.25–0.8 and low-fuel climb 0.8–1; Y multiplies launch base speed. Default keys are `(0,.04)`, `(.1,.2)`, `(.25,.45)`, `(.45,1)`, `(.8,.4)`, `(1,.03)`. The native feature defaults off; BP_Cola's preset enables it.
+
+Both planned and ballistic scripted descent use `FallAcceleration`, `SpentGravityScale`, `FallingSpeedMultiplier` and `TerminalVelocity`. After handoff, temporary linear/angular damping defaults to 2.5/5. Supported rest requires speed below 80 cm/s and rotation below 60 deg/s, plus a surface beneath the body's bounds for the settling duration. Mid-air low speed alone cannot settle the bottle; original damping is restored after flight/reset.
+
+Plastic original-flight discharge reduces liquid/agitation according to traveled-distance progress on movement substeps. `GetPoweredTravelDistance()` includes the planned low-fuel climb, preventing the main-flight distance from draining the bottle prematurely. Released liquid accumulates under one `PressureReleaseEpisode` GUID through `ReleaseBottleLiquidPortions()`. Fuel depletion releases remaining liquid, clears agitation and refreshes mass/materials. Its unsettled-timer request respects the scripted motion lock. The settled callback clears the motion lock for normal pooling.
+
+The physics helper protects both powered and spent scripted movement from automatic physics activation. At the chosen handoff it preserves actor movement replication through later settling transitions. Natural depletion keeps the predicted descent/rebound plan; an early external cutoff falls ballistically from the current pose. Planned rebound handoff uses the actual vertical maximum even when the two landing points have different heights.
+
+Designer controls, compatibility details and build/test evidence are documented in [Rocket lifecycle control](Rocket_Lifecycle_Control_2026-11-17.md). BP_Cola's saved preset and inline curve keys are verified; restart UE5 to load the new native controls.
+
+### Rocket contacts and receiver-owned responses
+
+`RocketProjectile.bUseOverlapHitEvents` defaults to true. Scripted flight disables physics and uses `QueryOnly`; Chaos thrust and the falling physics handoff use `QueryAndPhysics`. Both overlap `Pawn`, `PhysicsBody`, `WorldDynamic` and the project's `ISM`/`ActiveISM` object channels, and block `WorldStatic`. Dynamic contacts report data without passive collision impulses/depenetration against the player. Static surfaces retain normal ricochet/physical collision. Pool reset restores the original collision responses, enabled mode and overlap-event setting. Disabling this option restores the legacy blocking path.
+
+The server performs a multi-hit sphere sweep as well as listening for begin-overlap callbacks. Sweeps detect fast crossings and ISM contacts even when the target's `Generate Overlap Events` is disabled. Flight-plan and ground probes use the same collision-response filter, so overlapping players/props do not become planned ricochet surfaces. The component suppresses repeated contacts with the same actor/stable prop ID for `WorldHitRepeatDelay` (default 0.25 seconds). Clients simulate/present flight but cannot dispatch authoritative hit responses. The ejected cap and the source's own assembly are excluded.
+
+`FWorldInteractionHit` contains an event GUID, source/target actor and primitive, full `FHitResult`, incoming and relative velocities (cm/s), source mass (kg), incoming normal momentum (`Impulse`, kg cm/s), `bApplyHitForce`, and optional `ICID`, `ISMI`, `ISID`. This impulse is descriptive data; receivers decide what to do with it. `bApplyHitForceOnTargets` on the rocket is permission, not an automatic impulse.
+
+`UWorldInteractionHitLibrary::DispatchWorldHit()` sends `Receive World Hit` to native-interface actors, the contacted component and other native-interface receiver components on that actor. It falls back to the existing `BPI_World_Intractions_System` **Hit Actor** message for legacy receivers, preserving its four existing inputs (component, position, normal and momentum magnitude). Native-interface receivers take precedence on an object, preventing the same object from receiving both messages. The legacy signature cannot carry the GUID, source actor or force permission; use the native interface for those fields.
+
+`BP_FirstPersonCharacter` does not implement the legacy world interaction interface. Its authored `RocketHitResponse` (`World Hit Response Component`) receives hits with automatic force disabled. Select that component and bind **On World Hit Received** to author player knockback, damage and other reactions using the full packet. The component and Blueprint were compiled and saved on 17 November; evidence is in `Saved/RocketWorldHits_20261116/PlayerReceiver.json`. For other actors, add the same component or implement **World Interaction Hit Interface / Receive World Hit** directly. The rocket never calls `LaunchCharacter`. Optional simulated-body force uses `Apply Bounded World Hit Impulse` and a receiver-selected speed-change cap. Choose one physical responder per actor to avoid applying force twice.
+
+For managed instances, **ICID is the ISM component ID**, while **ISMI is the overlap body index / sweep `Hit.Item`**. The component/manager resolves this pair to the permanent **ISID**, then resolves the assembly root. Missing/invalid indices are rejected; no nearby instance is guessed. Resting props promote only when incoming momentum meets `PropManager.WorldHitPromotionImpulseThreshold` (default 20 kg cm/s). Promotion runs without an initial kick, then the same event is retargeted to the resulting ASM. Held props and self-assembly hits are rejected. Event GUIDs prevent duplicate promotion/damage processing.
+
+`AActivePropActor::ReceiveWorldHit()` applies product damage from the original momentum and owns the optional physical response. `bApplyWorldHitForce` defaults true, `WorldHitImpulseScale` defaults 1, and `MaxWorldHitSpeedChange` defaults 250 cm/s. Force is capped using actual target mass. Turning off either the sender permission or receiver force still permits threshold-based promotion and damage. `SetInstanceToUnsettled()` also exposes an appended **Apply Hit Force** bool (default true, including its server request); false skips only the impulse, preserving impact damage. Existing callers retain their previous behavior.
+
+Implementation: [RocketWorldHits.cpp](../Source/ColossalFizzCo/Private/Components/RocketWorldHits.cpp), [WorldInteractionHitInterface.h](../Source/ColossalFizzCo/Public/Interfaces/WorldInteractionHitInterface.h), [WorldInteractionHitLibrary.cpp](../Source/ColossalFizzCo/Private/Props/WorldInteractionHitLibrary.cpp), [PropWorldHits.cpp](../Source/ColossalFizzCo/Private/Props/PropWorldHits.cpp), [WorldHitResponseComponent.h](../Source/ColossalFizzCo/Public/Components/WorldHitResponseComponent.h).
+
+Earlier contact-system validation recorded a successful native editor build and ten selected automation checks, including swept player/ISM contacts, static-surface filtering, unrelated trigger filtering, client rejection, duplicate suppression, bounded force, force-disabled promotion/damage, original flight, pressure flight, pawn contact and debug drawing. Evidence: `Saved/RocketWorldHits_20261116/NativeReport/index.json`. These earlier checks do not validate the latest lifecycle changes. Reopen the editor after native changes to load the updated classes.
+
+### Rocket debug display
+
+`RocketProjectile` exposes independent `Enable Debug Logs`, `Show On Screen Debug` and `Draw Debug Trajectory` options. Bottle initialization preserves their Blueprint/instance values, including a trajectory-only configuration. These are development diagnostics and the drawing code is excluded from Shipping builds.
+
+Trajectory drawing runs while the component is flying: it shows the scripted flight plan/waypoints and a five-second movement trail. Pressure-physics flight and the falling physics handoff also draw the movement trail, direction and telemetry using the physics body's velocity. Chaos flight has no precomputed spline. Idle/resting bottles do not generate a path, and enabling the option does not create an editor preview; launch the bottle during Play or Simulate to see it.
+
+## 8. Cap assembly
+
+[PropCapAssembly.cpp](../Source/ColossalFizzCo/Private/Props/PropCapAssembly.cpp) implements:
+
+- `AttachPhysicalCap()`: validates compatibility/proximity/ownership/state, installs an assembly edge and updates reciprocal IDs atomically.
+- `ClosePhysicalCap(BottleID, Torque)`: seals in the product's torque sweet spot; otherwise writes a partial seal below 1. Excess torque can damage the bottle.
+- `DetachPhysicalCap()`: clears reciprocal IDs/seal/type, removes the assembly edge and enables the cap's unsettled representation.
+- `SynchronizeCapAssembly()`: refreshes runtime assembly presentation.
+
+`AddCap()` synchronizes an existing physical cap or attaches a compatibility mesh; it is not a four-stage closing solver. `RemoveCap(float, ECapRemovalOperation)` delegates physical-cap detachment or removes/ejects the fallback. Its operation enum has `EjectPhysics` and `DropQuietly`; ejected fallback debris expires after five seconds. Cap product types such as twist are separate from removal operations.
+
+## 9. Rendering and temperature
+
+Active root/visual meshes receive four custom primitive data floats:
+
+| Slot | Value |
+|---|---|
+| 0 | Canonical content level |
+| 1 | Normalized expiry age |
+| 2 | Temperature in Celsius |
+| 3 | Normalized structural strength |
+
+`UpdateDynamicMaterial()` targets modular liquid slot 0 or legacy combined mesh slot 1. If an expected liquid child is absent it waits for assembly creation. Creation depends on the selected mesh, slot and material; this function has no blanket positive-content/fill creation guard.
+
+Material inputs include `Native Liquid Motion`, `Use Instance Liquid Data`, `Liquid Cached Fill`, `Liquid Surface Normal WS`, `Liquid Motion State`, `Liquid Plane Offset`, object velocities, `Use Dynamic Values` and `Liquid Level`. Visual fill clamps to 0-1; canonical overfill remains available for capacity/deformation. A cylindrical volume solver preserves fill under a tilted plane.
+
+`UpdateMorphTargets()` drives `OverfullLevel` on the bottle and optional skeletal liquid. It drives `EmptyLevel` on a combined bottle without a separate liquid assembly. Plastic expansion is smoothed and depends on retained pressure; non-plastic apparent volume includes foam. `EnforceModularVisuals()` avoids duplicate static/skeletal presentation.
+
+There is one persistent temperature: `ContinuousData.Temperature`. When enabled, the manager batch updater advances it toward ambient using exponential heat transfer, conductivity, thermal mass, heating/cooling multipliers and liquid specific heat. It evaluates thermal damage/failures for resting ISMs and active actors. Base `HasActiveThermalSources()` currently returns false and cola does not override it. There is no separate shell/content thermal solver or temperature-equilibration demotion gate.
+
+## 10. Pricing and replication
+
+`GetSaleQuote()` uses the manager scanner query when bound, otherwise the content definition. [ColaPricingLibrary.cpp](../Source/ColossalFizzCo/Private/Props/ColaPricingLibrary.cpp) computes:
+
+```text
+FullBaseCents = NominalPortions * PricePerPortion * 100
+FillMultiplier = clamp(ContentLevel, 0, 1)
+TemperatureDiscount = 0.20 * clamp(abs(Temperature - Optimum) / PenaltyRange, 0, 1)
+SaleCents = round(FullBaseCents * FillMultiplier * (1 - TemperatureDiscount))
+```
+
+Underfill discounts are linear; overfill does not raise sale price. Temperature discount caps at 20%. Expiry marks the quote and sets compensation to original full base price rather than silently changing the original invoice. Aggregate bill rounding is separate.
+
+`CalculateSalePayout(TargetFill)` returns the quote in currency units. `CalculateUnderfillPenalty(TargetFill)` returns the difference from full content price and can include temperature effects. Both retain but ignore the compatibility parameter. `BasePrice` is a fallback, not the portion-price authority.
+
+Gameplay mutations are authoritative. Base replication includes identity, `LocalUniqueData`, interaction/state flags and velocities. Cola-specific replicated properties are `AcceptedFailureType`, `InteractionPressure`, `ColaLevel`, `FoamPressure` and `RocketLaunchConfiguration`. The fill/foam RepNotify handlers refresh presentation.
+
+The manager sends ordered event updates and unreliable continuous batches containing temperature, sealed pressure and optional thermal strength. The rocket has its own replicated flight snapshot. Cosmetic motion and material objects are local presentation.
+
+## 11. Cleanup and validation
+
+The 17 November manufacturing update built successfully, compiled/saved BP_Cola and BP_ManualColaFillingMachine, and passed 14/14 focused headless automation checks. Eleven tests retained debug/fixture physics warnings. The player hit receiver is also compiled and saved. See [manufacturing verification and editor settings](Cola_Manufacturing_Ownership_2026-11-17.md#verification) for evidence and limits. The cleanup record below describes the earlier Blueprint graph cleanup.
+
+The 2026-11-15 cleanup removed 28 unused Blueprint variables:
+
+```text
+Hit Actors; random vector; unstablity level; As WBP Status Bar Circular 1;
+Other Actor; Cola level; max cola level; pre velocirty; Stablity tollrance;
+Delta Seconds; can be effected by trace; Hit offset Position Point;
+Fill amount; Cap; Dynamic material Instance; Pre Frame Location;
+Pre Frame Rotation; First Frame; Rotational Velocity; Locaiont velocity;
+G Force; G Force Diffrance From Last Frame; Foam Presser; CurrentPortions;
+MaxPortions; BaseEmptyBottleCost; TemperatureCelsius; CurrentFillVolume.
+```
+
+Removed graphs: uncalled `Is Valid Hit` macro, empty `Fill Bottel Events` and empty `Rocket Projectile Events`. Removed 14 unreachable attach nodes and seven unreachable detach nodes while preserving live native calls/returns.
+
+The reference audit covered 127 project Blueprints and 788 graphs, including three descendants. Matching character/scanner names were verified as their own members. All ten retained graph exports preserve executable flow. Master and descendants compiled with warnings treated as errors. Full exposed component properties and selected native defaults matched before/after.
+
+Backups/evidence: `Saved/BPColaCleanup_20261115_222050/`, including original master/child assets, documentation, graph/node exports, references, cleanup plan/results and configuration snapshots. Only the master asset is saved for cleanup. Validation covers references, compilation, graph equivalence and configuration preservation; it is not a new multiplayer playtest.
+
+## 12. Source map
+
+| Source | Purpose |
+|---|---|
+| [ColaPropActor.h](../Source/ColossalFizzCo/Public/Props/ColaPropActor.h), [ColaPropActor.cpp](../Source/ColossalFizzCo/Private/Props/ColaPropActor.cpp) | Bottle API, tick, mass, presentation, cap fallback and original launch. |
+| [ColaManufacturing.cpp](../Source/ColossalFizzCo/Private/Props/ColaManufacturing.cpp) | Bottle-owned content acceptance, temporary seal, cap closure/leakage and manufacturing failure policy. |
+| [ColaContainment.cpp](../Source/ColossalFizzCo/Private/Props/ColaContainment.cpp) | Filling, impacts, failures, sale quote and pool reset/demotion. |
+| [ColaPressure.cpp](../Source/ColossalFizzCo/Private/Props/ColaPressure.cpp) | Plastic agitation, pressure publication, venting and discharge. |
+| [ColaLiquidMotion.h](../Source/ColossalFizzCo/Public/Props/ColaLiquidMotion.h), [ColaLiquidMotion.cpp](../Source/ColossalFizzCo/Private/Props/ColaLiquidMotion.cpp) | Cosmetic liquid solver. |
+| [InteractableProp.h](../Source/ColossalFizzCo/Public/Props/InteractableProp.h), [ActivePropState.cpp](../Source/ColossalFizzCo/Private/Props/ActivePropState.cpp) | Base actor interface and canonical-state mirrors. |
+| [InteractablePropDatabase.h](../Source/ColossalFizzCo/Public/Props/InteractablePropDatabase.h) | Shared definitions and instance/event/continuous structs. |
+| [PropAssembly.cpp](../Source/ColossalFizzCo/Private/Props/PropAssembly.cpp), [PropCapAssembly.cpp](../Source/ColossalFizzCo/Private/Props/PropCapAssembly.cpp) | Modular bottle/liquid/cap relationships and presentation. |
+| [PropLiquidTransfer.cpp](../Source/ColossalFizzCo/Private/Props/PropLiquidTransfer.cpp), [PropLiquidRelease.cpp](../Source/ColossalFizzCo/Private/Props/PropLiquidRelease.cpp) | Conserved filling and released-liquid accounting. |
+| [PropBatchUpdateComponent.cpp](../Source/ColossalFizzCo/Private/Components/PropBatchUpdateComponent.cpp) | Thermal integration, damage and expiry. |
+| [StaticMeshPhysicsSimulationComponent.cpp](../Source/ColossalFizzCo/Private/Components/StaticMeshPhysicsSimulationComponent.cpp), [RocketProjectileComponent.h](../Source/ColossalFizzCo/Public/Components/RocketProjectileComponent.h) | Physical settling and rocket state/flight configuration. |
+| [RocketLifecycle.cpp](../Source/ColossalFizzCo/Private/Components/RocketLifecycle.cpp), [RocketPoweredMotion.cpp](../Source/ColossalFizzCo/Private/Components/RocketPoweredMotion.cpp), [RocketPressurePhysics.cpp](../Source/ColossalFizzCo/Private/Components/RocketPressurePhysics.cpp) | Rocket handoff policy, powered-distance/curve control and pressure-flight transitions. |
+| [ColaPricingLibrary.cpp](../Source/ColossalFizzCo/Private/Props/ColaPricingLibrary.cpp), [ShopProductQuery.cpp](../Source/ColossalFizzCo/Private/Shop/ShopProductQuery.cpp) | Shared pricing and scanner query. |

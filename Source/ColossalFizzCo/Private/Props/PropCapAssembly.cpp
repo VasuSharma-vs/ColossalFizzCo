@@ -150,7 +150,7 @@ bool APropManager::ClosePhysicalCap(int32 BottleID, float Torque)
 	if(!CapRecord || !IsAssemblyCompatible(Record->ProductID,Bottle->EventData.ContentID,CapRecord->ProductID))return false;
 	FPropEventSyncDelta D; D.ISID=BottleID; D.SetFlag(EPropEventDirtyMask::CapSealed);
 	const bool SweetSpot=Torque>=Def->TorqueSweetSpotMin && Torque<=Def->TorqueSweetSpotMax;
-	if (SweetSpot && Bottle->EventData.TemporarySealUntil>0)
+	if (SweetSpot && (Bottle->EventData.bTemporarySealArmed || Bottle->EventData.TemporarySealUntil>0))
 	{
 		D.ExtendedDirtyMask|=EPropExtendedEventMask::TemporarySeal; D.TemporarySealUntil=0;
 		D.bTemporarySealUsed=Bottle->EventData.bTemporarySealUsed; D.bManualFillPressure=Bottle->EventData.bManualFillPressure;

@@ -5,6 +5,7 @@
 #include "Engine/NetSerialization.h"
 #include "Curves/CurveFloat.h"
 #include "Engine/EngineTypes.h"
+#include "Interfaces/WorldInteractionHitInterface.h"
 #include "RocketProjectileComponent.generated.h"
 
 class UPrimitiveComponent;
@@ -88,6 +89,7 @@ struct FRocketFlightNetState
 
 	UPROPERTY()
 	bool bPhysicsSimulating = false;
+	UPROPERTY() bool bScriptedBallisticFall=false;
 
 	/** Opt-in Chaos flight. Existing waypoint rockets retain their original behavior. */
 	UPROPERTY()
@@ -395,13 +397,55 @@ struct FRocketLowFuelSettings
 	float MaintainUpDirectionThreshold = 50.0f;
 };
 
-/**
- * Movement settings for State 5: Falling (Spent ballistic drop and ricochets).
- */
+UENUM(BlueprintType)
+enum class ERocketPhysicsHandoffMode : uint8
+{
+	UseLegacySettings UMETA(DisplayName="Use Existing Handoff Switches"),
+	Disabled UMETA(DisplayName="Keep Scripted Falling"),
+	OnFuelDepleted UMETA(DisplayName="Physics When Fuel Ends"),
+	AfterBounceApex UMETA(DisplayName="Physics At Rebound Apex")
+};
+
+/** One continuous speed envelope across tipping, dragging, flight and the dying climb. */
+USTRUCT(BlueprintType)
+struct FRocketPoweredMotionSettings
+{
+	GENERATED_BODY()
+	FRocketPoweredMotionSettings();
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Rocket|Powered Motion")
+	bool bUseLifecycleSpeedCurve=false;
+	/** X: 0=start, .1=end tipping, .25=takeoff, .8=end main flight, 1=end low-fuel climb. Y: fraction of Base Speed. */
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Rocket|Powered Motion",meta=(EditCondition="bUseLifecycleSpeedCurve"))
+	FRuntimeFloatCurve SpeedCurve;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Rocket|Powered Motion",meta=(ClampMin="1",Units="cm/s^2"))
+	float Acceleration=2200.f;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Rocket|Powered Motion",meta=(ClampMin="1",Units="cm/s^2"))
+	float Deceleration=1800.f;
+};
+
+/** Movement settings for spent falling, rebound and optional physics handoff. */
 USTRUCT(BlueprintType)
 struct FRocketFallingSettings
 {
 	GENERATED_BODY()
+
+	/** Explicit policy takes precedence over the older handoff switches. */
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Rocket|Falling")
+	ERocketPhysicsHandoffMode PhysicsHandoffMode=ERocketPhysicsHandoffMode::UseLegacySettings;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Rocket|Falling",meta=(ClampMin="1",ClampMax="15",EditCondition="PhysicsHandoffMode==ERocketPhysicsHandoffMode::AfterBounceApex"))
+	int32 HandoffAfterBounces=1;
+	/** Multiplies scripted descent speed/acceleration, including the predicted fall path. */
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Rocket|Falling",meta=(ClampMin="0.05",ClampMax="5"))
+	float FallingSpeedMultiplier=1.f;
+	/** Damping applied only after the handoff, then restored when the flight ends. */
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Rocket|Falling",meta=(ClampMin="0"))
+	float HandoffLinearDamping=2.5f;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Rocket|Falling",meta=(ClampMin="0"))
+	float HandoffAngularDamping=5.f;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Rocket|Falling",meta=(ClampMin="1",Units="cm/s"))
+	float HandoffRestVelocityThreshold=80.f;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Rocket|Falling",meta=(ClampMin="1"))
+	float HandoffRestAngularVelocityThreshold=60.f;
 
 	/**
 	 * Falling simulation mode (Image 2):
@@ -551,6 +595,8 @@ public:
 	/** Comprehensive movement settings for State 6: At Rest (settling and locking flush on floor). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rocket | State 6 - At Rest")
 	FRocketAtRestSettings AtRestSettings;
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Rocket | Powered Motion")
+	FRocketPoweredMotionSettings PoweredMotionSettings;
 
 	// -------------------------------------------------------------------------
 	// Setup & Backward-Compatible Properties
@@ -725,6 +771,18 @@ public:
 	/** Radius of the sphere sweep in cm. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rocket|Collision", meta = (ClampMin = "1.0", ClampMax = "50.0"))
 	float SweepRadius = 6.0f;
+	/** Contacts with actors/props are messages, so the projectile cannot physically launch a pawn. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rocket|Collision") bool bUseOverlapHitEvents = true;
+	/** Receiver permission only. The receiving actor/component still owns force scaling and limits. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rocket|Collision") bool bApplyHitForceOnTargets = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rocket|Collision", meta=(ClampMin="0.01")) float WorldHitRepeatDelay = .25f;
+	/** Used by launch/replication paths; physics mode keeps static-world collision for falling and thrust. */
+	void ConfigureFlightCollision(bool bPhysicsSimulation=false);
+	void ResetWorldHitHistory();
+	void TickPhysicsWorldHits();
+	bool ReportWorldHit(const FHitResult& Hit, const FVector& ImpactVelocity);
+	/** Flight planning and ground probes use the same blocking policy as actual movement. */
+	bool TraceFlightSurface(FHitResult& Hit, const FVector& Start, const FVector& End, ECollisionChannel Channel, const FCollisionQueryParams& Params) const;
 
 	/** Coefficient of restitution (bounciness) while rocketing. 1.0 = perfect elastic bounce, 0.0 = zero bounce. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rocket|Collision", meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -860,6 +918,17 @@ public:
 	FVector GetRocketVelocity() const { return CurrentVelocity; }
 	FVector GetRocketAngularVelocityDegrees() const { return ProjectileAngularVelocityDegrees; }
 	void ConfigureBottleProjectile(float Acceleration) { FlightNetState.bHandoffAtApexOrDistance=true; FlightNetState.Acceleration=FMath::Max(0.f,Acceleration); }
+	/** End scripted power without overriding the designer's falling/handoff policy. */
+	UFUNCTION(BlueprintCallable,Category="Rocket|Falling")
+	void EndScriptedThrust();
+	UFUNCTION(BlueprintPure,Category="Rocket|Falling")
+	ERocketPhysicsHandoffMode GetPhysicsHandoffMode() const;
+	UFUNCTION(BlueprintPure,Category="Rocket|Flight")
+	float GetPoweredTravelDistance() const;
+	UFUNCTION(BlueprintPure,Category="Rocket|Powered Motion")
+	float GetPoweredCurveProgress() const { return PoweredCurveProgress; }
+	float EvaluatePoweredSpeedMultiplier(ERocketSimulationState Phase,float PhaseProgress);
+	float UpdatePoweredSpeed(float TargetSpeed,float DeltaTime);
 	FOnRocketMovementStep OnMovementStep;
 
 	/** Gets remaining fuel as a normalized ratio (1.0 = Full, 0.0 = Empty). */
@@ -1041,6 +1110,12 @@ protected:
 
 	bool SweepAndMove(const FVector& MoveDelta, FHitResult& OutHit);
 	bool SweepAndMove(const FVector& MoveDelta, const FRotator& InRotation, FHitResult& OutHit);
+	bool SweepWorldHitContacts(const FVector& Start, const FVector& End, const FQuat& Rotation, FHitResult& OutBlockingHit);
+	UFUNCTION() void HandleRocketOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor, UPrimitiveComponent* OtherComponent,
+		int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
+	TMap<uint64,double> RecentWorldHitTargets;
+	FVector PreviousWorldHitCenter = FVector::ZeroVector;
+	bool bHasPreviousWorldHitCenter = false;
 	void HandleRicochet(const FHitResult& Hit);
 
 	UFUNCTION(NetMulticast, Reliable)
@@ -1196,6 +1271,9 @@ private:
 	float DebugHeartbeatTimer = 0.0f;
 	float TravelHistoryLogTimer = 0.0f;
 	float PhysicsSettledTimeAccumulated = 0.0f;
+	float PoweredCurveProgress=0.f;
+	float PoweredMotionSpeed=0.f;
+	bool bReboundApexArmed=false;
 
 	// Client-side visual smoothing / interpolation
 	FVector ClientReconciliationTarget = FVector::ZeroVector;
@@ -1209,6 +1287,9 @@ private:
 	bool bHasSavedSettings = false;
 	bool bSavedSimulatePhysics = false;
 	bool bSavedEnableGravity = false;
+	float SavedLinearDamping=0.f;
+	float SavedAngularDamping=0.f;
+	bool bSavedGenerateOverlapEvents = false;
 	EComponentMobility::Type SavedMobility = EComponentMobility::Movable;
 	FName SavedCollisionProfileName = NAME_None;
 	ECollisionEnabled::Type SavedCollisionEnabled = ECollisionEnabled::QueryAndPhysics;

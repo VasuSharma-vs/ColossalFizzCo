@@ -1,11 +1,21 @@
 #include "UI/ShopTerminalWidget.h"
 #include "Blueprint/WidgetTree.h"
+#include "Blueprint/WidgetLayoutLibrary.h"
 #include "Components/Border.h"
+#include "Components/CanvasPanel.h"
 #include "Components/ScrollBox.h"
 #include "Components/SizeBox.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
+#include "Components/ButtonSlot.h"
+#include "Components/HorizontalBox.h"
+#include "Components/HorizontalBoxSlot.h"
+#include "Components/ProgressBar.h"
+#include "UI/ManualFillingPressureGauge.h"
+#include "Styling/SlateTypes.h"
+#include "Brushes/SlateRoundedBoxBrush.h"
+#include "Styling/CoreStyle.h"
 #include "GameFramework/PlayerController.h"
 #include "Props/InteractablePropManager.h"
 #include "Shop/ShopATMComponent.h"
@@ -28,7 +38,16 @@ void UShopTerminalButton::Configure(UShopTerminalWidget* Owner, const FString& L
 {
 	Terminal = Owner;
 	auto* Text = NewObject<UTextBlock>(this); Text->SetText(FText::FromString(Label)); Text->SetAutoWrapText(true); Text->SetColorAndOpacity(FSlateColor(FLinearColor::White));
-	SetContent(Text); SetBackgroundColor(FLinearColor(.08f,.24f,.3f));
+	Text->SetFont(FCoreStyle::GetDefaultFontStyle(bLever ? "Bold" : "Regular",bLever ? 15 : 12));
+	SetContent(Text);
+	const FLinearColor Base=bLever ? FLinearColor(.16f,.57f,.44f) : FLinearColor(.095f,.19f,.23f);
+	FButtonStyle Style;
+	Style.SetNormal(FSlateRoundedBoxBrush(Base,7.f));
+	Style.SetHovered(FSlateRoundedBoxBrush(Base*1.3f,7.f));
+	Style.SetPressed(FSlateRoundedBoxBrush(FLinearColor(.15f,.43f,.36f),7.f));
+	Style.SetDisabled(FSlateRoundedBoxBrush(FLinearColor(.07f,.11f,.13f),7.f));
+	Style.SetNormalPadding(FMargin(14,bLever ? 16 : 10)); Style.SetPressedPadding(FMargin(14,bLever ? 17 : 11)); SetStyle(Style);
+	if (auto* ContentSlot=Cast<UButtonSlot>(Text->Slot)) { ContentSlot->SetHorizontalAlignment(HAlign_Left); ContentSlot->SetVerticalAlignment(VAlign_Center); }
 	OnClicked.AddDynamic(this, &UShopTerminalButton::HandleClick);
 	OnPressed.AddDynamic(this,&UShopTerminalButton::HandlePress);
 	OnReleased.AddDynamic(this,&UShopTerminalButton::HandleRelease);
@@ -40,8 +59,14 @@ void UShopTerminalButton::HandleRelease() { if (bLever && Terminal.IsValid()) Te
 TSharedRef<SWidget> UShopTerminalWidget::RebuildWidget()
 {
 	if (!WidgetTree) WidgetTree = NewObject<UWidgetTree>(this);
-	auto* Size = WidgetTree->ConstructWidget<USizeBox>(); Size->SetWidthOverride(720); Size->SetHeightOverride(650);
-	auto* Border = WidgetTree->ConstructWidget<UBorder>(); Border->SetPadding(FMargin(16)); Border->SetBrushColor(FLinearColor(.025f,.035f,.045f,.98f)); Size->SetContent(Border);
+	const bool Production=Station.IsValid() && Station->FindComponentByClass<UShopProductionStationComponent>();
+	if (Production)
+	{
+		auto* Canvas=WidgetTree->ConstructWidget<UCanvasPanel>(); Canvas->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+		BuildProductionDashboard(Canvas); WidgetTree->RootWidget=Canvas; SetIsFocusable(true); return Super::RebuildWidget();
+	}
+	auto* Size = WidgetTree->ConstructWidget<USizeBox>(); Size->SetWidthOverride(Production ? 1080 : 720); Size->SetHeightOverride(Production ? 740 : 650);
+	auto* Border = WidgetTree->ConstructWidget<UBorder>(); Border->SetPadding(FMargin(26)); Border->SetBrush(FSlateRoundedBoxBrush(FLinearColor(.025f,.06f,.075f,.99f),16.f)); Size->SetContent(Border);
 	auto* Layout = WidgetTree->ConstructWidget<UVerticalBox>(); Border->SetContent(Layout);
 	auto* Scroll = WidgetTree->ConstructWidget<UScrollBox>(); Layout->AddChildToVerticalBox(Scroll)->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
 	auto* Contents = WidgetTree->ConstructWidget<UVerticalBox>(); Scroll->AddChild(Contents);
@@ -66,6 +91,16 @@ void UShopTerminalWidget::NativeConstruct()
 void UShopTerminalWidget::NativeTick(const FGeometry& Geometry, float DeltaSeconds)
 {
 	Super::NativeTick(Geometry, DeltaSeconds);
+	if (ProductionSidebar && GetOwningPlayer())
+	{
+		int32 Width=0,Height=0; GetOwningPlayer()->GetViewportSize(Width,Height);
+		if (Width>0 && Height>0)
+		{
+			const float DPI=FMath::Max(.1f,UWidgetLayoutLibrary::GetViewportScale(this));
+			const float Scale=FMath::Clamp(FMath::Min((Width/DPI-32.f)/1000.f,(Height/DPI-32.f)/650.f),.35f,1.f);
+			for (UWidget* Panel:CornerPanels) if (Panel) Panel->SetRenderScale(FVector2D(Scale,Scale));
+		}
+	}
 	if (LocalLeverBottle>0)
 	{
 		LeverHeartbeat-=DeltaSeconds;
@@ -81,6 +116,20 @@ FReply UShopTerminalWidget::NativeOnKeyDown(const FGeometry& Geometry, const FKe
 	if (Event.GetKey()==EKeys::F && Station.IsValid())
 		if (auto* Production=Station->FindComponentByClass<UShopProductionStationComponent>(); Production && Production->bManualLeverMode)
 		{ if (!Event.IsRepeat()) BeginLever(Production->View.SeatedBottleISID); return FReply::Handled(); }
+	if ((Event.GetKey()==EKeys::X || Event.GetKey()==EKeys::V) && Station.IsValid() && Actions.IsValid())
+		if (auto* Production=Station->FindComponentByClass<UShopProductionStationComponent>(); Production && Production->bManualLeverMode)
+		{
+			if (!Event.IsRepeat()) Actions->RequestProductionAction(Production,Production->View.SessionID,
+				Event.GetKey()==EKeys::X ? EShopProductionAction::StopFilling : EShopProductionAction::ResumeFilling,Production->View.SeatedBottleISID);
+			return FReply::Handled();
+		}
+	if (Event.GetKey()==EKeys::R && Station.IsValid() && Actions.IsValid())
+		if (auto* Production=Station->FindComponentByClass<UShopProductionStationComponent>(); Production && Production->bManualLeverMode && !Event.IsRepeat())
+		{
+			const auto* Bottle=Production->View.Bottles.FindByPredicate([&](const auto& Item){return Item.ISID==Production->View.SeatedBottleISID;});
+			if (Bottle && !Bottle->AttachedCapISID && !Production->View.Caps.IsEmpty())
+			{ Actions->RequestProductionAction(Production,Production->View.SessionID,EShopProductionAction::AttachCap,Bottle->ISID,Production->View.Caps[0].ISID); return FReply::Handled(); }
+		}
 	if (Station.IsValid() && Actions.IsValid())
 		if (auto* Production=Station->FindComponentByClass<UShopProductionStationComponent>())
 			if ((Production->bRequiresCooperativeCap || Production->bAllowSoloCap) && (Event.GetKey()==EKeys::G || Event.GetKey()==EKeys::R))
@@ -103,12 +152,14 @@ FReply UShopTerminalWidget::NativeOnKeyDown(const FGeometry& Geometry, const FKe
 }
 UTextBlock* UShopTerminalWidget::AddText(const FString& Value)
 {
-	auto* Text = WidgetTree->ConstructWidget<UTextBlock>(); Text->SetText(FText::FromString(Value)); Text->SetAutoWrapText(true); Body->AddChild(Text);
+	auto* Text = WidgetTree->ConstructWidget<UTextBlock>(); Text->SetText(FText::FromString(Value)); Text->SetAutoWrapText(true);
+	Text->SetFont(FCoreStyle::GetDefaultFontStyle("Regular",12)); Text->SetColorAndOpacity(FLinearColor(.68f,.78f,.79f));
+	Body->AddChildToVerticalBox(Text)->SetPadding(FMargin(0,8,0,6));
 	return Text;
 }
 UShopTerminalButton* UShopTerminalWidget::AddButton(const FString& Label)
 {
-	auto* Button = WidgetTree->ConstructWidget<UShopTerminalButton>(); Button->Configure(this, Label); Body->AddChild(Button); return Button;
+	auto* Button = WidgetTree->ConstructWidget<UShopTerminalButton>(); Button->Configure(this, Label); Body->AddChildToVerticalBox(Button)->SetPadding(FMargin(0,3)); return Button;
 }
 void UShopTerminalWidget::Refresh()
 {

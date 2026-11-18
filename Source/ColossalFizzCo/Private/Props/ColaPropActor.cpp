@@ -126,7 +126,7 @@ void AColaPropActor::PostInitializeComponents()
 	{
 		RocketComp->OnMovementStep.RemoveAll(this);
 		RocketComp->OnMovementStep.AddUObject(this,&AColaPropActor::UpdateOriginalRocketDischarge);
-		RocketComp->SetAllDebugEnabled(false);
+		// Keep the component's authored per-instance/Blueprint debug options.
 		RocketComp->OnRocketHitTarget.AddUniqueDynamic(this, &AColaPropActor::HandleRocketHitTarget);
 		RocketComp->OnRocketFuelDepleted.AddUniqueDynamic(this, &AColaPropActor::HandleRocketFuelDepleted);
 		RocketComp->OnRocketSettled.AddUniqueDynamic(this, &AColaPropActor::HandleRocketSettled);
@@ -136,11 +136,6 @@ void AColaPropActor::PostInitializeComponents()
 void AColaPropActor::BeginPlay()
 {
 	Super::BeginPlay();
-
-	if (RocketComp)
-	{
-		RocketComp->SetAllDebugEnabled(false);
-	}
 
 	USceneComponent* ActiveComp = SkeletalMeshComponent ? Cast<USceneComponent>(SkeletalMeshComponent) : Cast<USceneComponent>(PropMesh);
 	if (ActiveComp)
@@ -171,7 +166,8 @@ void AColaPropActor::Tick(float DeltaSeconds)
 	{
 		return;
 	}
-	if (HasAuthority() && UsesPlasticPressure()) UpdatePlasticPressure(DeltaSeconds);
+	if (HasAuthority()) UpdatePlasticPressure(DeltaSeconds);
+	UpdateRocketPlume();
 
 	USceneComponent* MeshComp = SkeletalMeshComponent ? Cast<USceneComponent>(SkeletalMeshComponent) : Cast<USceneComponent>(PropMesh);
 	const FVector CurLoc = MeshComp ? MeshComp->GetComponentLocation() : GetActorLocation();
@@ -453,8 +449,6 @@ bool AColaPropActor::LaunchOriginalBottleRocket(bool bHighAccuracy)
 	RocketComp->FlightSettings.MaxWaypointSpacing = 650.0f;
 	RocketComp->FlightSettings.MinPathDeviation = 35.0f;
 	RocketComp->FlightSettings.MaxPathDeviation = 90.0f;
-	RocketComp->SetMaxFlightBounces(8);
-	RocketComp->SetFixedFallingBounces(4);
 
 	const int32 Seed=RocketRandomSeed>0 ? RocketRandomSeed : FMath::RandRange(1,MAX_int32);
 	FRandomStream Random(Seed);
@@ -712,6 +706,7 @@ void AColaPropActor::HandleOnBecomeActive(AActivePropActor* Actor, int32 InISID,
 
 void AColaPropActor::HandleOnBeforeReturnToRest(AActivePropActor* Actor, int32 InISID, int32 InProductID, FTransform RestTransform)
 {
+	StopRocketPlume();
 	// Persist canonical contents, never the legacy visual mirror (which may be stale).
 	ColaLevel=GetContentLevel();
 	RemainingPortions = GetRemainingPortions();
@@ -787,6 +782,7 @@ void AColaPropActor::HandleRocketHitTarget(AActor* HitActor, const FHitResult& H
 
 void AColaPropActor::HandleRocketFuelDepleted()
 {
+	StopRocketPlume();
 	if (HasAuthority() && PressureReleaseEpisode.IsValid() && PropManagerReference)
 	{
 		const double Remaining = double(GetContentLevel()) * GetNumPortions();
@@ -795,8 +791,6 @@ void AColaPropActor::HandleRocketFuelDepleted()
 		UpdateBottleMass();
 		UpdateDynamicMaterial(false);
 	}
-	if (HasAuthority() && bUseOriginalRocketFlight && RocketComp && !RocketComp->GetReplicatedFlightState().bPhysicsSimulating)
-		RocketComp->FinishPressureThrust();
 	if (PhysicsSimComponent)
 	{
 		PhysicsSimComponent->RetriggerUnsettledTimer(1.0f);
@@ -805,6 +799,7 @@ void AColaPropActor::HandleRocketFuelDepleted()
 
 void AColaPropActor::HandleRocketSettled()
 {
+	StopRocketPlume();
 	if (RocketComp) RocketComp->IgnoreEjectedCap(nullptr);
 	SetInMotion(false);
 	if (PhysicsSimComponent) PhysicsSimComponent->SetStateUnsettled(0.1f);

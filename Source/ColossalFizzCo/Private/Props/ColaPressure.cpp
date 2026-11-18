@@ -8,7 +8,8 @@ bool APropManager::SetBottleAgitationPressure(int32 InISID,float Pressure,bool b
 	if (!HasAuthority() || GetNetMode()==NM_Client || !FMath::IsFinite(Pressure) || Pressure<0) return false;
 	auto* Unique=FindUniqueData(InISID); const auto* Record=FindISIDData(InISID);
 	const auto* Def=Record ? FindProductDefinition(Record->ProductID) : nullptr;
-	if (!Unique || !Def || Def->BottleMaterialType!=EBottleMaterialType::Plastic) return false;
+	if (!Unique || !Def || (Def->BottleMaterialType!=EBottleMaterialType::Plastic
+		&& (!Unique->EventData.bManualFillPressure || Def->bIsBottleCap || Def->ConsumableProfile.NumOfPortions<=0))) return false;
 	const float NewPressure=FMath::Min(Pressure,100.f);
 	const bool Ended=Unique->ContinuousData.SealedPressure>0 && NewPressure==0;
 	Unique->ContinuousData.SealedPressure=NewPressure;
@@ -59,20 +60,20 @@ void AColaPropActor::AddAgitationPressure(float Amount)
 	if (!PropManagerReference->SetBottleAgitationPressure(ISID,Pressure,false)) return;
 	InteractionPressure=LocalUniqueData.ContinuousData.SealedPressure;
 	FoamPressure=FMath::Clamp(InteractionPressure*5.f,0.f,10.f);
-	const bool HeldClosed=CapHoldingStation.IsValid() && CapHoldingStation->HasSufficientCapHold(ISID);
-	if (GetCapSealed()>=1 && !HeldClosed && GetBottlePressure()>GetBottlePressureTolerance()) StartPlasticPressureRelease();
+	EvaluateManufacturingPressureFailure();
 }
 
 bool AColaPropActor::HasTemporaryManufacturingSeal() const
 {
-	return PropManagerReference && LocalUniqueData.EventData.TemporarySealUntil>PropManagerReference->WorldElapsedSeconds && GetCapSealed()<1;
+	return PropManagerReference && GetCapSealed()<1 && (LocalUniqueData.EventData.bTemporarySealArmed
+		|| LocalUniqueData.EventData.TemporarySealUntil>PropManagerReference->WorldElapsedSeconds);
 }
 
 bool AColaPropActor::StartPlasticPressureRelease(bool bTemporarySealFailure)
 {
 	if (!HasAuthority() || GetNetMode()==NM_Client || !UsesPlasticPressure() || IsEmpty() || !PropManagerReference || !RocketComp
 		|| (!bTemporarySealFailure && (GetBottlePressure()<=GetBottlePressureTolerance() || GetCapSealed()<1))
-		|| (bTemporarySealFailure && LocalUniqueData.ContinuousData.SealedPressure<=.1f)
+		|| (bTemporarySealFailure && LocalUniqueData.ContinuousData.SealedPressure<=FMath::Max(0.f,SafeResidualPressure))
 		|| (RocketComp->GetSimulationState()!=ERocketSimulationState::Idle && RocketComp->GetSimulationState()!=ERocketSimulationState::AtRest)
 		|| !PropMesh || GetRootComponent()!=PropMesh || !PropMesh->GetStaticMesh()) return false;
 	const bool WasHeld=bIsHeld;
@@ -87,6 +88,12 @@ bool AColaPropActor::StartPlasticPressureRelease(bool bTemporarySealFailure)
 	else RemoveCap(1.f,ECapRemovalOperation::EjectPhysics);
 	if (GetCapSealed()>0) return false;
 	SetSeatedInFiller(false);
+	if (LocalUniqueData.EventData.bTemporarySealArmed || LocalUniqueData.EventData.TemporarySealUntil>0)
+	{
+		FPropEventSyncDelta Seal; Seal.ExtendedDirtyMask=EPropExtendedEventMask::TemporarySeal;
+		Seal.bTemporarySealUsed=LocalUniqueData.EventData.bTemporarySealUsed; Seal.bManualFillPressure=LocalUniqueData.EventData.bManualFillPressure;
+		PropManagerReference->SubmitInstanceEventUpdate(ISID,Seal);
+	}
 	const bool bLaunched=bUseOriginalRocketFlight ? LaunchOriginalBottleRocket(true) : RocketComp->StartPressurePhysicsFlight();
 	if (!bLaunched) return false;
 	UE_LOG(LogTemp,Verbose,TEXT("BOTTLE_PRESSURE_LAUNCH id=%d pressure=%.3f tolerance=%.3f held=%d original=%d level=%.3f position=%s"),ISID,LaunchPressure,GetBottlePressureTolerance(),WasHeld,bUseOriginalRocketFlight,GetContentLevel(),*GetActorLocation().ToString());
@@ -99,7 +106,8 @@ void AColaPropActor::UpdateOriginalRocketDischarge(float DeltaSeconds)
 {
 	if (!HasAuthority() || GetNetMode()==NM_Client || !bUseOriginalRocketFlight || !PressureReleaseEpisode.IsValid()
 		|| !PropManagerReference || !RocketComp || RocketComp->GetReplicatedFlightState().bPhysicsSimulating) return;
-	const float Progress=FMath::Clamp(RocketComp->GetTotalFlightDistanceTraveled()/FMath::Max(1.f,RocketLaunchConfiguration.Distance),0.f,1.f);
+	// The planned low-fuel climb is still powered travel; retain its share of liquid until that stage completes.
+	const float Progress=FMath::Clamp(RocketComp->GetTotalFlightDistanceTraveled()/FMath::Max(1.f,RocketComp->GetPoweredTravelDistance()),0.f,1.f);
 	const float Target=RocketInitialContentLevel*(1-Progress);
 	const double Portions=FMath::Max(0.f,GetContentLevel()-Target)*GetNumPortions();
 	if (Portions>0) PropManagerReference->ReleaseBottleLiquidPortions(ISID,Portions,PressureReleaseEpisode);
@@ -108,17 +116,42 @@ void AColaPropActor::UpdateOriginalRocketDischarge(float DeltaSeconds)
 
 void AColaPropActor::UpdatePlasticPressure(float DeltaSeconds)
 {
-	if (!HasAuthority() || GetNetMode()==NM_Client || !UsesPlasticPressure() || !PropManagerReference
+	if (!HasAuthority() || GetNetMode()==NM_Client || !PropManagerReference
+		|| (!UsesPlasticPressure() && !LocalUniqueData.EventData.bManualFillPressure && !HasTemporaryManufacturingSeal())
 		|| !FMath::IsFinite(DeltaSeconds) || DeltaSeconds<=0) return;
-	if (LocalUniqueData.EventData.TemporarySealUntil>0 && PropManagerReference->WorldElapsedSeconds>=LocalUniqueData.EventData.TemporarySealUntil)
+	if (!IsManufacturingFailureActive()) bManufacturingFailureDispatched=false;
+	// Let the station end its expired lease and atomically install its stocked seal before bottle policy runs.
+	if (ManualFillingStation.IsValid() && ManualFillingStation->View.bLeverHeld
+		&& ManualFillingStation->View.SeatedBottleISID==ISID && !ManualFillingStation->IsLeverHoldingBottle(ISID))
 	{
+		ManualFillingStation->EndManualLever();
+		if (IsManufacturingFailureActive() || (RocketComp && RocketComp->IsPoweredFlight())) return;
+	}
+	bool Filling=IsManufacturingFlowActive();
+	for (const auto& Session:PropManagerReference->FillSessions) if (Session.Value.TargetISID==ISID) { Filling=true; break; }
+	const bool LeverHeld=ManualFillingStation.IsValid() && ManualFillingStation->IsLeverHoldingBottle(ISID);
+	// Lost station/lease and restored saves count as release; an installed seal on an empty bottle stays armed.
+	if (LocalUniqueData.EventData.bTemporarySealArmed && LocalUniqueData.EventData.bManualFillPressure && !IsEmpty() && !Filling && !LeverHeld)
+		NotifyManufacturingLeverReleased();
+	PressurePublishElapsed+=DeltaSeconds;
+	float RemainingSeconds=DeltaSeconds;
+	const double SealDeadline=LocalUniqueData.EventData.TemporarySealUntil;
+	const bool SealExpired=SealDeadline>0 && PropManagerReference->WorldElapsedSeconds>=SealDeadline;
+	if (SealExpired)
+	{
+		// A hitch may straddle the deadline: settle under the seal, then test at expiry before unprotected venting.
+		const float ProtectedSeconds=float(FMath::Clamp(SealDeadline-(PropManagerReference->WorldElapsedSeconds-DeltaSeconds),0.,double(DeltaSeconds)));
+		const float SealDecay=Filling ? 0.f : (LocalUniqueData.EventData.bManualFillPressure
+			? (LeverHeld ? ManualFillVentRate : TemporarySealVentRate) : 0.f);
+		const float BoundaryPressure=IsEmpty() ? 0.f : FMath::Max(0.f,LocalUniqueData.ContinuousData.SealedPressure-FMath::Max(0.f,SealDecay)*ProtectedSeconds);
+		if (!PropManagerReference->SetBottleAgitationPressure(ISID,BoundaryPressure,true)) return;
 		FPropEventSyncDelta Expired; Expired.ExtendedDirtyMask=EPropExtendedEventMask::TemporarySeal;
 		Expired.bTemporarySealUsed=LocalUniqueData.EventData.bTemporarySealUsed;
 		Expired.bManualFillPressure=LocalUniqueData.EventData.bManualFillPressure;
-		PropManagerReference->SubmitInstanceEventUpdate(ISID,Expired);
-		if (GetCapSealed()<1 && LocalUniqueData.ContinuousData.SealedPressure>.1f) StartPlasticPressureRelease(true);
+		if (!PropManagerReference->SubmitInstanceEventUpdate(ISID,Expired)) return;
+		if (EvaluateManufacturingPressureFailure()) return;
+		RemainingSeconds-=ProtectedSeconds;
 	}
-	PressurePublishElapsed+=DeltaSeconds;
 	float Pressure=LocalUniqueData.ContinuousData.SealedPressure;
 	const bool Jet=PressureReleaseEpisode.IsValid() && RocketComp && RocketComp->IsPoweredFlight();
 	const bool HeldClosed=CapHoldingStation.IsValid() && CapHoldingStation->HasSufficientCapHold(ISID);
@@ -147,11 +180,13 @@ void AColaPropActor::UpdatePlasticPressure(float DeltaSeconds)
 	}
 	else
 	{
-		bool Filling=false;
-		for (const auto& Session:PropManagerReference->FillSessions) if (Session.Value.TargetISID==ISID) { Filling=true; break; }
 		const float Vent=LocalUniqueData.EventData.bManualFillPressure ? ManualFillVentRate : AtmosphereVentRate;
-		const float Decay=HasTemporaryManufacturingSeal() || Filling ? 0.f : (GetCapSealed()>=1 || HeldClosed ? PressureDecayRate : Vent);
-		Pressure=IsEmpty() ? 0.f : FMath::Max(0.f,Pressure-FMath::Max(0.f,Decay)*DeltaSeconds);
+		// The nozzle keeps a full bottle restrained while the operator vents it.
+		// A purchased temporary seal retains liquid but only bleeds pressure slowly.
+		const float Decay=Filling ? 0.f : (HasTemporaryManufacturingSeal()
+			? (LocalUniqueData.EventData.bManualFillPressure ? (LeverHeld ? ManualFillVentRate : TemporarySealVentRate) : 0.f)
+			: (GetCapSealed()>=1 || HeldClosed ? PressureDecayRate : Vent));
+		Pressure=IsEmpty() ? 0.f : FMath::Max(0.f,Pressure-FMath::Max(0.f,Decay)*RemainingSeconds);
 	}
 	const bool Publish=(PressurePublishElapsed>=.2f && Pressure!=LastPublishedPressure)
 		|| (PressurePublishElapsed>=1.f && Pressure>0);
@@ -159,7 +194,7 @@ void AColaPropActor::UpdatePlasticPressure(float DeltaSeconds)
 		PropManagerReference->SetBottleAgitationPressure(ISID,Pressure,Publish);
 	if (Publish) { PressurePublishElapsed=0; LastPublishedPressure=Pressure; }
 	InteractionPressure=Pressure; FoamPressure=FMath::Clamp(Pressure*5.f,0.f,10.f);
-	if (!Jet && !HeldClosed && GetCapSealed()>=1 && GetBottlePressure()>GetBottlePressureTolerance()) StartPlasticPressureRelease();
+	if (!Jet && !Filling) EvaluateManufacturingPressureFailure();
 }
 
 void AColaPropActor::UpdateMotionPressure(float DeltaSeconds)

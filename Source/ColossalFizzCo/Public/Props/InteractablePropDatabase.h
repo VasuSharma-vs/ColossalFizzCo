@@ -239,6 +239,7 @@ namespace EPropExtendedEventMask
 	constexpr uint8 AttachedBottle = 1 << 3;
 	constexpr uint8 TemporarySeal = 1 << 4;
 	constexpr uint8 LinkedSupply = 1 << 5;
+	constexpr uint8 ManualEquipment = 1 << 6;
 }
 
 /**
@@ -712,8 +713,17 @@ struct COLOSSALFIZZCO_API FPropEventUpdateData
 	/** Persistent equipment connection and one-use temporary seal on the manager clock. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") double TemporarySealUntil = 0;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") bool bTemporarySealUsed = false;
+	/** Installed seal retains full life until the filling lever is first released. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") bool bTemporarySealArmed = false;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") bool bManualFillPressure = false;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") int32 LinkedSupplyISID = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") TArray<int32> ConnectedSupplyISIDs;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") int32 SelectedSupplyPort = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") int32 TemporarySealCharges = 0;
+	/** Physical supplies retain their inventory identity while sitting in an equipment tray. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") TArray<int32> LoadedCapISIDs;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") TArray<int32> LoadedSealISIDs;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") int32 StoredInMachineISID = 0;
 
 	/** Normalized fill volume (0.0 = Empty, 1.0 = NormalCapacity, > 1.0 = Overfill; resting BasePressure) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Unique Data|Event", meta = (ClampMin = "0.0"))
@@ -799,6 +809,13 @@ struct COLOSSALFIZZCO_API FPropContentDefinition
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Content Definition")
 	FLinearColor LiquidColor = FLinearColor(0.25f, 0.08f, 0.02f, 1.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Rocket Spray", meta = (InlineEditConditionToggle))
+	bool bOverrideSprayColor = false;
+
+	/** Enable to choose a color for the liquid jet and spray. When disabled, they use the content's liquid material color or Liquid Color. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals|Rocket Spray", meta = (EditCondition = "bOverrideSprayColor", HideAlphaChannel))
+	FLinearColor SprayColor = FLinearColor(0.25f, 0.08f, 0.02f, 1.0f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Content Definition", meta = (ClampMin = "0.01"))
 	float PressureStrengthMultiplier = 1.0f;
@@ -1025,8 +1042,15 @@ struct COLOSSALFIZZCO_API FPropEventSyncDelta
 	UPROPERTY() bool bClean = true;
 	UPROPERTY() double TemporarySealUntil = 0;
 	UPROPERTY() bool bTemporarySealUsed = false;
+	UPROPERTY() bool bTemporarySealArmed = false;
 	UPROPERTY() bool bManualFillPressure = false;
 	UPROPERTY() int32 LinkedSupplyISID = 0;
+	UPROPERTY() TArray<int32> ConnectedSupplyISIDs;
+	UPROPERTY() int32 SelectedSupplyPort = 0;
+	UPROPERTY() int32 TemporarySealCharges = 0;
+	UPROPERTY() TArray<int32> LoadedCapISIDs;
+	UPROPERTY() TArray<int32> LoadedSealISIDs;
+	UPROPERTY() int32 StoredInMachineISID = 0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Replication")
 	float ContentLevel = 0.0f;

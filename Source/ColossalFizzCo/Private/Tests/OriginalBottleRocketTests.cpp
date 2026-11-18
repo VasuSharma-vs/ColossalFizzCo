@@ -45,6 +45,8 @@ bool FOriginalBottleRocketTest::RunTest(const FString& Parameters)
 	Bottle->RocketMinDistance=Bottle->RocketMaxDistance=2000;
 	Bottle->RocketComp->TippingSettings.bEnableTipping=false;
 	Bottle->RocketComp->DraggingSettings.bEnableDragging=false;
+	// This fixture specifically verifies the opt-in immediate physics channel.
+	Bottle->RocketComp->FallingSettings.PhysicsHandoffMode=ERocketPhysicsHandoffMode::OnFuelDepleted;
 	// Exercise mode switching on the same retained ASM, without a pool reset.
 	if (!TestTrue(TEXT("Previous optional physics flight starts"),Bottle->RocketComp->StartPressurePhysicsFlight())) return false;
 	Bottle->RocketComp->StopRocket(true);
@@ -81,6 +83,8 @@ bool FOriginalBottleRocketTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Empty bottle cannot continue powered flight"),Bottle->RocketComp->IsPoweredFlight());
 	TestEqual(TEXT("Empty original flight uses the component's falling handoff"),Bottle->RocketComp->GetSimulationState(),ERocketSimulationState::SpentFalling);
 	TestTrue(TEXT("Falling root is authoritative physics"),Bottle->PropMesh->IsSimulatingPhysics() && Bottle->IsReplicatingMovement());
+	Bottle->PhysicsSimComponent->SetStateSettling();
+	TestTrue(TEXT("Prop settling cannot revoke rocket physics movement replication"),Bottle->PropMesh->IsSimulatingPhysics() && Bottle->IsReplicatingMovement());
 	const auto FallingSnapshot=Bottle->RocketComp->GetReplicatedFlightState();
 	const auto FallingRecord=*Manager->FindISIDData(ID); const auto FallingUnique=*Manager->FindUniqueData(ID);
 	const int32 LedgerRows=Manager->ReleasedLiquids.Num();

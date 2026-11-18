@@ -27,7 +27,7 @@ FGuid APropManager::BeginLiquidTransfer(int32 SourceID, int32 TargetID)
 		|| !FMath::IsFinite(Source->ContinuousData.Temperature) || !FMath::IsFinite(Target->ContinuousData.Temperature)
 		|| Source->EventData.ContentLevel <= 0 || Target->EventData.ContentLevel < 0
 		|| (Target->EventData.ContentLevel > 0 && Target->EventData.ContentID != Content->ContentID)
-		|| Target->EventData.CapSealed > 0 || Target->EventData.AttachedCapISID>0 || Target->EventData.TemporarySealUntil>WorldElapsedSeconds
+		|| Target->EventData.CapSealed > 0 || Target->EventData.AttachedCapISID>0 || (!Target->EventData.bTemporarySealArmed && Target->EventData.TemporarySealUntil>WorldElapsedSeconds)
 		|| !UColaPricingLibrary::CanReuseBottle(Target->EventData.Strength, Target->EventData.bClean, 0.f)
 		|| IsExpiredSupply(*Source, *Content, WorldElapsedSeconds) || !IsAssemblyCompatible(TargetRecord->ProductID, Content->ContentID, 0)) return FGuid();
 	// An interrupted same-content fill can resume without emptying the bottle or
@@ -62,7 +62,7 @@ float APropManager::TransferLiquid(FGuid SessionID, float RequestedPortions)
 	const FPropProductDefinition* TargetDef = TargetRecord ? FindProductDefinition(TargetRecord->ProductID) : nullptr;
 	const FPropContentDefinition* Content = FindContentDefinition(Session.ContentID);
 	if (!Source || !Target || !SourceDef || !TargetDef || !Content || !IsAssemblyCompatible(TargetRecord->ProductID,Session.ContentID,0) || Source->EventData.ContentID != Session.ContentID
-		|| (Target->EventData.ContentLevel > 0 && Target->EventData.ContentID != Session.ContentID) || Target->EventData.CapSealed > 0 || Target->EventData.AttachedCapISID>0 || Target->EventData.TemporarySealUntil>WorldElapsedSeconds
+		|| (Target->EventData.ContentLevel > 0 && Target->EventData.ContentID != Session.ContentID) || Target->EventData.CapSealed > 0 || Target->EventData.AttachedCapISID>0 || (!Target->EventData.bTemporarySealArmed && Target->EventData.TemporarySealUntil>WorldElapsedSeconds)
 		|| !FMath::IsFinite(Source->EventData.ContentLevel) || !FMath::IsFinite(Target->EventData.ContentLevel)
 		|| !FMath::IsFinite(Source->ContinuousData.Temperature) || !FMath::IsFinite(Target->ContinuousData.Temperature)
 		|| Target->EventData.Strength <= 0.70f || !Target->EventData.bClean || IsExpiredSupply(*Source, *Content, WorldElapsedSeconds))

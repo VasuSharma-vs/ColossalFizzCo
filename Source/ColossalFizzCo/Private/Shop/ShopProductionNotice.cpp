@@ -30,4 +30,4 @@ void UShopPlayerInteractionComponent::ClearProductionNotice()
  ProductionNotice.Reset();NoticePlayer.Reset();if(GetWorld())GetWorld()->GetTimerManager().ClearTimer(NoticeTimer);
 }
 void UShopPlayerInteractionComponent::EndPlay(const EEndPlayReason::Type Reason)
-{ClearProductionNotice();Super::EndPlay(Reason);}
+{CleanupCableGrab();ClearProductionNotice();Super::EndPlay(Reason);}

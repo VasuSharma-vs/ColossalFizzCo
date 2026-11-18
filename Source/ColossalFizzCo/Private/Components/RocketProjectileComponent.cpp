@@ -158,7 +158,7 @@ void URocketProjectileComponent::InitializeTipping(const FVector& InLaunchHeadin
 	const FVector TraceEnd = TraceStart - FVector(0.0f, 0.0f, 600.0f);
 
 	FVector GroundHitPoint = TraceStart - FVector(0.0f, 0.0f, 15.0f);
-	if (GetWorld() && GetWorld()->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_WorldStatic, TraceParams))
+	if (GetWorld() && TraceFlightSurface(GroundHit, TraceStart, TraceEnd, ECC_WorldStatic, TraceParams))
 	{
 		GroundHitPoint = GroundHit.ImpactPoint;
 		TippingFloorNormal = GroundHit.Normal;
@@ -241,7 +241,7 @@ void URocketProjectileComponent::InitializeDragging(float InServerLaunchTime, in
 	FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(RocketDragTrace), false, GetOwner());
 	IgnoreLaunchDebris(TraceParams);
 	const FVector TraceEnd = DragStartCenter - FVector(0.0f, 0.0f, 500.0f);
-	if (GetWorld() && GetWorld()->LineTraceSingleByChannel(GroundHit, DragStartCenter, TraceEnd, ECC_WorldStatic, TraceParams))
+	if (GetWorld() && TraceFlightSurface(GroundHit, DragStartCenter, TraceEnd, ECC_WorldStatic, TraceParams))
 	{
 		DragSurfaceNormal = GroundHit.Normal;
 	}
@@ -304,7 +304,7 @@ void URocketProjectileComponent::InitializeFlightPath(const FVector& InStartLoc,
 		FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(RocketFlightBaselineTrace), false, GetOwner());
 		IgnoreLaunchDebris(TraceParams);
 		const FVector TraceEnd = FlightStartLocation + (FlightBaselineDir * MaxBaselineDist);
-		if (GetWorld() && GetWorld()->LineTraceSingleByChannel(BaselineHit, FlightStartLocation, TraceEnd, ECC_Visibility, TraceParams))
+		if (GetWorld() && TraceFlightSurface(BaselineHit, FlightStartLocation, TraceEnd, ECC_Visibility, TraceParams))
 		{
 			EffectiveBaselineLength = FMath::Max(150.0f, BaselineHit.Distance);
 		}
@@ -434,7 +434,7 @@ void URocketProjectileComponent::InitializeFlightPath(const FVector& InStartLoc,
 			IgnoreLaunchDebris(GroundParams);
 			const FVector TraceStart = Waypoint + FVector(0.0f, 0.0f, 150.0f);
 			const FVector TraceDown = Waypoint - FVector(0.0f, 0.0f, 300.0f);
-			if (GetWorld() && GetWorld()->LineTraceSingleByChannel(GroundCheck, TraceStart, TraceDown, ECC_WorldStatic, GroundParams))
+			if (GetWorld() && TraceFlightSurface(GroundCheck, TraceStart, TraceDown, ECC_WorldStatic, GroundParams))
 			{
 				const float SafeMinZ = GroundCheck.ImpactPoint.Z + SweepRadius + 10.0f;
 				if (Waypoint.Z < SafeMinZ)
@@ -636,6 +636,17 @@ void URocketProjectileComponent::TransitionToRocketing(const FVector& InLiftoffC
 	CurrentBounceReboundSpeed = 0.0f;
 	LastImpactSpeed = 0.0f;
 	FlightDistanceTraveled = 0.0f;
+	if (AuthoritativeFlightNodes.Num()>=2)
+	{
+		// Ground motion may finish before or beyond the launch-time estimate.
+		// Start the existing plan at the actual liftoff pose without moving its later nodes.
+		AuthoritativeFlightNodes[0]=InLiftoffCenter;
+		CumulativeFlightPlanDistances.SetNum(AuthoritativeFlightNodes.Num());
+		CumulativeFlightPlanDistances[0]=0.f;
+		for (int32 NodeIndex=1;NodeIndex<AuthoritativeFlightNodes.Num();++NodeIndex)
+			CumulativeFlightPlanDistances[NodeIndex]=CumulativeFlightPlanDistances[NodeIndex-1]
+				+FVector::Dist(AuthoritativeFlightNodes[NodeIndex-1],AuthoritativeFlightNodes[NodeIndex]);
+	}
 
 	// Lock PropActor into InMotion and ensure PhysicsSimComponent is uninstalled from settling queue
 	if (AActor* OwnerActor = GetOwner())
@@ -682,7 +693,14 @@ void URocketProjectileComponent::TransitionToRocketing(const FVector& InLiftoffC
 		LiftoffHeading.Normalize();
 	}
 
-	CurrentVelocity = LiftoffHeading * FlightSettings.BaseSpeed;
+	if (PoweredMotionSettings.bUseLifecycleSpeedCurve)
+	{
+		EvaluatePoweredSpeedMultiplier(ERocketSimulationState::Rocketing,0.f);
+		// The shared ramp carries the speed reached during the skid into flight.
+		// A launch that skips the ground stages accelerates from its initial speed.
+		CurrentVelocity=LiftoffHeading*UpdatePoweredSpeed(PoweredMotionSpeed,0.f);
+	}
+	else CurrentVelocity = LiftoffHeading * FlightSettings.BaseSpeed;
 	InitializeFlightPath(InLiftoffCenter, LiftoffHeading, LaunchSeed);
 
 	if (FlightSettings.bAlignRotationToVelocity && TargetPrimitive)
@@ -706,6 +724,8 @@ void URocketProjectileComponent::DrawRocketDebugVisuals(float DeltaTime)
 	const bool bIsServer = GetOwner() ? GetOwner()->HasAuthority() : false;
 	const FColor ThemeColor = bIsServer ? FColor::Green : FColor::Cyan;
 	const FVector CurrentLoc = GetWorldCenterLocation();
+	const FVector DebugVelocity = TargetPrimitive && TargetPrimitive->IsSimulatingPhysics()
+		? TargetPrimitive->GetPhysicsLinearVelocity() : CurrentVelocity;
 
 	if (bDrawDebugTrajectory)
 	{
@@ -785,9 +805,9 @@ void URocketProjectileComponent::DrawRocketDebugVisuals(float DeltaTime)
 		}
 
 		// 4. Direction arrow
-		if (!CurrentVelocity.IsNearlyZero())
+		if (!DebugVelocity.IsNearlyZero())
 		{
-			const FVector ArrowEnd = CurrentLoc + (CurrentVelocity.GetSafeNormal() * 50.0f);
+			const FVector ArrowEnd = CurrentLoc + (DebugVelocity.GetSafeNormal() * 50.0f);
 			DrawDebugDirectionalArrow(GetWorld(), CurrentLoc, ArrowEnd, 14.0f, ThemeColor, false, 0.05f, 0, 2.0f);
 		}
 	}
@@ -799,7 +819,7 @@ void URocketProjectileComponent::DrawRocketDebugVisuals(float DeltaTime)
 		const int32 CompKey = BaseKey + (GetUniqueID() % 90);
 		const FString RoleTag = bIsServer ? TEXT("[SERVER]") : TEXT("[CLIENT]");
 		const FString StateStr = UEnum::GetValueAsString(CurrentState);
-		const float Speed = CurrentVelocity.Size();
+		const float Speed = DebugVelocity.Size();
 		const float ProgressPct = (FlightBaselineLength > 0.0f && CurrentState == ERocketSimulationState::Rocketing)
 			? FMath::Clamp(FlightDistanceTraveled / FlightBaselineLength * 100.0f, 0.0f, 100.0f) : 0.0f;
 
@@ -1261,7 +1281,7 @@ void URocketProjectileComponent::GenerateServerFlightPlan(
 
 		const FVector TraceEnd = CurrentLoc + (CurrentHeading * TraceDist);
 		FHitResult Hit;
-		const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, CurrentLoc, TraceEnd, ECC_Visibility, TraceParams);
+		const bool bHit = TraceFlightSurface(Hit, CurrentLoc, TraceEnd, ECC_Visibility, TraceParams);
 
 		if (bHit)
 		{
@@ -1351,7 +1371,7 @@ void URocketProjectileComponent::GenerateServerFlightPlan(
 
 	FVector ReboundVelocityDir = FVector::DownVector;
 
-	if (GetWorld()->LineTraceSingleByChannel(LowFuelHit, FinalRocketingLoc, LowFuelTraceEnd, ECC_Visibility, TraceParams))
+	if (TraceFlightSurface(LowFuelHit, FinalRocketingLoc, LowFuelTraceEnd, ECC_Visibility, TraceParams))
 	{
 		// Struck obstacle (ceiling, wall, beam, prop, etc.) while losing thrust!
 		bOutLowFuelHitObstacle = true;
@@ -1389,7 +1409,7 @@ void URocketProjectileComponent::GenerateServerFlightPlan(
 	const FVector FloorTraceEnd = LowFuelApex + (ReboundVelocityDir * FloorTraceDist);
 
 	FHitResult FloorHit;
-	const bool bHitFloor = GetWorld()->LineTraceSingleByChannel(FloorHit, LowFuelApex, FloorTraceEnd, ECC_Visibility, TraceParams);
+	const bool bHitFloor = TraceFlightSurface(FloorHit, LowFuelApex, FloorTraceEnd, ECC_Visibility, TraceParams);
 
 	FVector GroundContactLoc = FVector::ZeroVector;
 	FVector GroundContactNormal = FVector::UpVector;
@@ -1404,7 +1424,7 @@ void URocketProjectileComponent::GenerateServerFlightPlan(
 	{
 		// Fallback straight down check if angled trace didn't hit
 		FHitResult StraightDownHit;
-		if (GetWorld()->LineTraceSingleByChannel(StraightDownHit, LowFuelApex, LowFuelApex - FVector(0.0f, 0.0f, FloorTraceDist), ECC_Visibility, TraceParams))
+		if (TraceFlightSurface(StraightDownHit, LowFuelApex, LowFuelApex - FVector(0.0f, 0.0f, FloorTraceDist), ECC_Visibility, TraceParams))
 		{
 			const float GroundExtent = GetProjectedExtentAlongDirection(StraightDownHit.Normal);
 			GroundContactLoc = StraightDownHit.ImpactPoint + (StraightDownHit.Normal * (GroundExtent + 1.5f));
@@ -1433,7 +1453,7 @@ void URocketProjectileComponent::GenerateServerFlightPlan(
 					const float Rad = FMath::DegreesToRadians(static_cast<float>(AngleDeg));
 					const FVector TraceDir = FVector(FMath::Cos(Rad) * 0.707f, FMath::Sin(Rad) * 0.707f, -0.707f).GetSafeNormal();
 					FHitResult AngledHit;
-					if (GetWorld()->LineTraceSingleByChannel(AngledHit, LowFuelApex, LowFuelApex + (TraceDir * FloorTraceDist), ECC_Visibility, TraceParams))
+					if (TraceFlightSurface(AngledHit, LowFuelApex, LowFuelApex + (TraceDir * FloorTraceDist), ECC_Visibility, TraceParams))
 					{
 						const float DistSq = FVector::DistSquared(LowFuelApex, AngledHit.ImpactPoint);
 						if (DistSq < ClosestDistSq)
@@ -1462,7 +1482,8 @@ void URocketProjectileComponent::GenerateServerFlightPlan(
 	FVector CurrentNormal = GroundContactNormal;
 	FVector InboundDir = (GroundContactLoc - LowFuelApex).GetSafeNormal();
 
-	const int32 NumBounces = FMath::Clamp(FallingSettings.MaxFallingBounces > 0 ? FallingSettings.MaxFallingBounces : 3, 1, 3);
+	const int32 NumBounces = FallingSettings.bBounceAfterFuelDepleted && bBounceAfterFuelDepleted && FallingSettings.SpentBounciness>0.f
+		? FMath::Clamp(FallingSettings.bUseFixedFallingBounces?FallingSettings.FixedFallingBounces:FallingSettings.MaxFallingBounces,1,15) : 0;
 
 	for (int32 b = 0; b < NumBounces; ++b)
 	{
@@ -1493,7 +1514,7 @@ void URocketProjectileComponent::GenerateServerFlightPlan(
 		const FVector ApexEnd = ApexStart + (BounceHeading * (BounceStepDist * 0.5f));
 		FHitResult ApexHit;
 		FVector ApexPoint = ApexEnd;
-		if (GetWorld()->LineTraceSingleByChannel(ApexHit, ApexStart, ApexEnd, ECC_Visibility, TraceParams))
+		if (TraceFlightSurface(ApexHit, ApexStart, ApexEnd, ECC_Visibility, TraceParams))
 		{
 			const float ApexExtent = GetProjectedExtentAlongDirection(ApexHit.Normal);
 			ApexPoint = ApexHit.ImpactPoint + (ApexHit.Normal * (ApexExtent + 1.5f));
@@ -1504,7 +1525,7 @@ void URocketProjectileComponent::GenerateServerFlightPlan(
 		const FVector LandEnd = ApexPoint + (DescentDir * (BounceStepDist * 0.75f + 150.0f));
 		FHitResult LandHit;
 		FVector NextGroundPoint = LandEnd;
-		if (GetWorld()->LineTraceSingleByChannel(LandHit, ApexPoint, LandEnd, ECC_Visibility, TraceParams))
+		if (TraceFlightSurface(LandHit, ApexPoint, LandEnd, ECC_Visibility, TraceParams))
 		{
 			CurrentNormal = LandHit.Normal;
 			const float LandExtent = GetProjectedExtentAlongDirection(CurrentNormal);
@@ -1526,7 +1547,7 @@ void URocketProjectileComponent::GenerateServerFlightPlan(
 		const float RestExtent = GetProjectedExtentAlongDirectionWithRotation(CurrentNormal, OutRestRotation);
 		FVector FinalRestLoc = CurrentGroundPoint;
 		FHitResult FinalFloorCheck;
-		if (GetWorld()->LineTraceSingleByChannel(FinalFloorCheck, CurrentGroundPoint + (CurrentNormal * 20.0f), CurrentGroundPoint - (CurrentNormal * 50.0f), ECC_Visibility, TraceParams))
+		if (TraceFlightSurface(FinalFloorCheck, CurrentGroundPoint + (CurrentNormal * 20.0f), CurrentGroundPoint - (CurrentNormal * 50.0f), ECC_Visibility, TraceParams))
 		{
 			FinalRestLoc = FinalFloorCheck.ImpactPoint + (FinalFloorCheck.Normal * RestExtent);
 		}
@@ -1899,10 +1920,13 @@ void URocketProjectileComponent::ApplyClientLaunch(
 	LastReplicatedServerLaunchTime = InServerLaunchTime;
 	FlightNetState.bPressurePhysicsFlight=false;
 	FlightNetState.bPhysicsSimulating=false;
+	FlightNetState.bScriptedBallisticFall=false;
+	PoweredCurveProgress=PoweredMotionSpeed=0.f;bReboundApexArmed=false;
 
 	SavePrimitiveSettings();
 
 	AutoResolveTargetPrimitive();
+	ResetWorldHitHistory();
 
 	// Only snap starting position if explicitly requested (All-in-one high accuracy on spawn/fresh launch)
 	// Never snap during regular two-stage launches!
@@ -1960,12 +1984,7 @@ void URocketProjectileComponent::ApplyClientLaunch(
 		TargetPrimitive->SetMobility(EComponentMobility::Movable);
 		TargetPrimitive->SetSimulatePhysics(false);
 		TargetPrimitive->SetEnableGravity(false);
-		TargetPrimitive->SetCollisionProfileName(UCollisionProfile::BlockAllDynamic_ProfileName);
-		TargetPrimitive->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Block);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Block);
+		ConfigureFlightCollision();
 
 		const FBoxSphereBounds LocalBounds = TargetPrimitive->GetLocalBounds();
 		const float ScaledMinZ = (LocalBounds.Origin.Z - LocalBounds.BoxExtent.Z) * TargetPrimitive->GetComponentScale().Z;
@@ -2028,7 +2047,7 @@ void URocketProjectileComponent::ApplyClientLaunch(
 	FHitResult LaunchHit;
 	FCollisionQueryParams LaunchTraceParams(SCENE_QUERY_STAT(RocketClientLaunchHitTrace), false, GetOwner());
 	IgnoreLaunchDebris(LaunchTraceParams);
-	if (GetWorld() && GetWorld()->LineTraceSingleByChannel(LaunchHit, LaunchTraceStart, LaunchTraceEnd, ECC_Visibility, LaunchTraceParams))
+	if (GetWorld() && TraceFlightSurface(LaunchHit, LaunchTraceStart, LaunchTraceEnd, ECC_Visibility, LaunchTraceParams))
 	{
 		LaunchTargetHitLocation = LaunchHit.ImpactPoint;
 		bHasLaunchTargetHit = true;
@@ -2105,11 +2124,17 @@ void URocketProjectileComponent::TickComponent(float DeltaTime, ELevelTick TickT
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 	// A powered pressure jet can be pressed against a surface; that is not settlement.
-	if (FlightNetState.bPressurePhysicsFlight && CurrentState==ERocketSimulationState::Rocketing) return;
+	if (FlightNetState.bPressurePhysicsFlight && CurrentState==ERocketSimulationState::Rocketing)
+	{
+		TickPhysicsWorldHits();
+		DrawRocketDebugVisuals(DeltaTime);
+		return;
+	}
 
 	// If server handed off to physics simulation, monitor the physics body until it settles
 	if (FlightNetState.bPhysicsSimulating)
 	{
+		TickPhysicsWorldHits();
 		if (GetOwner() && GetOwner()->HasAuthority() && TargetPrimitive && TargetPrimitive->IsSimulatingPhysics())
 		{
 			TotalAirTime += DeltaTime;
@@ -2131,7 +2156,8 @@ void URocketProjectileComponent::TickComponent(float DeltaTime, ELevelTick TickT
 			const float AngSpeed = TargetPrimitive->GetPhysicsAngularVelocityInDegrees().Size();
 
 			// If nearly motionless, verify ground contact before settling (never freeze in mid-air!)
-			if (LinSpeed < 25.0f && AngSpeed < 25.0f)
+			if (LinSpeed < FMath::Max(1.f,FallingSettings.HandoffRestVelocityThreshold)
+				&& AngSpeed < FMath::Max(1.f,FallingSettings.HandoffRestAngularVelocityThreshold))
 			{
 				FHitResult GroundCheck;
 				FCollisionQueryParams QP(SCENE_QUERY_STAT(RocketGroundCheckBeforeSettle), false, GetOwner());
@@ -2139,13 +2165,13 @@ void URocketProjectileComponent::TickComponent(float DeltaTime, ELevelTick TickT
 				// The root can be at the upper end of an inverted giant bottle. Trace
 				// from its bounds, so contact does not depend on pivot or orientation.
 				const FVector CenterLoc = TargetPrimitive->Bounds.Origin;
-				const float ContactDistance = TargetPrimitive->Bounds.BoxExtent.Z + 25.0f;
-				const bool bNearGround = GetWorld() && GetWorld()->LineTraceSingleByChannel(GroundCheck, CenterLoc, CenterLoc - FVector(0.0f, 0.0f, ContactDistance), ECC_WorldStatic, QP);
+				const float ContactDistance = TargetPrimitive->Bounds.BoxExtent.Z + 2.0f;
+				const bool bNearGround = GetWorld() && TraceFlightSurface(GroundCheck, CenterLoc, CenterLoc - FVector(0.0f, 0.0f, ContactDistance), ECC_WorldStatic, QP);
 
 				if (bNearGround)
 				{
 					PhysicsSettledTimeAccumulated += DeltaTime;
-					if (PhysicsSettledTimeAccumulated >= 0.25f)
+					if (PhysicsSettledTimeAccumulated >= FMath::Max(.05f,AtRestSettings.SettlingLockDuration))
 					{
 						const FVector FinalLoc = TargetPrimitive->GetComponentLocation();
 						const FRotator FinalRot = TargetPrimitive->GetComponentRotation();
@@ -2165,6 +2191,7 @@ void URocketProjectileComponent::TickComponent(float DeltaTime, ELevelTick TickT
 				PhysicsSettledTimeAccumulated = 0.0f;
 			}
 		}
+		DrawRocketDebugVisuals(DeltaTime);
 		return;
 	}
 
@@ -2315,6 +2342,9 @@ void URocketProjectileComponent::SavePrimitiveSettings()
 	{
 		bSavedSimulatePhysics = TargetPrimitive->IsSimulatingPhysics();
 		bSavedEnableGravity = TargetPrimitive->IsGravityEnabled();
+		SavedLinearDamping=TargetPrimitive->GetLinearDamping();
+		SavedAngularDamping=TargetPrimitive->GetAngularDamping();
+		bSavedGenerateOverlapEvents = TargetPrimitive->GetGenerateOverlapEvents();
 		SavedMobility = TargetPrimitive->Mobility;
 		SavedCollisionProfileName = TargetPrimitive->GetCollisionProfileName();
 		SavedCollisionEnabled = TargetPrimitive->GetCollisionEnabled();
@@ -2352,7 +2382,11 @@ void URocketProjectileComponent::RestorePrimitiveSettings()
 		}
 		TargetPrimitive->SetCollisionResponseToChannels(SavedCollisionResponses);
 		TargetPrimitive->SetCollisionEnabled(SavedCollisionEnabled);
+		TargetPrimitive->OnComponentBeginOverlap.RemoveDynamic(this, &URocketProjectileComponent::HandleRocketOverlap);
+		TargetPrimitive->SetGenerateOverlapEvents(bSavedGenerateOverlapEvents);
 		TargetPrimitive->SetSimulatePhysics(bSavedSimulatePhysics);
+		TargetPrimitive->SetLinearDamping(SavedLinearDamping);
+		TargetPrimitive->SetAngularDamping(SavedAngularDamping);
 		TargetPrimitive->SetEnableGravity(bSavedEnableGravity);
 		TargetPrimitive->SetPhysicsLinearVelocity(FVector::ZeroVector);
 		TargetPrimitive->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector);
@@ -2381,8 +2415,11 @@ void URocketProjectileComponent::IgnoreLaunchDebris(FCollisionQueryParams& Query
 
 void URocketProjectileComponent::ResetRocketSimulation()
 {
+	ResetWorldHitHistory();
 	IgnoreEjectedCap(nullptr);
 	ProjectileAngularVelocityDegrees=FVector::ZeroVector; bProjectileHasAscended=false;
+	PoweredCurveProgress=PoweredMotionSpeed=0.f;bReboundApexArmed=false;
+	FlightNetState.bScriptedBallisticFall=false;
 	CurrentState = ERocketSimulationState::Idle;
 	CurrentVelocity = FVector::ZeroVector;
 	ElapsedFlightTime = 0.0f;
@@ -2488,6 +2525,7 @@ void URocketProjectileComponent::LaunchRocket(
 	SavePrimitiveSettings();
 
 	AutoResolveTargetPrimitive();
+	ResetWorldHitHistory();
 
 	if (TargetPrimitive)
 	{
@@ -2495,18 +2533,15 @@ void URocketProjectileComponent::LaunchRocket(
 		// Clear that mode before any original projectile state is initialized.
 		FlightNetState.bPressurePhysicsFlight=false;
 		FlightNetState.bPhysicsSimulating=false;
+		FlightNetState.bScriptedBallisticFall=false;
+		PoweredCurveProgress=PoweredMotionSpeed=0.f;bReboundApexArmed=false;
 		// Disable physics simulation and lock to movable so manual sweep movement is not overridden by Chaos physics
 		TargetPrimitive->SetMobility(EComponentMobility::Movable);
 		TargetPrimitive->SetSimulatePhysics(false);
 		TargetPrimitive->SetEnableGravity(false);
 
-		// Enforce block collision so the rocket and player can interact
-		TargetPrimitive->SetCollisionProfileName(UCollisionProfile::BlockAllDynamic_ProfileName);
-		TargetPrimitive->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Block);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Block);
+		// Dynamic contacts are messages; only static geometry blocks scripted flight.
+		ConfigureFlightCollision();
 
 		// Record initial ground contact height
 		const FBoxSphereBounds LocalBounds = TargetPrimitive->GetLocalBounds();
@@ -2622,7 +2657,7 @@ void URocketProjectileComponent::LaunchRocket(
 	FHitResult LaunchHit;
 	FCollisionQueryParams LaunchTraceParams(SCENE_QUERY_STAT(RocketLaunchHitTrace), false, GetOwner());
 	IgnoreLaunchDebris(LaunchTraceParams);
-	if (GetWorld() && GetWorld()->LineTraceSingleByChannel(LaunchHit, LaunchTraceStart, LaunchTraceEnd, ECC_Visibility, LaunchTraceParams))
+	if (GetWorld() && TraceFlightSurface(LaunchHit, LaunchTraceStart, LaunchTraceEnd, ECC_Visibility, LaunchTraceParams))
 	{
 		LaunchTargetHitLocation = LaunchHit.ImpactPoint;
 		bHasLaunchTargetHit = true;
@@ -2729,7 +2764,7 @@ void URocketProjectileComponent::StopRocket(bool bImmediate)
 	}
 	else
 	{
-		SetSimulationState(ERocketSimulationState::SpentFalling);
+		EndScriptedThrust();
 	}
 }
 
@@ -2779,11 +2814,15 @@ void URocketProjectileComponent::Multicast_HandoffToPhysicsSimulation_Implementa
 void URocketProjectileComponent::ApplyPhysicsHandoff(const FVector& FinalLinearVelocity, const FVector& FinalAngularVelocity)
 {
 	AutoResolveTargetPrimitive();
+	SavePrimitiveSettings();
+	PreviousWorldHitCenter = GetWorldCenterLocation();
+	bHasPreviousWorldHitCenter = TargetPrimitive != nullptr;
 
 	// 1. Mark component state
 	CurrentVelocity = FVector::ZeroVector;
 	FlightNetState.bPhysicsSimulating = true;
 	PhysicsSettledTimeAccumulated = 0.0f;
+	FlightNetState.bPressurePhysicsFlight=true;
 	SetSimulationState(ERocketSimulationState::SpentFalling);
 
 	const bool bIsServer = GetOwner() ? GetOwner()->HasAuthority() : false;
@@ -2792,16 +2831,13 @@ void URocketProjectileComponent::ApplyPhysicsHandoff(const FVector& FinalLinearV
 	if (TargetPrimitive)
 	{
 		TargetPrimitive->SetMobility(EComponentMobility::Movable);
-		TargetPrimitive->SetCollisionProfileName(UCollisionProfile::BlockAllDynamic_ProfileName);
-		TargetPrimitive->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Block);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Block);
+		ConfigureFlightCollision(true);
 
 		// On both Server and Client: engage physics simulation and gravity so the bottle tumbles to the ground naturally!
 		TargetPrimitive->SetSimulatePhysics(true);
 		TargetPrimitive->SetEnableGravity(true);
+		TargetPrimitive->SetLinearDamping(FMath::Max(0.f,FallingSettings.HandoffLinearDamping));
+		TargetPrimitive->SetAngularDamping(FMath::Max(0.f,FallingSettings.HandoffAngularDamping));
 		TargetPrimitive->WakeAllRigidBodies();
 		TargetPrimitive->SetPhysicsLinearVelocity(FinalLinearVelocity);
 		if (!FinalAngularVelocity.IsNearlyZero())
@@ -2814,9 +2850,6 @@ void URocketProjectileComponent::ApplyPhysicsHandoff(const FVector& FinalLinearV
 	if (AActor* OwnerActor = GetOwner())
 	{
 		OwnerActor->SetActorEnableCollision(true);
-		// Keep replicate movement false during tumbling so network movement replication does not fight local Chaos physics
-		OwnerActor->SetReplicateMovement(false);
-
 		if (AActivePropActor* PropActor = Cast<AActivePropActor>(OwnerActor))
 		{
 			PropActor->SetHeld(false);
@@ -2838,11 +2871,15 @@ void URocketProjectileComponent::ApplyPhysicsHandoff(const FVector& FinalLinearV
 					SimComp->SetComponentTickEnabled(true);
 					SimComp->SetHeld(false);
 					SimComp->SetInMotion(false);
-					SimComp->SetStateUnsettled();
+					SimComp->SetPhysicsState(EPhysicsSimulationState::Unsettled,FMath::Max(.05f,AtRestSettings.SettlingLockDuration),FallingSettings.HandoffRestVelocityThreshold);
 					LogDebug(TEXT("ApplyPhysicsHandoff: Transitioned PhysicsSimComponent into Unsettled state!"), true);
 				}
 			}
 		}
+		// Prop lifecycle helpers disable ordinary ASM movement replication. Apply
+		// the rocket's authoritative physics ownership after those helpers finish.
+		OwnerActor->SetReplicateMovement(true);
+		if (bIsServer) OwnerActor->ForceNetUpdate();
 	}
 
 	// 4. The server monitors the handed-off body for supported rest; clients follow authoritative physics.
@@ -2978,10 +3015,12 @@ void URocketProjectileComponent::Multicast_StartSpentFalling_Implementation(
 	FVector_NetQuantize InGlidingTarget)
 {
 	const bool bIsServer = GetOwner() ? GetOwner()->HasAuthority() : false;
-	if (bIsServer || AuthoritativeFlightNodes.Num() >= 2)
+	if (bIsServer)
 	{
 		return;
 	}
+	AuthoritativeFlightNodes.Reset();CumulativeFlightPlanDistances.Reset();
+	FlightNetState.bScriptedBallisticFall=true;
 
 	AutoResolveTargetPrimitive();
 
@@ -3023,12 +3062,7 @@ void URocketProjectileComponent::Multicast_StartSpentFalling_Implementation(
 		TargetPrimitive->SetMobility(EComponentMobility::Movable);
 		TargetPrimitive->SetSimulatePhysics(false);
 		TargetPrimitive->SetEnableGravity(false);
-		TargetPrimitive->SetCollisionProfileName(UCollisionProfile::BlockAllDynamic_ProfileName);
-		TargetPrimitive->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Block);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
-		TargetPrimitive->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Block);
+		ConfigureFlightCollision();
 	}
 
 	SetActive(true);
@@ -3068,6 +3102,7 @@ void URocketProjectileComponent::Multicast_FallingBounce_Implementation(
 
 	CurrentVelocity = InBounceVelocity;
 	FallingBounceCount = InBounceCount;
+	bReboundApexArmed=InBounceCount>=FMath::Max(1,FallingSettings.HandoffAfterBounces) && CurrentVelocity.Z>0.f;
 	TimeSinceLastBounce = 0.0f;
 	bIsGlidingToReachablePoint = false;
 
@@ -3077,7 +3112,7 @@ void URocketProjectileComponent::Multicast_FallingBounce_Implementation(
 
 float URocketProjectileComponent::GetNormalizedRemainingFuel() const
 {
-	const float EffectiveFuelDist = FlightSettings.MaxFuelDistance > 0.0f ? FlightSettings.MaxFuelDistance : MaxFuelDistance;
+	const float EffectiveFuelDist = GetPoweredTravelDistance();
 	if (EffectiveFuelDist <= 0.0f)
 	{
 		return 0.0f;
@@ -3128,7 +3163,6 @@ void URocketProjectileComponent::PerformSimulationStep(float DeltaTime)
 {
 	if (FlightNetState.bPhysicsSimulating) return;
 	const FQuat BeforeRotation=TargetPrimitive ? TargetPrimitive->GetComponentQuat() : FQuat::Identity;
-	const auto BeforeState=CurrentState;
 	switch (CurrentState)
 	{
 	case ERocketSimulationState::TippingOver:
@@ -3167,16 +3201,19 @@ void URocketProjectileComponent::PerformSimulationStep(float DeltaTime)
 	// Bottle accounting observes the exact sub-step, including the distance limit.
 	OnMovementStep.Broadcast(DeltaTime);
 	if (FlightNetState.bPhysicsSimulating) return;
-	const bool WasFlying=BeforeState==ERocketSimulationState::Rocketing || BeforeState==ERocketSimulationState::LowFuelSputter;
-	if (WasFlying && CurrentVelocity.Z>10) bProjectileHasAscended=true;
-	if ((WasFlying && bProjectileHasAscended && CurrentVelocity.Z<=0)
-		|| CurrentState==ERocketSimulationState::SpentFalling
-		|| TotalFlightDistanceTraveled>=FMath::Max(1.f,MaxFuelDistance)) FinishPressureThrust();
+	if (IsPoweredFlight() && TotalFlightDistanceTraveled>=GetPoweredTravelDistance()) FinishPressureThrust();
 }
 
 void URocketProjectileComponent::ProcessTippingStep(float DeltaTime)
 {
-	TippingElapsedTime += DeltaTime;
+	float PhaseRate=1.f;
+	if (PoweredMotionSettings.bUseLifecycleSpeedCurve)
+	{
+		if (!FMath::IsFinite(DeltaTime) || DeltaTime<=0) return;
+		TotalTippingDuration=FMath::IsFinite(TotalTippingDuration)?FMath::Max(.05f,TotalTippingDuration):.22f;
+		PhaseRate=FMath::Max(.1f,EvaluatePoweredSpeedMultiplier(ERocketSimulationState::TippingOver,TippingElapsedTime/TotalTippingDuration));
+	}
+	TippingElapsedTime += DeltaTime*PhaseRate;
 	TotalAirTime += DeltaTime;
 
 	const float Alpha = FMath::Clamp(TippingElapsedTime / TotalTippingDuration, 0.0f, 1.0f);
@@ -3219,7 +3256,13 @@ void URocketProjectileComponent::ProcessTippingStep(float DeltaTime)
 	SetTargetTransformAroundCenter(CurrentCenter, CurrentQuat.Rotator());
 
 	// Continuous velocity tracking along floor heading
-	CurrentVelocity = TippingFloorHeading * (FlightSettings.BaseSpeed * 0.12f * SmoothAlpha);
+	if (PoweredMotionSettings.bUseLifecycleSpeedCurve)
+	{
+		const float Multiplier=EvaluatePoweredSpeedMultiplier(ERocketSimulationState::TippingOver,Alpha);
+		const float Speed=FMath::IsFinite(FlightSettings.BaseSpeed)?FMath::Max(0.f,FlightSettings.BaseSpeed):0.f;
+		CurrentVelocity=TippingFloorHeading*UpdatePoweredSpeed(Speed*Multiplier,DeltaTime);
+	}
+	else CurrentVelocity = TippingFloorHeading * (FlightSettings.BaseSpeed * 0.12f * SmoothAlpha);
 
 	// Transition to State 2 (Dragging) when fully flat on the floor (Image 3)
 	if (Alpha >= 1.0f)
@@ -3232,15 +3275,27 @@ void URocketProjectileComponent::ProcessTippingStep(float DeltaTime)
 
 void URocketProjectileComponent::ProcessDraggingStep(float DeltaTime)
 {
+	if (PoweredMotionSettings.bUseLifecycleSpeedCurve && (!FMath::IsFinite(DeltaTime) || DeltaTime<=0)) return;
 	DragElapsedTime += DeltaTime;
 	TotalAirTime += DeltaTime;
 
-	const float DragAlpha = FMath::Clamp(DragElapsedTime / TotalDragDuration, 0.0f, 1.0f);
+	const float Duration=PoweredMotionSettings.bUseLifecycleSpeedCurve
+		? (FMath::IsFinite(TotalDragDuration)?FMath::Max(.05f,TotalDragDuration):.45f) : TotalDragDuration;
+	const float DragAlpha = FMath::Clamp(DragElapsedTime / Duration, 0.0f, 1.0f);
 
 	// Slowly increase thrust power to catch up to the target takeoff point (Images 4 & 5)
-	const float ThrustAlpha = FMath::Pow(DragAlpha, DraggingSettings.ThrustRampExponent);
-	const float CurrentAccel = FMath::Lerp(DraggingSettings.InitialDragAcceleration, DraggingSettings.MaxDragAcceleration, ThrustAlpha);
-	DragCurrentSpeed += CurrentAccel * DeltaTime;
+	if (PoweredMotionSettings.bUseLifecycleSpeedCurve)
+	{
+		const float Multiplier=EvaluatePoweredSpeedMultiplier(ERocketSimulationState::Dragging,DragAlpha);
+		const float Speed=FMath::IsFinite(FlightSettings.BaseSpeed)?FMath::Max(0.f,FlightSettings.BaseSpeed):0.f;
+		DragCurrentSpeed=UpdatePoweredSpeed(Speed*Multiplier,DeltaTime);
+	}
+	else
+	{
+		const float ThrustAlpha = FMath::Pow(DragAlpha, DraggingSettings.ThrustRampExponent);
+		const float CurrentAccel = FMath::Lerp(DraggingSettings.InitialDragAcceleration, DraggingSettings.MaxDragAcceleration, ThrustAlpha);
+		DragCurrentSpeed += CurrentAccel * DeltaTime;
+	}
 
 	const FVector CurrentCenter = GetWorldCenterLocation();
 
@@ -3255,7 +3310,7 @@ void URocketProjectileComponent::ProcessDraggingStep(float DeltaTime)
 	FCollisionQueryParams FloorParams(SCENE_QUERY_STAT(RocketDragFloorCheck), false, GetOwner());
 	IgnoreLaunchDebris(FloorParams);
 	const FVector TraceDown = CurrentCenter - (FVector::UpVector * (SweepRadius + 25.0f));
-	const bool bHasFloor = GetWorld() && GetWorld()->LineTraceSingleByChannel(FloorHit, CurrentCenter, TraceDown, ECC_WorldStatic, FloorParams);
+	const bool bHasFloor = GetWorld() && TraceFlightSurface(FloorHit, CurrentCenter, TraceDown, ECC_WorldStatic, FloorParams);
 
 	if (bHasFloor)
 	{
@@ -3290,7 +3345,13 @@ void URocketProjectileComponent::ProcessDraggingStep(float DeltaTime)
 	}
 
 	// Transition to State 3: Rocketing / Flying when drag completes or bottle reaches takeoff waypoint
-	const bool bDurationExpired = DragElapsedTime >= TotalDragDuration;
+	if (PoweredMotionSettings.bUseLifecycleSpeedCurve && CurrentState==ERocketSimulationState::Dragging)
+	{
+		const float ActualSpeed=CurrentVelocity.Size();
+		PoweredMotionSpeed=FMath::IsFinite(ActualSpeed)?FMath::Clamp(ActualSpeed,0.f,100000.f):0.f;
+		DragCurrentSpeed=PoweredMotionSpeed;
+	}
+	const bool bDurationExpired = DragElapsedTime >= Duration;
 	const bool bReachedTakeoff = (DragAlpha >= 0.90f) && (FVector::DistSquared(GetWorldCenterLocation(), DragTakeoffPoint) < 900.0f);
 
 	if (bDurationExpired || bReachedTakeoff)
@@ -3339,6 +3400,8 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 {
 	ElapsedFlightTime += DeltaTime;
 	TotalAirTime += DeltaTime;
+	if(IsPoweredFlight() && ElapsedFlightTime>=FMath::Max(.1f,MaxFuelDuration))
+	{ EndScriptedThrust();return; }
 
 	// Guarantee prop actor remains in motion and cannot be demoted to ISM while active rocket simulation is running!
 	if (AActivePropActor* PropActor = Cast<AActivePropActor>(GetOwner()))
@@ -3377,6 +3440,7 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 
 		// 2. Determine target speed by stage
 		float TargetSpeed = FlightSettings.BaseSpeed;
+		float PoweredPhaseProgress=0.f;
 
 		if (CurrentIdx < RocketingEndIndex)
 		{
@@ -3389,6 +3453,7 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 			const float RocketingTotalDist = CumulativeFlightPlanDistances.IsValidIndex(RocketingEndIndex) ? CumulativeFlightPlanDistances[RocketingEndIndex] : (FlightSettings.BaseSplineLength > 0.0f ? FlightSettings.BaseSplineLength : 5000.0f);
 			const float CurrentDist = (CumulativeFlightPlanDistances.IsValidIndex(CurrentIdx) ? CumulativeFlightPlanDistances[CurrentIdx] : 0.0f) + CurrentSegmentDistTraveled;
 			const float NormFuel = FMath::Clamp(CurrentDist / FMath::Max(RocketingTotalDist, 1.0f), 0.0f, 1.0f);
+			PoweredPhaseProgress=NormFuel;
 
 			if (FuelThrustCurve)
 			{
@@ -3422,6 +3487,7 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 			const float Region2TotalDist = FMath::Max(Region2EndDist - Region2StartDist, 1.0f);
 			const float CurrentClimbDist = ((CumulativeFlightPlanDistances.IsValidIndex(CurrentIdx) ? CumulativeFlightPlanDistances[CurrentIdx] : Region2StartDist) - Region2StartDist) + CurrentSegmentDistTraveled;
 			const float ClimbAlpha = FMath::Clamp(CurrentClimbDist / Region2TotalDist, 0.0f, 1.0f);
+			PoweredPhaseProgress=ClimbAlpha;
 
 			// Forward thrust degrades smoothly while gravity decelerates the bottle towards apex
 			TargetSpeed = FMath::Lerp(V_start, V_apex, FMath::Pow(ClimbAlpha, 1.2f));
@@ -3432,28 +3498,29 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 			if (CurrentState != ERocketSimulationState::SpentFalling)
 			{
 				SetSimulationState(ERocketSimulationState::SpentFalling);
-				OnRocketFuelDepleted.Broadcast();
 				FallingBounceCount = 0;
 				TimeSpentFalling = 0.0f;
 			}
 
+			if(GetPhysicsHandoffMode()==ERocketPhysicsHandoffMode::OnFuelDepleted)
+			{ if(GetOwner() && GetOwner()->HasAuthority())HandoffToPhysicsSimulation();return; }
 			TimeSpentFalling += DeltaTime;
 
-			const float ApexHang = bLowFuelHitObstacle ? 0.0f : (FallingSettings.ApexHangDuration > 0.0f ? FallingSettings.ApexHangDuration : 0.08f);
-			const float V_terminal = FMath::Clamp(FallingSettings.TerminalVelocity > 0.0f ? FallingSettings.TerminalVelocity : 2800.0f, 1800.0f, 3500.0f);
-			const float FallAccel = FallingSettings.FallAcceleration > 0.0f ? FallingSettings.FallAcceleration : 3800.0f;
+			const float FallRate=FMath::Clamp(FallingSettings.FallingSpeedMultiplier,.05f,5.f);
+			const float ApexHang = bLowFuelHitObstacle ? 0.0f : FMath::Max(0.f,FallingSettings.ApexHangDuration);
+			const float V_terminal = FMath::Max(1.f,FallingSettings.TerminalVelocity)*FallRate;
+			const float FallAccel = FMath::Max(1.f,FallingSettings.FallAcceleration)*FMath::Max(.01f,FallingSettings.SpentGravityScale)*FallRate;
 
 			if (TimeSpentFalling <= ApexHang && ApexHang > 0.0f)
 			{
-				// Brief time frame to show apex stall / zero-g crest (gentle rollover from 280 to 420 cm/s)
-				const float HangAlpha = FMath::Clamp(TimeSpentFalling / ApexHang, 0.0f, 1.0f);
-				TargetSpeed = FMath::Lerp(280.0f, 420.0f, FMath::SmoothStep(0.0f, 1.0f, HangAlpha));
+				// Brief pause at the crest before scripted descent begins.
+				TargetSpeed = 0.f;
 			}
 			else
 			{
 				// Rapidly add falling velocity downward under gravity!
 				const float ActiveFallTime = TimeSpentFalling - ApexHang;
-				const float GravitySpeed = 420.0f + (FallAccel * ActiveFallTime);
+				const float GravitySpeed = FallAccel * ActiveFallTime;
 				TargetSpeed = FMath::Min(GravitySpeed, V_terminal);
 			}
 		}
@@ -3481,11 +3548,14 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 			{
 				// Descent Leg: From apex (near-zero speed) accelerates downward to next impact
 				const float ExpectedImpactSpeed = FMath::Max(CurrentBounceReboundSpeed * 0.95f, 250.0f);
-				TargetSpeed = FMath::Lerp(20.0f, ExpectedImpactSpeed, FMath::Sqrt(BounceAlpha));
+				TargetSpeed = FMath::Min(FMath::Lerp(20.0f, ExpectedImpactSpeed, FMath::Sqrt(BounceAlpha)),FMath::Max(1.f,FallingSettings.TerminalVelocity))
+					* FMath::Clamp(FallingSettings.FallingSpeedMultiplier,.05f,5.f);
 			}
 		}
 
-		if (FlightNetState.bHandoffAtApexOrDistance && FlightNetState.Acceleration>0 && CurrentIdx<RocketingEndIndex)
+		if(PoweredMotionSettings.bUseLifecycleSpeedCurve && CurrentIdx<LowFuelIndex)
+			TargetSpeed=UpdatePoweredSpeed(FlightSettings.BaseSpeed*EvaluatePoweredSpeedMultiplier(CurrentState,PoweredPhaseProgress),DeltaTime);
+		else if (FlightNetState.bHandoffAtApexOrDistance && FlightNetState.Acceleration>0 && CurrentIdx<RocketingEndIndex)
 			TargetSpeed=FMath::Min(TargetSpeed,FlightSettings.BaseSpeed*.2f+FlightNetState.Acceleration*ElapsedFlightTime);
 		// 3. Step forward along trajectory
 		const float StepDist = TargetSpeed * DeltaTime;
@@ -3496,6 +3566,8 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 		// 4. Compute 3D position and rotation according to each region
 		FVector NewCenter = CurrentCenter;
 		FRotator TargetRot = TargetPrimitive ? TargetPrimitive->GetComponentRotation() : FRotator::ZeroRotator;
+		bool bHandoffAtReboundApex = false;
+		FVector ReboundApexVelocity = FVector::ZeroVector;
 
 		if (CurrentIdx < RocketingEndIndex)
 		{
@@ -3660,9 +3732,33 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 			}
 
 			const FVector ApexControl = (2.0f * Apex) - (0.5f * (Ground1 + Ground2));
+			// The authored middle node is only the vertical peak on level ground.
+			// Locate the actual quadratic maximum when the two landings differ.
+			const double VertexDenominator = 2.0 * ApexControl.Z - Ground1.Z - Ground2.Z;
+			if (GetPhysicsHandoffMode() == ERocketPhysicsHandoffMode::AfterBounceApex
+				&& FallingBounceCount >= FMath::Max(1, FallingSettings.HandoffAfterBounces)
+				&& VertexDenominator > UE_SMALL_NUMBER)
+			{
+				const double VertexT = (ApexControl.Z - Ground1.Z) / VertexDenominator;
+				const float LegStartT = RelativeIdx % 2 == 0 ? 0.f : .5f;
+				const float LegEndT = LegStartT + .5f;
+				if (VertexT > 0.0 && VertexT < 1.0 && VertexT >= LegStartT && VertexT <= LegEndT && ParabolicT >= VertexT)
+				{
+					ParabolicT = static_cast<float>(VertexT);
+					bHandoffAtReboundApex = true;
+				}
+			}
 			const float OneMinusT = 1.0f - ParabolicT;
 			const FVector ParabolicPos = (OneMinusT * OneMinusT * Ground1) + (2.0f * OneMinusT * ParabolicT * ApexControl) + (ParabolicT * ParabolicT * Ground2);
-			FVector ParabolicTangent = (2.0f * OneMinusT * (ApexControl - Ground1) + 2.0f * ParabolicT * (Ground2 - ApexControl)).GetSafeNormal();
+			const FVector ParabolicDerivative = 2.0f * OneMinusT * (ApexControl - Ground1) + 2.0f * ParabolicT * (Ground2 - ApexControl);
+			FVector ParabolicTangent = ParabolicDerivative.GetSafeNormal();
+			if (bHandoffAtReboundApex)
+			{
+				// Evaluate momentum at the clipped step, rather than dividing a
+				// partial displacement by the full simulation timestep.
+				ReboundApexVelocity = ParabolicDerivative * (TargetSpeed / (2.f * SegmentLength));
+				ReboundApexVelocity.Z = 0.f;
+			}
 			if (ParabolicTangent.IsNearlyZero())
 			{
 				ParabolicTangent = (TargetNode - StartNode).GetSafeNormal();
@@ -3676,6 +3772,12 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 		// 5. Update velocity and transform
 		CurrentVelocity = (NewCenter - CurrentCenter) / FMath::Max(DeltaTime, 0.0001f);
 		SetTargetTransformAroundCenter(NewCenter, TargetRot);
+		if (bHandoffAtReboundApex)
+		{
+			CurrentVelocity = ReboundApexVelocity;
+			if (GetOwner() && GetOwner()->HasAuthority()) HandoffToPhysicsSimulation();
+			return;
+		}
 
 		// 6. Check segment completion
 		if (CurrentSegmentDistTraveled >= SegmentLength)
@@ -3711,6 +3813,7 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 				const float Restitution = FMath::Clamp(FallingSettings.SpentBounciness > 0.0f ? FallingSettings.SpentBounciness : 0.45f, 0.25f, 0.65f);
 				CurrentBounceReboundSpeed = LastImpactSpeed * Restitution;
 				CurrentBounceCount = 1;
+				FallingBounceCount=1;
 
 				FHitResult SyntheticHit;
 				SyntheticHit.ImpactPoint = TargetNode;
@@ -3726,6 +3829,7 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 					const float Restitution = FMath::Clamp(FallingSettings.SpentBounciness > 0.0f ? FallingSettings.SpentBounciness : 0.45f, 0.25f, 0.65f);
 					CurrentBounceReboundSpeed = LastImpactSpeed * Restitution;
 					CurrentBounceCount++;
+					FallingBounceCount++;
 
 					FHitResult SyntheticHit;
 					SyntheticHit.ImpactPoint = TargetNode;
@@ -3778,7 +3882,7 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 			TotalFlightDistanceTraveled, EffectiveFuelDist, TotalAirTime), true);
 
 		// Immediate synchronized fuel cutoff on both server and client at exact same sub-step
-		if (FallingSettings.bUsePhysicsSimulation || FallingSettings.bHandoffToPhysicsOnDepleted || bHandoffToPhysicsOnDepleted)
+		if (GetPhysicsHandoffMode()==ERocketPhysicsHandoffMode::OnFuelDepleted)
 		{
 			if (!GetOwner() || GetOwner()->HasAuthority())
 			{
@@ -3832,7 +3936,14 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 		SpeedMultiplier *= ClientCatchupSpeedMultiplier;
 	}
 
-	const float TargetSpeed = FlightSettings.BaseSpeed * SpeedMultiplier;
+	if(PoweredMotionSettings.bUseLifecycleSpeedCurve)
+	{
+		const float Progress=FMath::Clamp(TotalFlightDistanceTraveled/FMath::Max(1.f,EffectiveFuelDist),0.f,1.f);
+		SpeedMultiplier=EvaluatePoweredSpeedMultiplier(Progress>=.65f?ERocketSimulationState::LowFuelSputter:ERocketSimulationState::Rocketing,
+			Progress>=.65f?(Progress-.65f)/.35f:Progress/.65f);
+	}
+	const float TargetSpeed = PoweredMotionSettings.bUseLifecycleSpeedCurve
+		? UpdatePoweredSpeed(FlightSettings.BaseSpeed*SpeedMultiplier,DeltaTime) : FlightSettings.BaseSpeed*SpeedMultiplier;
 	const float StepDistance = TargetSpeed * DeltaTime;
 
 	// Maintain forward momentum with slight gravity drop
@@ -3964,6 +4075,8 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 				}
 			}
 
+			if(PoweredMotionSettings.bUseLifecycleSpeedCurve && CurrentVelocity.IsNearlyZero())
+				CurrentVelocity=CurrentHeading*TargetSpeed;
 			CurrentVelocity.Z += FlightSettings.GravityZ * FlightSettings.InFlightGravityScale * DeltaTime;
 			CurrentVelocity = CurrentVelocity.GetSafeNormal() * TargetSpeed;
 
@@ -3989,6 +4102,7 @@ void URocketProjectileComponent::ProcessRocketStep(float DeltaTime)
 void URocketProjectileComponent::InitializeSpentFalling()
 {
 	FallingBounceCount = 0;
+	bReboundApexArmed=false;
 	TimeSpentFalling = 0.0f;
 	bTargetRestRotationInitialized = false;
 	FallingTumbleAngle = 0.0f;
@@ -4000,7 +4114,7 @@ void URocketProjectileComponent::InitializeSpentFalling()
 	FHitResult FloorHit;
 	FCollisionQueryParams FloorParams(SCENE_QUERY_STAT(RocketFallingFloorTrace), false, GetOwner());
 	IgnoreLaunchDebris(FloorParams);
-	const bool bHitFloor = GetWorld() && GetWorld()->LineTraceSingleByChannel(FloorHit, CurrentCenter, TraceDown, CollisionChannel, FloorParams);
+	const bool bHitFloor = GetWorld() && TraceFlightSurface(FloorHit, CurrentCenter, TraceDown, CollisionChannel, FloorParams);
 
 	if (bHitFloor)
 	{
@@ -4059,7 +4173,7 @@ void URocketProjectileComponent::InitializeSpentFalling()
 				const float Rad = FMath::DegreesToRadians(static_cast<float>(AngleDeg));
 				const FVector TraceDir = FVector(FMath::Cos(Rad) * 0.707f, FMath::Sin(Rad) * 0.707f, -0.707f).GetSafeNormal();
 				FHitResult AngledHit;
-				if (GetWorld()->LineTraceSingleByChannel(AngledHit, CurrentCenter, CurrentCenter + (TraceDir * FloorTraceDistance), CollisionChannel, FloorParams))
+				if (TraceFlightSurface(AngledHit, CurrentCenter, CurrentCenter + (TraceDir * FloorTraceDistance), CollisionChannel, FloorParams))
 				{
 					const float DistSq = FVector::DistSquared(CurrentCenter, AngledHit.ImpactPoint);
 					if (DistSq < ClosestDistSq)
@@ -4115,7 +4229,7 @@ void URocketProjectileComponent::InitializeSpentFalling()
 void URocketProjectileComponent::ProcessSpentFallingStep(float DeltaTime)
 {
 	// Option 1: Full Chaos physics simulation handoff (Image 2 - option 1)
-	if (FallingSettings.bUsePhysicsSimulation)
+	if (GetPhysicsHandoffMode()==ERocketPhysicsHandoffMode::OnFuelDepleted)
 	{
 		if (!GetOwner() || GetOwner()->HasAuthority())
 		{
@@ -4133,6 +4247,10 @@ void URocketProjectileComponent::ProcessSpentFallingStep(float DeltaTime)
 	TimeSpentFalling += DeltaTime;
 
 	const FVector CurrentCenter = GetWorldCenterLocation();
+	const FVector PreviousVelocity=CurrentVelocity;
+	const float FallRate=FMath::Clamp(FallingSettings.FallingSpeedMultiplier,.05f,5.f);
+	const float FallAcceleration=FMath::Max(1.f,FallingSettings.FallAcceleration)*FMath::Max(.01f,FallingSettings.SpentGravityScale)*FallRate;
+	const float FallSpeedLimit=FMath::Max(1.f,FallingSettings.TerminalVelocity)*FallRate;
 
 	if (bIsGlidingToReachablePoint && !GlidingTargetLocation.IsNearlyZero())
 	{
@@ -4153,7 +4271,7 @@ void URocketProjectileComponent::ProcessSpentFallingStep(float DeltaTime)
 		}
 
 		// Smooth, controlled glide descent
-		const float TargetDescentSpeed = -450.0f;
+		const float TargetDescentSpeed = -FMath::Min(450.f*FallRate,FallSpeedLimit);
 		CurrentVelocity.Z = FMath::FInterpTo(CurrentVelocity.Z, TargetDescentSpeed, DeltaTime, 2.5f);
 
 		// Align bottle smoothly with glide heading
@@ -4169,7 +4287,7 @@ void URocketProjectileComponent::ProcessSpentFallingStep(float DeltaTime)
 		FHitResult RecheckHit;
 		FCollisionQueryParams RecheckParams(SCENE_QUERY_STAT(RocketGlideGroundCheck), false, GetOwner());
 		IgnoreLaunchDebris(RecheckParams);
-		if (GetWorld() && GetWorld()->LineTraceSingleByChannel(RecheckHit, CurrentCenter, CurrentCenter - FVector(0.0f, 0.0f, 1500.0f), CollisionChannel, RecheckParams))
+		if (GetWorld() && TraceFlightSurface(RecheckHit, CurrentCenter, CurrentCenter - FVector(0.0f, 0.0f, 1500.0f), CollisionChannel, RecheckParams))
 		{
 			bIsGlidingToReachablePoint = false;
 		}
@@ -4177,10 +4295,11 @@ void URocketProjectileComponent::ProcessSpentFallingStep(float DeltaTime)
 	else
 	{
 		// Ballistic drop under gravity
-		CurrentVelocity.Z += FlightSettings.GravityZ * FallingSettings.SpentGravityScale * DeltaTime;
+		CurrentVelocity.Z=FMath::Max(CurrentVelocity.Z-FallAcceleration*DeltaTime,-FallSpeedLimit);
 
 		// Air drag
-		CurrentVelocity *= FMath::Clamp(1.0f - (0.4f * DeltaTime), 0.0f, 1.0f);
+		const float AirDrag=FMath::Exp(-.4f*DeltaTime);
+		CurrentVelocity.X*=AirDrag;CurrentVelocity.Y*=AirDrag;
 
 		// Line trace downward to measure height above the ground
 		FHitResult GroundCheckHit;
@@ -4188,7 +4307,7 @@ void URocketProjectileComponent::ProcessSpentFallingStep(float DeltaTime)
 		IgnoreLaunchDebris(GroundParams);
 		const float CheckDistance = FMath::Max(FallingSettings.GroundInterpDistance * 2.5f, 800.0f);
 		const FVector TraceDown = CurrentCenter - FVector(0.0f, 0.0f, CheckDistance);
-		const bool bFoundFloor = GetWorld() && GetWorld()->LineTraceSingleByChannel(GroundCheckHit, CurrentCenter, TraceDown, CollisionChannel, GroundParams);
+		const bool bFoundFloor = GetWorld() && TraceFlightSurface(GroundCheckHit, CurrentCenter, TraceDown, CollisionChannel, GroundParams);
 
 		if (bFoundFloor)
 		{
@@ -4225,12 +4344,23 @@ void URocketProjectileComponent::ProcessSpentFallingStep(float DeltaTime)
 		}
 	}
 
-	// Move bottle with continuous physics sweep
-	const FVector MoveDelta = CurrentVelocity * DeltaTime;
+	// Stop this exact substep at the rebound apex before handing off physics.
+	const bool bAtReboundApex=bReboundApexArmed && PreviousVelocity.Z>0.f && CurrentVelocity.Z<=0.f
+		&& GetPhysicsHandoffMode()==ERocketPhysicsHandoffMode::AfterBounceApex;
+	const float MoveTime=bAtReboundApex?FMath::Clamp(PreviousVelocity.Z/FallAcceleration,0.f,DeltaTime):DeltaTime;
+	if(bAtReboundApex)CurrentVelocity.Z=0.f;
+	FVector MoveDelta=CurrentVelocity*MoveTime;
+	MoveDelta.Z=(PreviousVelocity.Z+CurrentVelocity.Z)*.5f*MoveTime;
 	FHitResult Hit;
 	if (SweepAndMove(MoveDelta, Hit))
 	{
 		HandleRicochet(Hit);
+	}
+	else if(bAtReboundApex)
+	{
+		bReboundApexArmed=false;
+		if(GetOwner() && GetOwner()->HasAuthority())HandoffToPhysicsSimulation();
+		return;
 	}
 
 	// Safety fallback timeout: only after 30.0s of continuous falling (failsafe for void drops)
@@ -4241,7 +4371,7 @@ void URocketProjectileComponent::ProcessSpentFallingStep(float DeltaTime)
 		IgnoreLaunchDebris(FloorParams);
 		const FVector CenterLoc = GetWorldCenterLocation();
 		const FVector TraceDownFallback = CenterLoc - FVector(0.0f, 0.0f, 15000.0f);
-		if (GetWorld() && GetWorld()->LineTraceSingleByChannel(FloorHit, CenterLoc, TraceDownFallback, CollisionChannel, FloorParams))
+		if (GetWorld() && TraceFlightSurface(FloorHit, CenterLoc, TraceDownFallback, CollisionChannel, FloorParams))
 		{
 			const float SeedYaw = static_cast<float>((LaunchSeed * 67) % 360);
 			DeterministicRestRotation = ComputeGroundRestRotation(FloorHit.Normal, SeedYaw);
@@ -4290,7 +4420,7 @@ bool URocketProjectileComponent::SweepAndMove(const FVector& MoveDelta, const FR
 	IgnoreLaunchDebris(QueryParams);
 	FCollisionShape SphereShape = FCollisionShape::MakeSphere(SweepRadius);
 
-	const bool bHit = GetWorld()->SweepSingleByChannel(
+	const bool bHit = bUseOverlapHitEvents ? SweepWorldHitContacts(SweepStart, SweepEnd, InRotation.Quaternion(), OutHit) : GetWorld()->SweepSingleByChannel(
 		OutHit,
 		SweepStart,
 		SweepEnd,
@@ -4361,7 +4491,7 @@ void URocketProjectileComponent::HandleRicochet(const FHitResult& Hit)
 	CurrentBounceCount++;
 
 	// Notify if hit an actor (player, another bottle)
-	if (Hit.GetActor())
+	if (!bUseOverlapHitEvents && Hit.GetActor())
 	{
 		OnRocketHitTarget.Broadcast(Hit.GetActor(), Hit);
 	}
@@ -4408,15 +4538,13 @@ void URocketProjectileComponent::HandleRicochet(const FHitResult& Hit)
 		FallingBounceCount++;
 		bIsGlidingToReachablePoint = false; // Physical impact occurred; glide completed
 
-		if (TargetFallingBounces < 3)
-		{
-			TargetFallingBounces = 3;
-		}
+		TargetFallingBounces=FMath::Max(1,TargetFallingBounces);
 
 		const bool bCanSettle = (FallingBounceCount >= TargetFallingBounces);
 
 		// If minimum bounce count (3 to 5 based on falling height) is fulfilled and surface faces upward: settle flush!
-		if (bCanSettle && (IncidentSpeed < AtRestSettings.RestVelocityThreshold * 2.0f || FallingBounceCount >= (TargetFallingBounces + 1)) && Hit.Normal.Z > 0.5f)
+		if ((!FallingSettings.bBounceAfterFuelDepleted || !bBounceAfterFuelDepleted || FallingSettings.SpentBounciness<=0.f
+			|| (bCanSettle && (IncidentSpeed < AtRestSettings.RestVelocityThreshold * 2.0f || FallingBounceCount >= TargetFallingBounces+1))) && Hit.Normal.Z > 0.5f)
 		{
 			const float SeedYaw = static_cast<float>((LaunchSeed * 67 + CurrentBounceCount * 13) % 360);
 			DeterministicRestRotation = ComputeGroundRestRotation(Hit.Normal, SeedYaw);
@@ -4446,20 +4574,16 @@ void URocketProjectileComponent::HandleRicochet(const FHitResult& Hit)
 		// Calculate bounce rebound:
 		// Progressive restitution decay across remaining bounces (3 to 5)
 		const float RemainingRatio = FMath::Clamp(float(TargetFallingBounces - FallingBounceCount + 1) / float(TargetFallingBounces), 0.15f, 1.0f);
-		const float EffectiveRestitution = FMath::Clamp(0.50f * RemainingRatio, 0.18f, 0.55f);
-		const float EffectiveFriction = FMath::Clamp(0.65f - (0.25f * (1.0f - RemainingRatio)), 0.35f, 0.70f);
+		const float EffectiveRestitution=FMath::Clamp(FallingSettings.SpentBounciness,0.f,1.f)*RemainingRatio;
+		const float EffectiveFriction=1.f-FMath::Clamp(FallingSettings.SpentFriction,0.f,1.f);
 
 		const FVector NormalVelocity = (Incident | Hit.Normal) * Hit.Normal;
 		const FVector TangentVelocity = Incident - NormalVelocity;
 
 		Reflected = (-NormalVelocity * EffectiveRestitution) + (TangentVelocity * EffectiveFriction);
 
-		// Ensure clear upward bounce off floors
-		if (Hit.Normal.Z > 0.5f)
-		{
-			const float MinUpwardVel = 120.0f + (240.0f * RemainingRatio);
-			Reflected.Z = FMath::Max(Reflected.Z, MinUpwardVel);
-		}
+		if(Hit.Normal.Z>.5f && Reflected.Z>0.f && FallingBounceCount>=FMath::Max(1,FallingSettings.HandoffAfterBounces))
+			bReboundApexArmed=true;
 
 		NewSpeed = Reflected.Size();
 		CurrentVelocity = Reflected;
@@ -4764,6 +4888,8 @@ void URocketProjectileComponent::SetTargetTransformAroundCenter(const FVector& N
 void URocketProjectileComponent::OnRep_FlightNetState()
 {
 	AutoResolveTargetPrimitive();
+	if(FlightNetState.bScriptedBallisticFall)
+	{AuthoritativeFlightNodes.Reset();CumulativeFlightPlanDistances.Reset();}
 	if (FlightNetState.bPressurePhysicsFlight && FlightNetState.State != ERocketSimulationState::AtRest)
 	{
 		ApplyPressurePhysicsNetState();
@@ -4843,7 +4969,8 @@ void URocketProjectileComponent::OnRep_FlightNetState()
 
 	// 3. Fallback Launch Check: if Multicast hasn't executed yet (or for late joiners)
 	const bool bIsNewServerLaunch = (FlightNetState.ServerLaunchTime > LastReplicatedServerLaunchTime + 0.001f) && (FlightNetState.ServerLaunchTime > 0.0f);
-	if (bIsNewServerLaunch && (FlightNetState.State == ERocketSimulationState::Rocketing || FlightNetState.State == ERocketSimulationState::TippingOver || FlightNetState.State == ERocketSimulationState::Dragging))
+	if (bIsNewServerLaunch && (FlightNetState.State == ERocketSimulationState::Rocketing || FlightNetState.State == ERocketSimulationState::TippingOver
+		|| FlightNetState.State == ERocketSimulationState::Dragging || FlightNetState.State == ERocketSimulationState::LowFuelSputter))
 	{
 		if (LaunchSeed <= 0 && FlightNetState.LaunchSeed != 0)
 		{
@@ -4890,12 +5017,7 @@ void URocketProjectileComponent::OnRep_FlightNetState()
 				TargetPrimitive->SetMobility(EComponentMobility::Movable);
 				TargetPrimitive->SetSimulatePhysics(false);
 				TargetPrimitive->SetEnableGravity(false);
-				TargetPrimitive->SetCollisionProfileName(UCollisionProfile::BlockAllDynamic_ProfileName);
-				TargetPrimitive->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-				TargetPrimitive->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
-				TargetPrimitive->SetCollisionResponseToChannel(ECC_PhysicsBody, ECR_Block);
-				TargetPrimitive->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
-				TargetPrimitive->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Block);
+				ConfigureFlightCollision();
 			}
 
 			SetActive(true);

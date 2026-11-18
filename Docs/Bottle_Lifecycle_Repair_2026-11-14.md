@@ -64,7 +64,7 @@ The runner now allows a bounded wall-clock margin for its game-time exit ticker.
 
 Live deployment: Saved/BottleLifecycle_20261114/Deployment14120.json. Backups include previous source, module metadata and both autosave snapshots. The prior14119 DLL remains. Installed14120 is byte-identical to tested Editor78; source trees match.
 
-Complete isolated evidence is under C:/Users/PC/Documents/Unreal Projects/MarryByMidnight/Saved/ModularWork:
+Complete isolated evidence is under C:/Users/PC/Documents/Unreal Projects/ColossalFizzCo/Saved/ModularWork:
 
 - Saved/BottleLifecycleBug_20261114/Checkpoint.json
 - Saved/BottleLifecycleBug_20261114/RuntimeCapEvidence.json

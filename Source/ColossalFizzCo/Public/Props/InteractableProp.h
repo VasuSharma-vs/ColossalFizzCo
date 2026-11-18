@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Interfaces/WorldInteractionHitInterface.h"
 #include "GameFramework/Actor.h"
 #include "NPCEnumsAndTypes.h"
 #include "Props/InteractablePropDatabase.h"
@@ -36,7 +37,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnActivePropBeforeReturnToRest, A
  *   Instances whose product has bEnableInstanceUniqueData=false omit this entirely (zero overhead).
  */
 UCLASS(BlueprintType, Blueprintable)
-class COLOSSALFIZZCO_API AActivePropActor : public AActor, public IWorldAffordanceInterface
+class COLOSSALFIZZCO_API AActivePropActor : public AActor, public IWorldAffordanceInterface, public IWorldInteractionHitInterface
 {
 	GENERATED_BODY()
 
@@ -451,6 +452,8 @@ public:
 private:
 	// Compare identities so a stale seat update cannot pin a reused pool actor.
 	UPROPERTY(ReplicatedUsing=OnRep_FillerSeat) int32 FillerSeatISID = 0;
+	bool bStoredSupplyCollisionDisabled = false;
+	uint8 StoredSupplyCollisionMode = 0;
 	UFUNCTION() void OnRep_FillerSeat();
 public:
 
@@ -472,6 +475,11 @@ public:
 	virtual void ApplyInitialImpactFromPromotion(FVector ImpulseLocation, const FVector& ImpulseDirection, AActor* InstigatorActor, int32 InteractionEventID = 0);
 	/** Collision wake-up kick. Bottles override the legacy mass-independent prop response. */
 	virtual void ApplyUnsettlingImpulse(const FVector& Impulse);
+	virtual void ReceiveWorldHit_Implementation(const FWorldInteractionHit& Data) override;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="World Interaction|Hit") bool bApplyWorldHitForce = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="World Interaction|Hit", meta=(ClampMin="0")) float WorldHitImpulseScale = 1.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="World Interaction|Hit", meta=(ClampMin="0", Units="cm/s")) float MaxWorldHitSpeedChange = 250.f;
+	TSet<FGuid> ReceivedWorldHitEvents;
 
 	/**
 	 * Called by the pool manager immediately before this ASM unit is deactivated and returned to the pool.

@@ -37,7 +37,7 @@ Live native: Saved/Automation/Cola1MigrationValidation_14119_20261114/index.json
 Packaged candidate: Saved/Builds/NormalColaPrototype_14119/Windows/ColossalFizzCo.exe.
 Evidence: Saved/Cola1MigrationEvidence_20261114.
 Recovery archive: Saved/Checkpoints/Cola1Migration_14119_20261114.zip.
-The isolated workspace remains under MarryByMidnight/Saved/ModularWork. Do not rerun one-time source installers. Reopen ColossalFizzCo normally to use module14119.
+The isolated workspace remains under Saved/ModularWork. Do not rerun one-time source installers. Reopen ColossalFizzCo normally to use module14119.
 
 ## Modified source/script/GDD paths
 - Docs/GDD_Master.md

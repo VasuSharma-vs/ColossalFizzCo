@@ -8,10 +8,12 @@
 #include "GameFramework/PlayerController.h"
 #include "Shop/ShopInteractionGeometry.h"
 #include "Engine/World.h"
+#include "InputCoreTypes.h"
 
 UShopPlayerInteractionComponent::UShopPlayerInteractionComponent()
 {
-	PrimaryComponentTick.bCanEverTick = false;
+	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
 	SetIsReplicatedByDefault(true);
 }
 
@@ -88,15 +90,17 @@ AActor* UShopPlayerInteractionComponent::FindTerminalInView(const FVector& ViewL
 
 bool UShopPlayerInteractionComponent::TryOpenTerminalFromView()
 {
+	if(IsCableGrabActive()){if (!TryConnectSupplyHoseFromView()) RequestCableRelease(); return true;}
 	APawn* Pawn=Cast<APawn>(GetOwner());
 	APlayerController* PC=Cast<APlayerController>(GetOwner());
 	if (PC) Pawn=PC->GetPawn();
 	else if (Pawn) PC=Cast<APlayerController>(Pawn->GetController());
 	if (!Pawn || !PC || !PC->IsLocalController() || PC->GetPawn()!=Pawn) return false;
+	if (TryTurnColaContainerValveFromView(!PC->IsInputKeyDown(EKeys::LeftShift) && !PC->IsInputKeyDown(EKeys::RightShift))) return true;
 	FVector Location; FRotator Rotation;
 	PC->GetPlayerViewPoint(Location,Rotation);
 	AActor* Station=FindTerminalInView(Location,Rotation.Vector());
-	if (!Station) return false;
+	if (!Station) return TryToggleCableGrabFromView();
 	OpenTerminal(Station);
 	return IsTerminalOpen();
 }
@@ -121,6 +125,13 @@ void UShopPlayerInteractionComponent::OpenTerminal(AActor* Station)
 	TerminalWidget = CreateWidget<UShopTerminalWidget>(PC, UShopTerminalWidget::StaticClass());
 	if (!TerminalWidget) return;
 	TerminalWidget->Configure(this, Station); TerminalWidget->AddToViewport(50);
+	if (Station->FindComponentByClass<UShopProductionStationComponent>())
+	{
+		TerminalWidget->SetPositionInViewport(FVector2D::ZeroVector,false);
+		TerminalWidget->SetAnchorsInViewport(FAnchors(0,0,1,1)); TerminalWidget->SetAlignmentInViewport(FVector2D::ZeroVector);
+		FInputModeGameAndUI Mode; Mode.SetWidgetToFocus(TerminalWidget->TakeWidget()); Mode.SetHideCursorDuringCapture(false);
+		PC->SetInputMode(Mode); PC->SetShowMouseCursor(true); return;
+	}
 	TerminalWidget->SetPositionInViewport(FVector2D::ZeroVector, false);
 	// Position resets the viewport anchors; set the centered anchors afterward.
 	TerminalWidget->SetAnchorsInViewport(FAnchors(.5f,.5f));

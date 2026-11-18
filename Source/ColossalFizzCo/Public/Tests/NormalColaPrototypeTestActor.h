@@ -69,5 +69,10 @@ private:
 	bool PlaceCashierAtControls(APawn* Pawn);
 	void TickReinvestment();
 	void TickPressureFlight();
+	bool TickMachineVisualTest();
+	double MachineVisualStartedAt=-1;
+	double MachineVisualMatchedAt=-1;
+	bool bMachineVisualPrepared=false;
+	bool bMachineVisualComplete=false;
 	void Fail(const FString& Message);
 };

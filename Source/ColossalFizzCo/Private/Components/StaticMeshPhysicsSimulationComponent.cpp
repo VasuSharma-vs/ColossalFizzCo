@@ -633,9 +633,11 @@ void UStaticMeshPhysicsSimulationComponent::ApplyState(EPhysicsSimulationState N
 
 	const bool bCanModifyReplication = (Owner && Owner->HasAuthority() && World && !World->IsNetMode(NM_Client));
 	const auto* Rocket = Owner ? Owner->FindComponentByClass<URocketProjectileComponent>() : nullptr;
-	const bool bProjectileControlsTransform = Rocket && Rocket->IsPoweredFlight() && !Rocket->GetReplicatedFlightState().bPressurePhysicsFlight;
+	const bool bRocketMoving = Rocket && (Rocket->IsPoweredFlight() || Rocket->GetSimulationState() == ERocketSimulationState::SpentFalling);
+	const bool bRocketPhysicsOwnsTransform = bRocketMoving && (Rocket->GetReplicatedFlightState().bPhysicsSimulating || Rocket->GetReplicatedFlightState().bPressurePhysicsFlight);
+	const bool bProjectileControlsTransform = bRocketMoving && !bRocketPhysicsOwnsTransform;
 	const bool bAllowPhysicsOnOwner = (!ActivePropOwner || ActivePropOwner->bIsActive) && !bProjectileControlsTransform;
-	const bool bReplicateMovementWhenFree = (ActivePropOwner == nullptr);
+	const bool bReplicateMovementWhenFree = (ActivePropOwner == nullptr) || bRocketPhysicsOwnsTransform;
 
 	switch (NewState)
 	{

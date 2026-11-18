@@ -19,9 +19,8 @@ bool UShopProductionStationComponent::OperatorInRange(const AActor* Player) cons
 float UShopProductionStationComponent::RequiredHoldingForce(int32 BottleID) const
 {
 	const auto* Manager=APropManager::Get(this);
-	const auto* Unique=Manager ? Manager->FindUniqueData(BottleID) : nullptr;
-	const auto* Content=Unique ? Manager->FindContentDefinition(Unique->EventData.ContentID) : nullptr;
-	return Unique ? Unique->ContinuousData.SealedPressure+Unique->EventData.ContentLevel*(Content ? Content->PressureStrengthMultiplier : 1.f) : 0.f;
+	const auto* Bottle=Manager ? Cast<AColaPropActor>(Manager->GetActiveActorFromISID(BottleID)) : nullptr;
+	return Bottle ? Bottle->GetBottlePressure() : 0.f;
 }
 
 bool UShopProductionStationComponent::HasSufficientCapHold(int32 BottleID) const
@@ -57,7 +56,8 @@ EShopCheckoutResult UShopProductionStationComponent::ManualCapAction(EShopProduc
 		&& !Manager->ShopCheckout->IsAvailableShopStock(BottleID)) return EShopCheckoutResult::Unavailable;
 	if (auto* Active=Manager ? Cast<AColaPropActor>(Manager->GetActiveActorFromISID(BottleID)) : nullptr)
 		if (Active->CapHoldingStation.IsValid() && Active->CapHoldingStation.Get()!=this) return EShopCheckoutResult::OperationConflict;
-	if (!Unique || !Def || Def->BottleMaterialType!=EBottleMaterialType::Plastic || !Unique->EventData.AttachedCapISID
+	auto* Bottle=Manager ? Cast<AColaPropActor>(Manager->GetActiveActorFromISID(BottleID)) : nullptr;
+	if (!Unique || !Def || !Bottle || !Unique->EventData.AttachedCapISID
 		|| Unique->EventData.CapSealed>=1 || !ShopInstanceVolumeQuery::Query(BottleInput).Contains(BottleID)
 		|| (View.ManualBottleISID && View.ManualBottleISID!=BottleID)) return EShopCheckoutResult::Unavailable;
 	const auto* CapRecord=Manager->FindISIDData(Unique->EventData.AttachedCapISID);
@@ -74,15 +74,14 @@ EShopCheckoutResult UShopProductionStationComponent::ManualCapAction(EShopProduc
 			View.ManualBottleISID=BottleID; LiquidReleaseEpisode=FGuid::NewGuid();
 			View.RotationProgress=FMath::Clamp(Unique->EventData.CapSealed,0.f,1.f);
 		}
-		if (auto* Bottle=Cast<AColaPropActor>(Manager->GetActiveActorFromISID(BottleID))) Bottle->CapHoldingStation=this;
+		Bottle->CapHoldingStation=this;
 		Role=Player;
 		if (Action==EShopProductionAction::HoldCapRole || Action==EShopProductionAction::RotateCapRole)
 		{ GetOwner()->ForceNetUpdate(); return EShopCheckoutResult::Success; }
 		// The first real G/R contribution can claim its available role in this
 		// same request. No unheld interval is required between selection and G.
 	}
-	const bool Protected=bAllowSoloCap && (Unique->ContinuousData.SealedPressure<=SafeResidualPressure
-		|| Unique->EventData.TemporarySealUntil>Manager->WorldElapsedSeconds);
+	const bool Protected=bAllowSoloCap && (Bottle->IsManufacturingSafeToRelease() || Bottle->HasTemporaryManufacturingSeal());
 	const double Now=GetWorld()->GetTimeSeconds();
 	if (Action==EShopProductionAction::PressCap)
 	{
@@ -94,21 +93,9 @@ EShopCheckoutResult UShopProductionStationComponent::ManualCapAction(EShopProduc
 	{
 		if (View.CapRotator!=Player || (!Protected && !HasSufficientCapHold(BottleID)) || (LastRotationTurn>=0 && Now-LastRotationTurn<FMath::Max(.02f,MinimumInputInterval))) return EShopCheckoutResult::OperationConflict;
 		LastRotationTurn=Now;
-		const float NextProgress=FMath::Clamp(Unique->EventData.CapSealed+FMath::Clamp(RotationPerTurn,.01f,1.f),0.f,1.f);
-		if (NextProgress>=1)
-		{
-			if (!Manager->ClosePhysicalCap(BottleID,FMath::Lerp(Def->TorqueSweetSpotMin,Def->TorqueSweetSpotMax,.5f))) return EShopCheckoutResult::Unavailable;
-			ResetManualCapping();
-		}
-		else
-		{
-			// Partial closure is existing per-bottle event state, so leaving the
-			// equipment or pooling the actor cannot erase manufacturing progress.
-			FPropEventSyncDelta Delta; Delta.SetFlag(EPropEventDirtyMask::CapSealed);
-			Delta.CapSealed=NextProgress;
-			if (!Manager->SubmitInstanceEventUpdate(BottleID,Delta)) return EShopCheckoutResult::Unavailable;
-			View.RotationProgress=NextProgress;
-		}
+		if (!Bottle->AdvanceManufacturingCap(FMath::Clamp(RotationPerTurn,.01f,1.f),HasSufficientCapHold(BottleID))) return EShopCheckoutResult::Unavailable;
+		if (Bottle->GetCapSealed()>=1) ResetManualCapping();
+		else View.RotationProgress=Bottle->GetCapSealed();
 	}
 	else return EShopCheckoutResult::InvalidRequest;
 	GetOwner()->ForceNetUpdate(); return EShopCheckoutResult::Success;
@@ -130,8 +117,7 @@ void UShopProductionStationComponent::UpdateManualCapping(float DeltaSeconds)
 	if (!OperatorInRange(View.CapRotator)) View.CapRotator=nullptr;
 	View.HoldingEfficiency=FMath::Max(0.f,View.HoldingEfficiency-FMath::Max(0.f,HoldingEfficiencyDecayPerSecond)*DeltaSeconds);
 	View.HoldingForce=FMath::Clamp(View.HoldingForce-FMath::Max(0.f,HoldingForceDecayPerSecond)*DeltaSeconds,0.f,FMath::Max(0.f,MaximumHoldingForce)*View.HoldingEfficiency);
-	const bool Protected=bAllowSoloCap && (Unique->ContinuousData.SealedPressure<=SafeResidualPressure || Unique->EventData.TemporarySealUntil>Manager->WorldElapsedSeconds);
-	if (!Protected && !HasSufficientCapHold(View.ManualBottleISID) && Unique->EventData.ContentLevel>0 && LeakageLevelPerSecond>0)
-		Manager->ReleaseBottleLiquidPortions(View.ManualBottleISID,double(LeakageLevelPerSecond)*DeltaSeconds*Product->ConsumableProfile.NumOfPortions,LiquidReleaseEpisode);
+	if (auto* Bottle=Cast<AColaPropActor>(Manager->GetActiveActorFromISID(View.ManualBottleISID)))
+		Bottle->UpdateManufacturingCapLeakage(DeltaSeconds,HasSufficientCapHold(View.ManualBottleISID),LiquidReleaseEpisode);
 	GetOwner()->ForceNetUpdate();
 }

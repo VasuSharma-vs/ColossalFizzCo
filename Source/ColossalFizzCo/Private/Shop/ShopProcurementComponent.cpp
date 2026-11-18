@@ -279,6 +279,16 @@ bool UShopProcurementComponent::IsCylinderProduct(int32 PID) const
 	return false;
 }
 
+bool UShopProcurementComponent::IsTemporarySealProduct(int32 PID) const
+{
+	const auto* Manager=Cast<APropManager>(GetOwner()); const auto* Data=Catalog.Get();
+	const auto* Product=Manager ? Manager->FindProductDefinition(PID) : nullptr;
+	if (!Data || !Product || !Product->SourceDataAsset) return false;
+	for (const auto& Offer:Data->Offers)
+		if (Offer.Kind==EShopSupplyKind::TemporarySeal && Offer.Product.Get()==Product->SourceDataAsset.Get()) return true;
+	return false;
+}
+
 bool UShopProcurementComponent::Quote(FName OfferID, int32 Quantity, int64& TotalCents) const
 {
 	TotalCents = 0;
