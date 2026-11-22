@@ -3,6 +3,7 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "Engine/StaticMesh.h"
+#include "GameFramework/Character.h"
 #include "GameFramework/WorldSettings.h"
 #include "Components/StaticMeshComponent.h"
 #include "Props/ColaPropActor.h"
@@ -98,13 +99,32 @@ bool FPlasticPressureTest::RunTest(const FString& Parameters)
 	Manager->ClearInstanceDirty(ID);
 	Manager->SetBottleAgitationPressure(ID,0,false);
 	TestFalse(TEXT("An unchanged zero does not send another full record"),Manager->DirtyISIDs.Contains(ID));
+	const float Threshold=Bottle->GetBottlePressureTolerance();
+	const FTransform BottlePlacement = Bottle->GetActorTransform();
+	auto* Drinker = World->SpawnActor<ACharacter>(FVector(0, -450, 500), FRotator::ZeroRotator);
+	if (!TestNotNull(TEXT("Drinking holder exists"), Drinker)
+		|| !TestTrue(TEXT("Bottle attaches to its holder"), Manager->BeginGrab(ID, Drinker, Drinker->GetRootComponent()))) return false;
+	Bottle->SetDrinkingCarry(true);
+	TestTrue(TEXT("Drinking carry starts on its held bottle"), Bottle->IsCarriedForDrinking());
+	TestFalse(TEXT("The bottle has no collision while drinking"), Bottle->GetActorEnableCollision());
+	const float UnsafePressure = Threshold + .5f;
+	Manager->SetBottleAgitationPressure(ID, UnsafePressure);
+	Bottle->AddAgitationPressure(.1f);
+	Bottle->UpdatePlasticPressure(.1f);
+	TestEqual(TEXT("Handling and monitoring leave pressure paused"), Manager->FindUniqueData(ID)->ContinuousData.SealedPressure, UnsafePressure);
+	TestFalse(TEXT("Drinking blocks pressure release even above tolerance"), Bottle->StartPlasticPressureRelease());
+	TestFalse(TEXT("Drinking bottle stays attached and out of rocket flight"), Bottle->RocketComp->IsPoweredFlight() || !Bottle->bIsHeld);
+	TestTrue(TEXT("Release ends drinking carry"), Manager->ReleaseGrab(ID, Drinker));
+	TestFalse(TEXT("Released bottle no longer has drinking protection"), Bottle->IsCarriedForDrinking());
+	TestTrue(TEXT("Release restores bottle collision"), Bottle->GetActorEnableCollision());
+	Bottle->SetActorTransform(BottlePlacement, false, nullptr, ETeleportType::TeleportPhysics);
+
 	Manager->SetBottleAgitationPressure(ID,0);
 	Bottle->ApplyBottleImpact(FVector(0,0,Bottle->DropImpactThreshold*1.1f),1234);
 	const float ImpactPressure=Manager->FindUniqueData(ID)->ContinuousData.SealedPressure;
 	TestTrue(TEXT("Impact increases saved pressure"),ImpactPressure>0);
 	Bottle->ApplyBottleImpact(FVector(0,0,Bottle->DropImpactThreshold*1.1f),1234);
 	TestEqual(TEXT("Same hit identity cannot charge pressure twice"),Manager->FindUniqueData(ID)->ContinuousData.SealedPressure,ImpactPressure);
-	const float Threshold=Bottle->GetBottlePressureTolerance();
 	Manager->SetBottleAgitationPressure(ID,Threshold-1.f);
 	TestFalse(TEXT("Exactly at tolerance is not a release"),Bottle->StartPlasticPressureRelease());
 	Bottle->AddAgitationPressure(.1f);

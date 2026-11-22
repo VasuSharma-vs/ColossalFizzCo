@@ -10,7 +10,14 @@
 
 namespace CollisionCableRendering
 {
-    void BuildMeshData(const TArray<FVector>& Points,float Width,int32 Sides,float Tiling,TArray<FDynamicMeshVertex>& Vertices,TArray<uint32>& Indices)
+    void GetLocalRenderLocations(const UCollisionCableComponent& Component, TArray<FVector>& Points)
+    {
+        Component.GetCableRenderLocations(Points);
+        const FTransform& ComponentTransform = Component.GetComponentTransform();
+        for (FVector& Point : Points) Point = ComponentTransform.InverseTransformPosition(Point);
+    }
+
+    void BuildMeshData(const TArray<FVector>& Points,float Width,int32 Sides,float Tiling,TArray<FDynamicMeshVertex>& Vertices,TArray<uint32>& Indices,bool bCenterRuptured)
     {
         Vertices.Reset();Indices.Reset();if(Points.Num()<2)return;
         Sides=FMath::Clamp(Sides,3,16);Width=FMath::Max(Width,.1f);
@@ -35,11 +42,18 @@ namespace CollisionCableRendering
                 Vertex.TextureCoordinate[0]=FVector2f(float(Arc[I]/Total)*Tiling,float(Side)/Sides);Vertex.Color=FColor::White;Vertices.Add(Vertex);
             }
         }
-        for(int32 I=0;I+1<Points.Num();++I)for(int32 Side=0;Side<Sides;++Side)
+        const int32 Middle=(Points.Num()-2)/2;
+        const double RuptureCenter=(Arc[Middle]+Arc[Middle+1])*.5;
+        const double RuptureRadius=FMath::Clamp(Width*.25f,2.5f,12.f);
+        for(int32 I=0;I+1<Points.Num();++I)
         {
-            const uint32 A=I*(Sides+1)+Side,B=A+Sides+1;
-            // Unreal's clockwise front faces must face the outside of the tube.
-            Indices.Append({A,B,A+1,A+1,B,B+1});
+            if(bCenterRuptured && I>0 && I+2<Points.Num() && Arc[I+1]>RuptureCenter-RuptureRadius && Arc[I]<RuptureCenter+RuptureRadius) continue;
+            for(int32 Side=0;Side<Sides;++Side)
+            {
+                const uint32 A=I*(Sides+1)+Side,B=A+Sides+1;
+                // Unreal's clockwise front faces must face the outside of the tube.
+                Indices.Append({A,B,A+1,A+1,B,B+1});
+            }
         }
     }
 
@@ -49,12 +63,11 @@ namespace CollisionCableRendering
     public:
         explicit FSceneProxy(const UCollisionCableComponent* Component)
             :FPrimitiveSceneProxy(Component),VertexFactory(GetScene().GetFeatureLevel(),"CollisionCableVF"),
-             Width(Component->CableWidth),Sides(FMath::Clamp(Component->NumSides,3,16)),Tiling(Component->TileMaterial),
+             Width(Component->GetRenderingDiameter()),Sides(FMath::Clamp(Component->NumSides,3,16)),Tiling(Component->TileMaterial),bCenterRuptured(Component->HasVisibleRupture()),
              Material(Component->GetMaterial(0)?Component->GetMaterial(0):UMaterial::GetDefaultMaterial(MD_Surface)),
              Relevance(Material->GetRelevance_Concurrent(GetScene().GetShaderPlatform()))
         {
-            Component->GetCableRenderLocations(Points);
-            for(auto& P:Points)P-=Component->GetComponentLocation();
+            GetLocalRenderLocations(*Component, Points);
             BuildBuffers();
         }
         virtual ~FSceneProxy()override{ReleaseBuffers();}
@@ -77,12 +90,16 @@ namespace CollisionCableRendering
                 FMeshBatchElement& Element=Mesh.Elements[0];Element.IndexBuffer=&Indices;Element.FirstIndex=0;
                 Element.NumPrimitives=Indices.Indices.Num()/3;Element.MinVertexIndex=0;Element.MaxVertexIndex=Buffers.PositionVertexBuffer.GetNumVertices()-1;
                 Element.PrimitiveUniformBuffer=GetUniformBuffer();Collector.AddMesh(I,Mesh);
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+                RenderBounds(Collector.GetPDI(I), Family.EngineShowFlags, GetBounds(), IsSelected());
+#endif
             }
         }
-        void Update(FRHICommandListBase& Commands,TArray<FVector>&& NewPoints,float NewWidth,float NewTiling)
+        void Update(FRHICommandListBase& Commands,TArray<FVector>&& NewPoints,float NewWidth,float NewTiling,bool bNewCenterRuptured)
         {
             check(IsInRenderingThread());
-            ReleaseBuffers();Points=MoveTemp(NewPoints);Width=NewWidth;Tiling=NewTiling;BuildBuffers();InitBuffers(Commands);
+            ReleaseBuffers();Points=MoveTemp(NewPoints);Width=NewWidth;Tiling=NewTiling;bCenterRuptured=bNewCenterRuptured;
+            BuildBuffers();InitBuffers(Commands);
         }
     private:
         TArray<FVector> Points;
@@ -90,6 +107,7 @@ namespace CollisionCableRendering
         FDynamicMeshIndexBuffer32 Indices;
         FLocalVertexFactory VertexFactory;
         float Width;int32 Sides;float Tiling;
+        bool bCenterRuptured;
         UMaterialInterface* Material;
         FMaterialRelevance Relevance;
         bool bReady=false;
@@ -101,7 +119,7 @@ namespace CollisionCableRendering
         void BuildBuffers()
         {
             TArray<FDynamicMeshVertex> Vertices;Indices.Indices.Reset();
-            BuildMeshData(Points,Width,Sides,Tiling,Vertices,Indices.Indices);
+            BuildMeshData(Points,Width,Sides,Tiling,Vertices,Indices.Indices,bCenterRuptured);
             if(Vertices.IsEmpty())return;
             Buffers.PositionVertexBuffer.Init(Vertices.Num());Buffers.StaticMeshVertexBuffer.Init(Vertices.Num(),1);Buffers.ColorVertexBuffer.Init(Vertices.Num());
             for(int32 I=0;I<Vertices.Num();++I)
@@ -127,6 +145,6 @@ namespace CollisionCableRendering
     };
 
     FPrimitiveSceneProxy* CreateProxy(const UCollisionCableComponent* Component){return new FSceneProxy(Component);}
-    void UpdateProxy(FRHICommandListBase& Commands,FPrimitiveSceneProxy* Proxy,TArray<FVector>&& Points,float Width,float Tiling)
-    {static_cast<FSceneProxy*>(Proxy)->Update(Commands,MoveTemp(Points),Width,Tiling);}
+    void UpdateProxy(FRHICommandListBase& Commands,FPrimitiveSceneProxy* Proxy,TArray<FVector>&& Points,float Width,float Tiling,bool bCenterRuptured)
+    {static_cast<FSceneProxy*>(Proxy)->Update(Commands,MoveTemp(Points),Width,Tiling,bCenterRuptured);}
 }

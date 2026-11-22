@@ -46,7 +46,7 @@ bool UCollisionCableComponent::IsWorldAnchor(int32 Index) const
 {
     if(FixedPointIndices.Contains(Index))return true;
     USceneComponent* Source=nullptr;bool Fixed=false;
-    if(Index==0 && bAttachStart){Source=const_cast<UCollisionCableComponent*>(this);Fixed=bStartAttachmentIsWorldAnchor;}
+    if(Index==0 && bAttachStart){Source=GetStartAttachmentSource();Fixed=bStartAttachmentIsWorldAnchor;}
     if(Index==Particles.Num()-1 && bAttachEnd)
     {
         Source=GetAttachedComponent();
@@ -77,10 +77,10 @@ void UCollisionCableComponent::RefreshMovementBindings()
     TSet<AActor*> Drivers;
     if(bEnableMovementRestrictions && GetWorld() && GetWorld()->IsGameWorld())
     {
-        if(bAttachStart && !IsWorldAnchor(0))if(auto* Driver=ResolveMovementDriver(this))Drivers.Add(Driver);
+        if(bAttachStart && !IsWorldAnchor(0))if(auto* Driver=ResolveMovementDriver(GetStartAttachmentSource()))Drivers.Add(Driver);
         if(bAttachEnd && !IsWorldAnchor(Particles.Num()-1))
             if(auto* Driver=ResolveMovementDriver(GetAttachedComponent()?GetAttachedComponent():this))Drivers.Add(Driver);
-        for(const auto& Grab:GetActiveGrabs())if(Grab.Participant)
+        for(const auto& Grab:GetActiveGrabs())if(Grab.Participant && !Grab.Settings.bApproachingConnector)
         {
             AActor* Driver=Grab.TargetComponent?ResolveMovementDriver(Grab.TargetComponent):Grab.Participant.Get();
             if(auto* PC=Cast<APlayerController>(Driver))Driver=PC->GetPawn();
@@ -116,18 +116,19 @@ void UCollisionCableComponent::GetMovementAttachments(TArray<FCableMovementAttac
         Entry.Driver=Driver;Entry.bFixed=Fixed;Entry.Position=Position;Attachments.Add(Entry);
     };
     FVector Start,End;GetEndPositions(Start,End);
-    Add(0,bAttachStart?const_cast<UCollisionCableComponent*>(this):nullptr,NAME_None,
-        bAttachStart?ResolveMovementDriver(const_cast<UCollisionCableComponent*>(this)):nullptr,IsWorldAnchor(0),bAttachStart?Start:Particles[0].Position);
+    USceneComponent* StartSource=GetStartAttachmentSource();
+    Add(0,bAttachStart?StartSource:nullptr,StartOverrideSocket,
+        bAttachStart?ResolveMovementDriver(StartSource):nullptr,IsWorldAnchor(0),bAttachStart?Start:Particles[0].Position);
     USceneComponent* EndSource=GetAttachedComponent();if(!EndSource)EndSource=const_cast<UCollisionCableComponent*>(this);
     Add(Particles.Num()-1,bAttachEnd?EndSource:nullptr,AttachEndToSocketName,
         bAttachEnd?ResolveMovementDriver(EndSource):nullptr,IsWorldAnchor(Particles.Num()-1),bAttachEnd?End:Particles.Last().Position);
     for(int32 Index:FixedPointIndices)if(Index>0 && Index<Particles.Num()-1)
         Add(Index,nullptr,NAME_None,nullptr,true,Particles[Index].Position);
-    if(bEnableGrabbing)for(const auto& Grab:GetActiveGrabs())if(Particles.IsValidIndex(Grab.PointIndex))
+    if(bEnableGrabbing)for(const auto& Grab:GetActiveGrabs())if(Particles.IsValidIndex(Grab.PointIndex) && !Grab.Settings.bApproachingConnector)
     {
         AActor* Driver=Grab.TargetComponent?ResolveMovementDriver(Grab.TargetComponent):Grab.Participant.Get();
         if(auto* PC=Cast<APlayerController>(Driver))Driver=PC->GetPawn();
-        FVector Position=Grab.Target;
+        FVector Position=Driver ? Driver->GetActorLocation()+Grab.ParticipantOffset : FVector(Grab.Target);
         if(Grab.TargetComponent)
         {
             const FTransform Target=Grab.SocketName.IsNone()?Grab.TargetComponent->GetComponentTransform():Grab.TargetComponent->GetSocketTransform(Grab.SocketName);
@@ -152,30 +153,34 @@ void UCollisionCableComponent::NotifyConnectedPullApplied()
 FVector UCollisionCableComponent::ConstrainDriverLocation(AActor* Driver,const FVector& OldLocation,const FVector& ProposedLocation) const
 {
     if(!bEnableMovementRestrictions || !IsValid(Driver) || Particles.Num()<2 || OldLocation.ContainsNaN() || ProposedLocation.ContainsNaN())return ProposedLocation;
-    struct FTarget{int32 Index;FVector Goal;bool Grab;};TArray<FTarget> Targets;
-    if(bAttachStart && !IsWorldAnchor(0) && ResolveMovementDriver(const_cast<UCollisionCableComponent*>(this))==Driver)
-        Targets.Add({0,GetComponentLocation(),false});
+    // Attachment components are at the driver's actual transform. Callers may
+    // already have reduced the proposed step before checking this restraint.
+    const FVector ActualToOld = OldLocation - Driver->GetActorLocation();
+    struct FTarget{int32 Index;FVector OldGoal;bool Grab;};TArray<FTarget> Targets;
+    if(bAttachStart && !IsWorldAnchor(0) && ResolveMovementDriver(GetStartAttachmentSource())==Driver)
+        Targets.Add({0,GetStartAttachmentLocation()+ActualToOld,false});
     if(bAttachEnd && !IsWorldAnchor(Particles.Num()-1))
     {
         USceneComponent* Source=GetAttachedComponent();if(!Source)Source=const_cast<UCollisionCableComponent*>(this);
         if(ResolveMovementDriver(Source)==Driver)
         {
-            FVector Start,End;GetEndPositions(Start,End);Targets.Add({Particles.Num()-1,End,false});
+            FVector Start,End;GetEndPositions(Start,End);Targets.Add({Particles.Num()-1,End+ActualToOld,false});
         }
     }
     if(bEnableGrabbing)for(const auto& Grab:GetActiveGrabs())
     {
+        if (Grab.Settings.bApproachingConnector) continue;
         AActor* Participant=Grab.Participant;
         if(auto* PC=Cast<APlayerController>(Participant))Participant=PC->GetPawn();
         AActor* TargetDriver=Grab.TargetComponent?ResolveMovementDriver(Grab.TargetComponent):Participant;
         if(TargetDriver!=Driver || !Particles.IsValidIndex(Grab.PointIndex))continue;
-        FVector Goal=ProposedLocation+Grab.ParticipantOffset;
+        FVector OldGoal=OldLocation+Grab.ParticipantOffset;
         if(Grab.TargetComponent)
         {
             const FTransform Transform=Grab.SocketName.IsNone()?Grab.TargetComponent->GetComponentTransform():Grab.TargetComponent->GetSocketTransform(Grab.SocketName);
-            Goal=Transform.TransformPosition(Grab.TargetOffset);
+            OldGoal=Transform.TransformPosition(Grab.TargetOffset)+ActualToOld;
         }
-        Targets.Add({Grab.PointIndex,Goal,true});
+        Targets.Add({Grab.PointIndex,OldGoal,true});
     }
     FVector Allowed=ProposedLocation;
     const double Rest=FMath::Max(1.f,CableLength)/(Particles.Num()-1);
@@ -190,7 +195,7 @@ FVector UCollisionCableComponent::ConstrainDriverLocation(AActor* Driver,const F
     };
     for(int32 Pass=0;Pass<3;++Pass)for(const FTarget& Target:Targets)
     {
-        const FVector OldGoal=Target.Goal-(ProposedLocation-OldLocation);
+        const FVector ProposedGoal=Target.OldGoal+(ProposedLocation-OldLocation);
         for(int32 Anchor=0;Anchor<Particles.Num();++Anchor)
         {
             if(Anchor==Target.Index || !IsWorldAnchor(Anchor))continue;
@@ -206,21 +211,21 @@ FVector UCollisionCableComponent::ConstrainDriverLocation(AActor* Driver,const F
                 {
                     if(!C.Component.IsValid()||C.Normal.IsNearlyZero())return false;
                     return FVector::DotProduct(Particles[Anchor].Position-C.Point,C.Normal)*
-                        FVector::DotProduct(Target.Goal-C.Point,C.Normal)<0;
+                        FVector::DotProduct(ProposedGoal-C.Point,C.Normal)<0;
                 };
                 if(PointLineContacts.IsValidIndex(I))Bend=NeedsBend(PointLineContacts[I]);
                 if(SegmentLineContacts.IsValidIndex(I))Bend|=NeedsBend(SegmentLineContacts[I]);
                 if(Bend){Used+=FVector::Distance(Pivot,Particles[I].Position);Pivot=Particles[I].Position;}
             }
             const double Available=Rest*FMath::Abs(Target.Index-Anchor)+FMath::Max(0.f,LengthSlackTolerance)-Used;
-            LimitGoal(OldGoal,Pivot,Available);
+            LimitGoal(Target.OldGoal,Pivot,Available);
         }
         if(Target.Grab)
         {
             // This radius follows the movable cable point, so two free ends do
             // not acquire an artificial world anchor. Extra pullers move the
             // point faster and therefore increase actual holder progress.
-            LimitGoal(OldGoal,Particles[Target.Index].Position,FMath::Max(0.f,GrabMovementAllowance));
+            LimitGoal(Target.OldGoal,Particles[Target.Index].Position,FMath::Max(0.f,GrabMovementAllowance));
         }
     }
     return Allowed;
@@ -245,7 +250,7 @@ void UCollisionCableComponent::ApplyAttachmentForces(float Dt)
     {
         const int32 I=Side?Particles.Num()-1:0,J=Side?I-1:1;
         if((Side?!bAttachEnd:!bAttachStart)||IsWorldAnchor(I))continue;
-        auto* Source=Side?GetAttachedComponent():this;
+        auto* Source=Side?GetAttachedComponent():GetStartAttachmentSource();
         auto* Body=Cast<UPrimitiveComponent>(Source);
         if(!Body || !Body->IsSimulatingPhysics())
         {

@@ -12,6 +12,8 @@ public class ColossalFizzCo : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[] { "NetCore", "Niagara", "Json" });
 		PublicDependencyModuleNames.Add("UniversalCrossplay");
+		PublicDependencyModuleNames.Add("AnimGraphRuntime");
+		PrivateDependencyModuleNames.Add("AnimationCore");
 
 		// Uncomment if you are using Slate UI
 		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });

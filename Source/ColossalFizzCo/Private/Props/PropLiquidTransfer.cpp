@@ -28,12 +28,12 @@ FGuid APropManager::BeginLiquidTransfer(int32 SourceID, int32 TargetID)
 		|| Source->EventData.ContentLevel <= 0 || Target->EventData.ContentLevel < 0
 		|| (Target->EventData.ContentLevel > 0 && Target->EventData.ContentID != Content->ContentID)
 		|| Target->EventData.CapSealed > 0 || Target->EventData.AttachedCapISID>0 || (!Target->EventData.bTemporarySealArmed && Target->EventData.TemporarySealUntil>WorldElapsedSeconds)
-		|| !UColaPricingLibrary::CanReuseBottle(Target->EventData.Strength, Target->EventData.bClean, 0.f)
+		|| !UColaPricingLibrary::CanReuseBottle(TargetDef->GetEffectiveStrength(*Target), Target->EventData.bClean, 0.f)
 		|| IsExpiredSupply(*Source, *Content, WorldElapsedSeconds) || !IsAssemblyCompatible(TargetRecord->ProductID, Content->ContentID, 0)) return FGuid();
 	// An interrupted same-content fill can resume without emptying the bottle or
 	// resetting its liquid age. The original cleanliness/strength rules still apply.
 	const bool Deforms = TargetDef->BottleMaterialType == EBottleMaterialType::Plastic || TargetDef->BottleMaterialType == EBottleMaterialType::HeavyMetal;
-	const float Capacity = TargetDef->MaxOverfillLevel * (Deforms ? FMath::Clamp(Target->EventData.Strength, 0.f, 1.f) : 1.f);
+	const float Capacity = TargetDef->MaxOverfillLevel * (Deforms ? FMath::Clamp(TargetDef->GetEffectiveStrength(*Target), 0.f, 1.f) : 1.f);
 	if (!FMath::IsFinite(Capacity) || Target->EventData.ContentLevel >= Capacity) return FGuid();
 	for (const auto& Pair : FillSessions) if (Pair.Value.TargetISID == TargetID || Pair.Value.SourceISID == TargetID || Pair.Value.TargetISID == SourceID) return FGuid();
 	if (ShopCheckout)
@@ -65,7 +65,7 @@ float APropManager::TransferLiquid(FGuid SessionID, float RequestedPortions)
 		|| (Target->EventData.ContentLevel > 0 && Target->EventData.ContentID != Session.ContentID) || Target->EventData.CapSealed > 0 || Target->EventData.AttachedCapISID>0 || (!Target->EventData.bTemporarySealArmed && Target->EventData.TemporarySealUntil>WorldElapsedSeconds)
 		|| !FMath::IsFinite(Source->EventData.ContentLevel) || !FMath::IsFinite(Target->EventData.ContentLevel)
 		|| !FMath::IsFinite(Source->ContinuousData.Temperature) || !FMath::IsFinite(Target->ContinuousData.Temperature)
-		|| Target->EventData.Strength <= 0.70f || !Target->EventData.bClean || IsExpiredSupply(*Source, *Content, WorldElapsedSeconds))
+		|| TargetDef->GetEffectiveStrength(*Target) <= 0.70f || !Target->EventData.bClean || IsExpiredSupply(*Source, *Content, WorldElapsedSeconds))
 	{
 		EndLiquidTransfer(SessionID); return 0;
 	}
@@ -77,7 +77,7 @@ float APropManager::TransferLiquid(FGuid SessionID, float RequestedPortions)
 	const int32 SourcePortions = SourceDef->ConsumableProfile.NumOfPortions, TargetPortions = TargetDef->ConsumableProfile.NumOfPortions;
 	if (SourcePortions <= 0 || TargetPortions <= 0) { EndLiquidTransfer(SessionID); return 0; }
 	const bool Deforms = TargetDef->BottleMaterialType == EBottleMaterialType::Plastic || TargetDef->BottleMaterialType == EBottleMaterialType::HeavyMetal;
-	const float Capacity = TargetDef->MaxOverfillLevel * (Deforms ? FMath::Clamp(Target->EventData.Strength, 0.0f, 1.0f) : 1.0f);
+	const float Capacity = TargetDef->MaxOverfillLevel * (Deforms ? FMath::Clamp(TargetDef->GetEffectiveStrength(*Target), 0.0f, 1.0f) : 1.0f);
 	const float Flow = TargetDef->FillSlowdownCurve ? TargetDef->FillSlowdownCurve->GetFloatValue(Target->EventData.ContentLevel) : 1.0f;
 	if (!FMath::IsFinite(Flow) || Flow <= 0) return 0;
 	const double Available = static_cast<double>(Source->EventData.ContentLevel) * SourcePortions;

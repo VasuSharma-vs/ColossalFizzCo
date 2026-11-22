@@ -168,6 +168,26 @@ void FPropPackedRuntimeData::SerializeExplicit(FArchive& Ar)
 // -----------------------------------------------------------------------------
 // FPropProductDefinition
 // -----------------------------------------------------------------------------
+bool FPropProductDefinition::UsesTemperatureStrengthDebuff() const
+{
+	return BottleMaterialType == EBottleMaterialType::Plastic && ConsumableProfile.NumOfPortions > 0
+		&& !bIsBottleCap && !bLiquidVisualOnly;
+}
+
+float FPropProductDefinition::GetTemperatureStrengthDebuff(float Temperature) const
+{
+	if (!UsesTemperatureStrengthDebuff() || !FMath::IsFinite(Temperature)) return 0.0f;
+
+	constexpr float MaxDebuff = 0.2f;
+	const float HeatRange = FMath::Max(1.0f, MaxTemperatureThreshold - HighTempDamageThreshold);
+	return MaxDebuff * FMath::Clamp((Temperature - HighTempDamageThreshold) / HeatRange, 0.0f, 1.0f);
+}
+
+float FPropProductDefinition::GetEffectiveStrength(const FPropInstanceUniqueData& Data) const
+{
+	return FMath::Max(0.0f, Data.EventData.Strength - GetTemperatureStrengthDebuff(Data.ContinuousData.Temperature));
+}
+
 FPropProductDefinition FPropProductDefinition::FromDataAsset(const UInteractablePropDataAsset* InAsset, int32 InProductID, int32 InStaticMeshID)
 {
 	FPropProductDefinition Def;
@@ -221,7 +241,7 @@ FPropProductDefinition FPropProductDefinition::FromDataAsset(const UInteractable
 		}
 
 		Def.ConsumableProfile.ConsumableType = InAsset->ConsumableType;
-		Def.ConsumableProfile.NumOfPortions = InAsset->NumOfPortions;
+		Def.ConsumableProfile.NumOfPortions = InAsset->GetConsumablePortions();
 		Def.ConsumableProfile.Price = InAsset->Price;
 		Def.ConsumableProfile.bDestroyWhenEmpty = true;
 
@@ -238,7 +258,7 @@ FPropProductDefinition FPropProductDefinition::FromDataAsset(const UInteractable
 
 		Def.InteractionProfile.bCanGrab = InAsset->bCanGrab;
 		Def.InteractionProfile.bCanUse = InAsset->bCanUse;
-		Def.InteractionProfile.bCanConsume = InAsset->bCanConsume;
+		Def.InteractionProfile.bCanConsume = InAsset->bCanConsume && !InAsset->bIsTemporaryPressureSeal;
 		Def.InteractionProfile.bCanThrow = InAsset->bCanThrow;
 		Def.InteractionProfile.bCanInspect = InAsset->bCanInspect;
 
@@ -250,13 +270,14 @@ FPropProductDefinition FPropProductDefinition::FromDataAsset(const UInteractable
 		Def.TasteProfile = InAsset->BuildTasteVector(false);
 		Def.ExpiredTasteProfile = InAsset->BuildTasteVector(true);
 
-		Def.RuntimeDefaults.RemainingPortions = InAsset->NumOfPortions;
+		Def.RuntimeDefaults.RemainingPortions = Def.ConsumableProfile.NumOfPortions;
 		Def.RuntimeDefaults.Temperature = InAsset->ConsumableTemperature;
 		Def.RuntimeDefaults.bIsGrabbable = InAsset->bCanGrab;
 
 		// Feature toggles & Zero-Copy UniqueData defaults
 		Def.bEnableContinuousUpdateData = InAsset->bEnableContinuousUpdateData || InAsset->bEnableTemperatureUpdate;
-		Def.bEnableInstanceUniqueData = InAsset->bEnableInstanceUniqueData || Def.bEnableContinuousUpdateData || InAsset->bHasExpiry || InAsset->NumOfPortions > 0;
+		Def.bEnableInstanceUniqueData = InAsset->bEnableInstanceUniqueData || Def.bEnableContinuousUpdateData || InAsset->bHasExpiry
+			|| Def.ConsumableProfile.NumOfPortions > 0 || InAsset->bIsTemporaryPressureSeal;
 		Def.bAllowUncappedFilledISMDemotion = InAsset->bAllowUncappedFilledISMDemotion;
 		Def.bPromoteISMOnContinuousTempFailure = InAsset->bPromoteISMOnContinuousTempFailure;
 		Def.bPersistBrokenHullAfterFracture = InAsset->bPersistBrokenHullAfterFracture;
@@ -321,7 +342,7 @@ FPropProductDefinition FPropProductDefinition::FromDataAsset(const UInteractable
 		Def.DefaultUniqueData.ContinuousData.Temperature = InAsset->ConsumableTemperature;
 		Def.DefaultUniqueData.ContinuousData.LastUpdatedTime = 0.0;
 		Def.DefaultUniqueData.EventData.CreationTime = 0.0;
-		Def.DefaultUniqueData.EventData.ContentLevel = (InAsset->NumOfPortions > 0) ? FMath::Clamp(InAsset->DefaultContentLevel, 0.0f, Def.MaxOverfillLevel) : 0.0f;
+		Def.DefaultUniqueData.EventData.ContentLevel = (Def.ConsumableProfile.NumOfPortions > 0) ? FMath::Clamp(InAsset->DefaultContentLevel, 0.0f, Def.MaxOverfillLevel) : 0.0f;
 		Def.DefaultUniqueData.EventData.ContentID = InAsset->InitialContentProduct.IsSet() ? InAsset->InitialContentProduct.PID : InAsset->DefaultContentID;
 		Def.DefaultUniqueData.EventData.Strength = Def.MaxStrength;
 		Def.DefaultUniqueData.EventData.CapSealed = FMath::Clamp(InAsset->DefaultCapSealed, 0.0f, 1.0f);
@@ -558,7 +579,14 @@ bool FPropEventSyncDelta::NetSerialize(FArchive& Ar, class UPackageMap* Map, boo
 	if (ExtendedDirtyMask & EPropExtendedEventMask::ContentCreationTime) Ar << ContentCreationTime;
 	if (ExtendedDirtyMask & EPropExtendedEventMask::AttachedCap) Ar << AttachedCapISID;
 	if (ExtendedDirtyMask & EPropExtendedEventMask::AttachedBottle) Ar << AttachedBottleISID;
-	if (ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal) { Ar << TemporarySealUntil; Ar << bTemporarySealUsed; Ar << bManualFillPressure; Ar << bTemporarySealArmed; }
+	if (ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal)
+	{
+		Ar << TemporarySealUntil;
+		Ar << TemporarySealDurationSeconds;
+		Ar << bTemporarySealUsed;
+		Ar << bManualFillPressure;
+		Ar << bTemporarySealArmed;
+	}
 	if (ExtendedDirtyMask & EPropExtendedEventMask::LinkedSupply) Ar << LinkedSupplyISID;
 	if (ExtendedDirtyMask & EPropExtendedEventMask::ManualEquipment)
 	{

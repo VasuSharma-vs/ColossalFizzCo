@@ -821,7 +821,7 @@ void UInteractableISMComponent::UpdateInstanceCustomDataDirect(
 	{
 		const int32 TotalPortions = (ProductDef && ProductDef->ConsumableProfile.NumOfPortions > 0)
 			? ProductDef->ConsumableProfile.NumOfPortions
-			: (DefaultDataAsset ? FMath::Max(1, DefaultDataAsset->NumOfPortions) : 4);
+			: (DefaultDataAsset ? FMath::Max(1, DefaultDataAsset->GetConsumablePortions()) : 4);
 		ContentLevelValue = FMath::Clamp(static_cast<float>(PackedInstanceData[InISMI].RemainingPortions) / static_cast<float>(TotalPortions), 0.0f, 1.0f);
 	}
 
@@ -884,7 +884,8 @@ void UInteractableISMComponent::UpdateInstanceCustomDataDirect(
 	if (UniqueData)
 	{
 		const float MaxStr = (ProductDef && ProductDef->MaxStrength > KINDA_SMALL_NUMBER) ? ProductDef->MaxStrength : 100.0f;
-		StrengthRatio = FMath::Clamp(UniqueData->EventData.Strength / MaxStr, 0.0f, 1.0f);
+		const float Strength = ProductDef ? ProductDef->GetEffectiveStrength(*UniqueData) : UniqueData->EventData.Strength;
+		StrengthRatio = FMath::Clamp(Strength / MaxStr, 0.0f, 1.0f);
 	}
 
 	SetCustomDataValue(InISMI, 0, ContentLevelValue, false);
@@ -1682,7 +1683,7 @@ void UInteractableISMComponent::SyncDatabaseWithInstanceCount()
 		{
 			if (DefaultDataAsset)
 			{
-				PackedInstanceData[i].RemainingPortions = DefaultDataAsset->NumOfPortions;
+				PackedInstanceData[i].RemainingPortions = DefaultDataAsset->GetConsumablePortions();
 				PackedInstanceData[i].Temperature = DefaultDataAsset->ConsumableTemperature;
 				PackedInstanceData[i].bIsGrabbable = true;
 			}
@@ -1713,9 +1714,9 @@ FInteractablePropData UInteractableISMComponent::CreatePropDataFromAsset(const U
 		NewData.TemperatureDopamineBonus = InAsset->TemperatureDopamineBonus;
 		NewData.ThermalExchangeRate = InAsset->ThermalExchangeRate;
 		NewData.Price = InAsset->Price;
-		NewData.NumOfPortions = InAsset->NumOfPortions;
-		NewData.RemainingPortions = InAsset->NumOfPortions;
-		NewData.QuantityLevel = 1.0f;
+		NewData.NumOfPortions = InAsset->GetConsumablePortions();
+		NewData.RemainingPortions = NewData.NumOfPortions;
+		NewData.QuantityLevel = InAsset->bIsTemporaryPressureSeal ? 0.0f : 1.0f;
 		NewData.bHasExpiry = InAsset->bHasExpiry;
 		NewData.ExpiryLifetimeMinutes = InAsset->ExpiryLifetimeMinutes;
 		NewData.SicknessLevel = InAsset->SicknessLevel;

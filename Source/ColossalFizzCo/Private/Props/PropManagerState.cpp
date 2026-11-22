@@ -1,6 +1,7 @@
 #include "Props/InteractablePropManager.h"
 #include "Props/PropDeliveryChannel.h"
 #include "Props/InteractableProp.h"
+#include "Props/ColaPropActor.h"
 #include "Components/ASMComponent.h"
 #include "Components/InteractableInstancedStaticMeshComponent.h"
 
@@ -93,7 +94,8 @@ namespace
 			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::ContentCreationTime) || (FMath::IsFinite(D.ContentCreationTime) && D.ContentCreationTime >= 0))
 			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::AttachedCap) || D.AttachedCapISID >= 0)
 			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::AttachedBottle) || D.AttachedBottleISID >= 0)
-			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal) || (FMath::IsFinite(D.TemporarySealUntil) && D.TemporarySealUntil >= 0))
+			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal) || (FMath::IsFinite(D.TemporarySealUntil) && D.TemporarySealUntil >= 0
+				&& FMath::IsFinite(D.TemporarySealDurationSeconds) && D.TemporarySealDurationSeconds >= 0.0f))
 			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::LinkedSupply) || D.LinkedSupplyISID >= 0)
 			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::ManualEquipment) || (D.ConnectedSupplyISIDs.Num()<=32
 				&& D.SelectedSupplyPort>=0 && D.SelectedSupplyPort<32 && D.TemporarySealCharges>=0
@@ -115,7 +117,14 @@ namespace
 		if (D.ExtendedDirtyMask & EPropExtendedEventMask::Clean) E.bClean = D.bClean;
 		if (D.ExtendedDirtyMask & EPropExtendedEventMask::AttachedCap) E.AttachedCapISID = D.AttachedCapISID;
 		if (D.ExtendedDirtyMask & EPropExtendedEventMask::AttachedBottle) E.AttachedBottleISID = D.AttachedBottleISID;
-		if (D.ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal) { E.TemporarySealUntil=D.TemporarySealUntil; E.bTemporarySealUsed=D.bTemporarySealUsed; E.bManualFillPressure=D.bManualFillPressure; E.bTemporarySealArmed=D.bTemporarySealArmed; }
+		if (D.ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal)
+		{
+			E.TemporarySealUntil = D.TemporarySealUntil;
+			E.TemporarySealDurationSeconds = D.TemporarySealDurationSeconds;
+			E.bTemporarySealUsed = D.bTemporarySealUsed;
+			E.bManualFillPressure = D.bManualFillPressure;
+			E.bTemporarySealArmed = D.bTemporarySealArmed;
+		}
 		if (D.ExtendedDirtyMask & EPropExtendedEventMask::LinkedSupply) E.LinkedSupplyISID=D.LinkedSupplyISID;
 		if (D.ExtendedDirtyMask & EPropExtendedEventMask::ManualEquipment)
 		{ E.ConnectedSupplyISIDs=D.ConnectedSupplyISIDs; E.SelectedSupplyPort=D.SelectedSupplyPort; E.TemporarySealCharges=D.TemporarySealCharges;
@@ -192,11 +201,15 @@ bool APropManager::ChangePropProductWithMode(int32 InISID, int32 NewProductID, E
 	FPropInstanceUniqueData Preserved = Existing ? *Existing : NewDef->DefaultUniqueData;
 	const uint32 NextEventSequence = Preserved.EventData.EventSequence + 1;
 	AActivePropActor* Reserved = nullptr;
-	FISIDRuntimeIndex* Before = FindISIDData(InISID);
-	if (Before->Representation == EPropRepresentation::ASM && ASMComponent)
+	const FISIDRuntimeIndex* Before = FindISIDData(InISID);
+	const bool bHasASM = Before->Representation == EPropRepresentation::ASM && ASMComponent;
+	const auto* Live = bHasASM ? GetActiveActorFromISID(InISID) : nullptr;
+	// A seated bottle keeps its live actor and cradle binding through product changes.
+	// The new product's actor class can be used on the next promotion from the pool.
+	const bool bUpdateActorClass = bHasASM && !(Live && Live->IsA<AColaPropActor>() && Live->IsSeatedInFiller());
+	if (bUpdateActorClass)
 	{
 		const TSubclassOf<AActivePropActor> Desired = ASMComponent->GetEffectiveActivePropActorClass(NewProductID);
-		AActivePropActor* Live = Before->ActiveActor.Get();
 		if (!Live || Live->GetClass() != (Desired ? Desired.Get() : AActivePropActor::StaticClass()))
 		{
 			Reserved = ASMComponent->AcquireActiveActor(NewProductID);
@@ -218,12 +231,13 @@ bool APropManager::ChangePropProductWithMode(int32 InISID, int32 NewProductID, E
 		Preserved.EventData.CapType = 0;
 		Preserved.EventData.CapSealed = 0;
 		Preserved.EventData.TemporarySealUntil=0; Preserved.EventData.bTemporarySealUsed=false; Preserved.EventData.bTemporarySealArmed=false; Preserved.EventData.bManualFillPressure=false;
+		Preserved.EventData.TemporarySealDurationSeconds = 0.0f;
 	}
 	Preserved.EventData.EventSequence = NextEventSequence;
 	if (NewDef->bEnableInstanceUniqueData) UniqueDataByISID.Add(InISID, Preserved);
 	else UniqueDataByISID.Remove(InISID);
 	FISIDRuntimeIndex* Record = FindISIDData(InISID);
-	if (Record->Representation == EPropRepresentation::ASM && ASMComponent && !ASMComponent->SwapActiveActorClass(*Record, NewDef, Reserved)) return false;
+	if (bUpdateActorClass && !ASMComponent->SwapActiveActorClass(*Record, NewDef, Reserved)) return false;
 	Record->LastDiscreteEventTime = WorldElapsedSeconds;
 	RefreshUniqueRepresentation(InISID);
 	MarkInstanceDirty(InISID, EPropDirtyFlags::RuntimeData | EPropDirtyFlags::Representation);

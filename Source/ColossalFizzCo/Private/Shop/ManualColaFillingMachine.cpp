@@ -9,9 +9,8 @@
 #include "Props/ColaPropActor.h"
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
-#include "Components/SphereComponent.h"
-#include "Components/ArrowComponent.h"
-#include "Components/ResourceTransferEndpointComponent.h"
+#include "Components/StaticMeshPhysicsSimulationComponent.h"
+#include "Components/HoseSocketComponent.h"
 #include "Components/HoseTransferComponent.h"
 #include "Resources/HoseCableActor.h"
 #include "Engine/StaticMesh.h"
@@ -21,6 +20,7 @@
 AManualColaFillingMachine::AManualColaFillingMachine()
 {
 	bAutoConvertToISMIfAtRest=false; State=EPropState::Unsettled;
+	PhysicsSimComponent->bUnsettleOnHit=false;
 	bReplicates=true; bAlwaysRelevant=true; SetReplicateMovement(true); PrimaryActorTick.bStartWithTickEnabled=true;
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube.Cube"));
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cylinder(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
@@ -113,7 +113,12 @@ void AManualColaFillingMachine::RefreshHosePortLayout()
 	HosePortTransforms.SetNum(SupportedContentCount);
 	HosePortContentIDs.SetNum(SupportedContentCount);
 	for (int32 I=PreviousCount; I<SupportedContentCount; ++I)
-		HosePortTransforms[I]=FTransform(FRotator::ZeroRotator,FVector(52,(I%4)*30.f-45.f,75+(I/4)*30.f));
+		HosePortTransforms[I]=GetDefaultHosePortTransform(I);
+}
+
+FTransform AManualColaFillingMachine::GetDefaultHosePortTransform(int32 Index) const
+{
+	return FTransform(FRotator::ZeroRotator,FVector(52,(Index%4)*30.f-45.f,75+(Index/4)*30.f));
 }
 #if WITH_EDITOR
 void AManualColaFillingMachine::PostEditChangeProperty(FPropertyChangedEvent& Event)
@@ -127,53 +132,89 @@ void AManualColaFillingMachine::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
 	if (CradlePivot) CradlePivot->SetRelativeRotation(FRotator(FMath::Lerp(RestCradlePitch,FillingCradlePitch,CradleAlpha),0,0));
-	RefreshHosePortLayout();
-	for (USphereComponent* Component:HosePorts) if (IsValid(Component))
-	{
-		TArray<USceneComponent*> PortChildren; Component->GetChildrenComponents(false,PortChildren);
-		for (auto* Child:PortChildren) if (Child->GetOwner()==this) Child->DestroyComponent();
-		Component->DestroyComponent();
-	}
-	for (UStaticMeshComponent* Component:SupplyPipes) if (IsValid(Component)) Component->DestroyComponent();
-	HosePorts.Reset(); ReceivingHosePorts.Reset(); SupplyPipes.Reset();
-	ConnectedNozzles.SetNum(SupportedContentCount);
-	for (int32 I=0; I<SupportedContentCount; ++I)
-	{
-		auto* Port=NewObject<USphereComponent>(this,*FString::Printf(TEXT("HosePort_%02d"),I+1),RF_Transactional);
-		Port->CreationMethod=EComponentCreationMethod::UserConstructionScript;
-		Port->SetupAttachment(HoseConnections); Port->SetRelativeTransform(HosePortTransforms[I]);
-		Port->SetSphereRadius(FMath::Max(2.f,HosePortRadius)); Port->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-		Port->SetCollisionResponseToAllChannels(ECR_Ignore); Port->SetCollisionResponseToChannel(HosePortTraceChannel,ECR_Block);
-		Port->SetGenerateOverlapEvents(false); Port->SetCanEverAffectNavigation(false); Port->SetHiddenInGame(true);
-		Port->ShapeColor=FColor(49,213,179); Port->ComponentTags.Add(TEXT("ManualFillingHosePort"));
-		Port->SetNetAddressable(); Port->RegisterComponent(); HosePorts.Add(Port);
-		auto* Receiver=NewObject<UResourceTransferEndpointComponent>(this,*FString::Printf(TEXT("ReceivingHosePort_%02d"),I+1),RF_Transactional);
-		Receiver->CreationMethod=EComponentCreationMethod::UserConstructionScript; Receiver->SetupAttachment(Port);
-		ConfigureReceivingHosePort(Receiver); Receiver->SetNetAddressable(); Receiver->RegisterComponent(); ReceivingHosePorts.Add(Receiver);
-		auto* Arrow=NewObject<UArrowComponent>(this,*FString::Printf(TEXT("HoseDirection_%02d"),I+1),RF_Transactional);
-		Arrow->CreationMethod=EComponentCreationMethod::UserConstructionScript; Arrow->SetupAttachment(Port);
-		Arrow->ArrowColor=FColor(238,173,76); Arrow->ArrowSize=.4f; Arrow->SetHiddenInGame(true); Arrow->RegisterComponent();
-	}
+	RebuildHoseSockets();
 	Pipe->SetVisibility(false);
+}
+
+void AManualColaFillingMachine::RebuildHoseSockets()
+{
+	static const FName GeneratedTag(TEXT("GeneratedManualFillingHoseSocket"));
+	static const FName LegacyPortTag(TEXT("ManualFillingHosePort"));
+	RefreshHosePortLayout();
+	TInlineComponentArray<USceneComponent*> Components(this);
+	TArray<UHoseSocketComponent*> Authored;
+	for (USceneComponent* Component : Components)
+	{
+		if (!IsValid(Component)) continue;
+		const FString Name = Component->GetName();
+		if (Component->CreationMethod == EComponentCreationMethod::UserConstructionScript
+			&& (Component->ComponentHasTag(GeneratedTag) || Component->ComponentHasTag(LegacyPortTag)
+				|| Name.StartsWith(TEXT("ReceivingHosePort_")) || Name.StartsWith(TEXT("HoseDirection_"))))
+		{
+			Component->DestroyComponent();
+			continue;
+		}
+		if (auto* Socket = Cast<UHoseSocketComponent>(Component); Socket && Socket->GetAttachParent() == HoseConnections)
+			Authored.Add(Socket);
+	}
+	Authored.Sort([](const UHoseSocketComponent& A, const UHoseSocketComponent& B) { return A.GetFName().LexicalLess(B.GetFName()); });
+	HoseSockets.Reset(SupportedContentCount);
+	ConnectedNozzles.SetNum(SupportedContentCount);
+	for (int32 Index = 0; Index < SupportedContentCount; ++Index)
+	{
+		const bool bGenerated = !Authored.IsValidIndex(Index);
+		auto* Socket = bGenerated ? NewObject<UHoseSocketComponent>(this, *FString::Printf(TEXT("GeneratedHoseSocket_%02d"), Index+1),
+			RF_Transactional | RF_Transient) : Authored[Index];
+		if (bGenerated)
+		{
+			Socket->CreationMethod = EComponentCreationMethod::UserConstructionScript;
+			Socket->ComponentTags.Add(GeneratedTag);
+			Socket->SetupAttachment(HoseConnections);
+			FTransform Mount = HosePortTransforms[Index];
+			Mount.SetRotation(Mount.GetRotation() * FQuat(FVector::RightVector, UE_HALF_PI));
+			Socket->SetRelativeTransform(Mount);
+			Socket->TraceBoxExtent = FVector(FMath::Max(2.f, HosePortRadius));
+		}
+		ConfigureReceivingHosePort(*Socket, bGenerated);
+		Socket->SetNetAddressable();
+		HoseSockets.Add(Socket);
+		if (!Socket->IsRegistered()) Socket->RegisterComponent();
+		if (auto* Volume = Socket->GetTraceVolume())
+		{
+			Volume->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+			if (bGenerated && HosePortTraceChannel != ECC_Visibility)
+			{
+				Volume->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
+				Volume->SetCollisionResponseToChannel(HosePortTraceChannel, ECR_Block);
+			}
+		}
+	}
+	for (int32 Index = SupportedContentCount; Index < Authored.Num(); ++Index)
+		if (auto* Volume = Authored[Index]->GetTraceVolume()) Volume->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 }
 
 bool AManualColaFillingMachine::GetHosePortFromHit(const FHitResult& Hit,int32& PortIndex,FTransform& ConnectionTransform) const
 {
 	PortIndex=INDEX_NONE; ConnectionTransform=FTransform::Identity;
 	if (Hit.GetActor()!=this) return false;
-	for (int32 I=0; I<HosePorts.Num(); ++I) if (HosePorts[I]==Hit.GetComponent())
-	{ PortIndex=I; ConnectionTransform=HosePorts[I]->GetComponentTransform(); return true; }
-	return false;
+	const auto* Socket = UHoseSocketComponent::GetSocketFromHitComponent(Hit.GetComponent());
+	if (!Socket) return false;
+	PortIndex = HoseSockets.IndexOfByKey(Socket);
+	if (PortIndex == INDEX_NONE) return false;
+	ConnectionTransform = Socket->GetComponentTransform();
+	return true;
 }
 FTransform AManualColaFillingMachine::GetHosePortTransform(int32 PortIndex) const
 {
-	return HosePorts.IsValidIndex(PortIndex) && HosePorts[PortIndex] ? HosePorts[PortIndex]->GetComponentTransform() : GetActorTransform();
+	const auto* Socket = GetHoseSocket(PortIndex);
+	return Socket ? Socket->GetComponentTransform() : GetActorTransform();
 }
 bool AManualColaFillingMachine::AttachSupplyNozzle(const FHitResult& Hit,USceneComponent* Nozzle,int32 SourceISID,AActor* Player)
 {
 	int32 Index; FTransform Mount;
 	if (!HasAuthority() || !IsValid(Nozzle) || Nozzle->GetWorld()!=GetWorld() || !GetHosePortFromHit(Hit,Index,Mount)) return false;
-	if (const auto* Port=GetReceivingHosePort(Index); Port && Port->GetReceivingHose()) return false;
+	auto* Port = GetHoseSocket(Index);
+	if (!Port || Port->ConnectedHose || Port->GetReceivingHose() || Port->bIsBroken) return false;
 	auto* Registry=APropManager::Get(this); auto* Source=Registry ? Registry->GetActiveActorFromISID(SourceISID) : nullptr;
 	if (Source && HosePortContentIDs.IsValidIndex(Index) && HosePortContentIDs[Index]>0
 		&& Source->LocalUniqueData.EventData.ContentID!=HosePortContentIDs[Index]) return false;
@@ -185,8 +226,8 @@ bool AManualColaFillingMachine::AttachSupplyNozzle(const FHitResult& Hit,USceneC
 	for (int32 Other=0;Other<ConnectedNozzles.Num();++Other) if (Other!=Index && ConnectedNozzles[Other]==Nozzle) return false;
 	if (ConnectedNozzles.Num()!=SupportedContentCount) ConnectedNozzles.SetNum(SupportedContentCount);
 	bool Attached=false;
-	if (auto* Container=Cast<AColaSupplyContainer>(Source)) Attached=Container->MountHose(HosePorts[Index]);
-	else Attached=Nozzle->AttachToComponent(HosePorts[Index],FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+	if (auto* Container=Cast<AColaSupplyContainer>(Source)) Attached=Container->MountHose(Port);
+	else Attached=Nozzle->AttachToComponent(Port,FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 	if (!Attached) return false;
 	ConnectedNozzles[Index]=Nozzle;
 	if (Production->ExecuteForPlayer(Production->View.SessionID,EShopProductionAction::ConnectSupply,Index,SourceISID,Player)!=EShopCheckoutResult::Success)
@@ -202,10 +243,11 @@ void AManualColaFillingMachine::GetLifetimeReplicatedProps(TArray<FLifetimePrope
 bool AManualColaFillingMachine::HasSupplyNozzle(int32 PortIndex,int32 SourceISID) const
 {
 	if (SourceISID<=0) return GetSupplyHoseForPort(PortIndex)!=nullptr;
-	if (!ConnectedNozzles.IsValidIndex(PortIndex) || !IsValid(ConnectedNozzles[PortIndex]) || !HosePorts.IsValidIndex(PortIndex)) return false;
+	const auto* Socket=GetHoseSocket(PortIndex);
+	if (!ConnectedNozzles.IsValidIndex(PortIndex) || !IsValid(ConnectedNozzles[PortIndex]) || !Socket || Socket->bIsBroken) return false;
 	const auto* Nozzle=ConnectedNozzles[PortIndex].Get(); const auto* Registry=APropManager::Get(this);
 	const auto* Source=Registry ? Registry->GetActiveActorFromISID(SourceISID) : nullptr;
-	return Source && Nozzle->GetAttachParent()==HosePorts[PortIndex] && (Nozzle->GetOwner()==Source || Nozzle->GetOwner()->GetOwner()==Source);
+	return Source && Nozzle->GetAttachParent()==Socket && (Nozzle->GetOwner()==Source || Nozzle->GetOwner()->GetOwner()==Source);
 }
 void AManualColaFillingMachine::RestoreSupplyNozzles()
 {
@@ -214,27 +256,25 @@ void AManualColaFillingMachine::RestoreSupplyNozzles()
 	if (!Equipment) return;
 	const auto Connections=Equipment->EventData.ConnectedSupplyISIDs;
 	ConnectedNozzles.SetNum(SupportedContentCount);
-	for (int32 I=0;I<Connections.Num() && I<HosePorts.Num();++I)
+	for (int32 I=0;I<Connections.Num() && I<HoseSockets.Num();++I)
 	{
-		if (Connections[I]<=0 || HasSupplyNozzle(I,Connections[I])) continue;
+		auto* Socket = GetHoseSocket(I);
+		if (!Socket || Socket->bIsBroken || Socket->ConnectedHose || Connections[I]<=0 || HasSupplyNozzle(I,Connections[I])) continue;
 		const auto* SourceData=Registry->FindUniqueData(Connections[I]);
 		if (!SourceData || SourceData->EventData.StoredInMachineISID!=ISID) continue;
 		AActivePropActor* Active=Registry->GetActiveActorFromISID(Connections[I]);
 		if (!Active) Registry->PromoteInstanceToASM(Connections[I],EPropActivationReason::LoadRestore,false,Active);
-		if (auto* Container=Cast<AColaSupplyContainer>(Active); Container && Container->MountHose(HosePorts[I])) ConnectedNozzles[I]=Container->SupplyNozzle;
+		if (auto* Container=Cast<AColaSupplyContainer>(Active); Container && Container->MountHose(Socket)) ConnectedNozzles[I]=Container->SupplyNozzle;
 	}
 }
 void AManualColaFillingMachine::DisconnectSupplyNozzle(int32 PortIndex)
 {
 	if (!HasAuthority() || !ConnectedNozzles.IsValidIndex(PortIndex)) return;
-	if (auto* Port=GetReceivingHosePort(PortIndex))
+	if (auto* Port=GetHoseSocket(PortIndex))
 	{
 		Port->SetFlowRequested(false);
-		if (auto* Hose=Port->GetReceivingHose())
-		{
-			if (auto* CableActor=Cast<AHoseCableActor>(Hose->GetOwner()); CableActor && CableActor->EndPort==Port) CableActor->DisconnectEnd();
-			else Hose->DisconnectEndpoints();
-		}
+		if (!Port->DetachHose())
+			if (auto* Hose=Port->GetReceivingHose()) Hose->DisconnectEndpoints();
 	}
 	auto* Nozzle=ConnectedNozzles[PortIndex].Get(); ConnectedNozzles[PortIndex]=nullptr;
 	if (!IsValid(Nozzle)) return;
@@ -245,6 +285,9 @@ void AManualColaFillingMachine::DisconnectSupplyNozzle(int32 PortIndex)
 
 void AManualColaFillingMachine::BeginPlay()
 {
+	ContentDialRestRotation = ContentSelectorDial->GetRelativeRotation().Quaternion();
+	if (HoseSockets.Num() != SupportedContentCount || HoseSockets.ContainsByPredicate([this](const auto& Socket)
+		{ return !IsValid(Socket) || Socket->GetOwner() != this || !Socket->IsRegistered(); })) RebuildHoseSockets();
 	Super::BeginPlay();
 	if (bIsActive) SetActorTickEnabled(true);
 }
@@ -257,7 +300,12 @@ void AManualColaFillingMachine::OnApplySharedDefinitions(const FPropProductDefin
 void AManualColaFillingMachine::ResetTransientPoolState()
 {
 	if (Production) Production->ResetEquipmentSession();
-	for (UResourceTransferEndpointComponent* Port:ReceivingHosePorts) if (Port) { Port->SetFlowRequested(false); Port->ClearManagedContentBinding(); }
+	for (UHoseSocketComponent* Port : HoseSockets) if (Port)
+	{
+		Port->ClearManagedContentBinding();
+		Port->RepairSocket();
+		Port->SetFlowRequested(false);
+	}
 	CradleAlpha=0; DisplayedCapProgress=0; if (CradlePivot) CradlePivot->SetRelativeRotation(FRotator(RestCradlePitch,0,0));
 	BoundMachineISID=0; Super::ResetTransientPoolState();
 }
@@ -272,21 +320,31 @@ void AManualColaFillingMachine::UpdateCradleMotion(float Dt)
 	if (!Production || !CradlePivot || !BottleHolderPoint || !FMath::IsFinite(Dt) || Dt<=0) return;
 	auto* Manager=APropManager::Get(this);
 	auto* Bottle=Manager ? Cast<AColaPropActor>(Manager->GetActiveActorFromISID(Production->View.SeatedBottleISID)) : nullptr;
-	const bool OwnsBottle=Bottle && Bottle->IsSeatedInFiller() && !Bottle->bIsHeld && !Bottle->bIsInMotion
+	const bool OwnsBottle=IsValid(Bottle) && Bottle->bIsActive && Bottle->ISID==Production->View.SeatedBottleISID
+		&& Bottle->IsSeatedInFiller() && !Bottle->bIsHeld && !Bottle->bIsInMotion
 		&& (!Bottle->RocketComp || !Bottle->RocketComp->IsPoweredFlight());
+	const bool bAuthority=HasAuthority() && GetNetMode()!=NM_Client;
 	// Check before moving the holder, so external grabs/teleports are not pulled back into the machine.
-	const bool WasAligned=OwnsBottle && Production->IsBottleAligned(Bottle->ISID);
+	const bool WasAligned=bAuthority && OwnsBottle && Production->IsBottleAligned(Bottle->ISID);
 	const FTransform PreviousHolderTransform=BottleHolderPoint->GetComponentTransform();
 	const bool WasReady=IsCradleInFillPosition();
-	if (HasAuthority())
+	if (bAuthority)
 	{
 		const float Target=Production->IsLeverHoldingBottle(Production->View.SeatedBottleISID) ? 1.f : 0.f;
 		CradleAlpha=FMath::FInterpConstantTo(CradleAlpha,Target,Dt,1.f/FMath::Max(.05f,CradleTravelSeconds));
 	}
 	CradlePivot->SetRelativeRotation(FRotator(FMath::Lerp(RestCradlePitch,FillingCradlePitch,CradleAlpha),0,0));
-	if (HasAuthority() && WasAligned && !PreviousHolderTransform.Equals(BottleHolderPoint->GetComponentTransform()))
+	if (WasAligned && !PreviousHolderTransform.Equals(BottleHolderPoint->GetComponentTransform()))
 		Manager->InitializeInstanceTransform(Bottle->ISID,FTransform(BottleHolderPoint->GetComponentQuat(),BottleHolderPoint->GetComponentLocation(),Bottle->GetActorScale3D()));
-	if (Lever) Lever->SetRelativeRotation(FRotator(0,0,FMath::Lerp(35.f,75.f,CradleAlpha)));
+	else if (GetNetMode()==NM_Client && OwnsBottle)
+	{
+		// The inventory snapshot, active prop and cradle can arrive in different packets.
+		const FTransform Pose(BottleHolderPoint->GetComponentQuat(),BottleHolderPoint->GetComponentLocation(),Bottle->GetActorScale3D());
+		if (!Bottle->GetActorTransform().Equals(Pose,.05f))
+			Bottle->SetActorTransform(Pose,false,nullptr,ETeleportType::TeleportPhysics);
+	}
+	if (!bAuthority && Manager) Production->RefreshClientSupplyPlacement(*Manager);
+	UpdateLeverVisual(Dt);
 	if (CappingHead)
 	{
 		const bool HasCap=Bottle && Bottle->LocalUniqueData.EventData.AttachedCapISID>0;
@@ -294,8 +352,14 @@ void AManualColaFillingMachine::UpdateCradleMotion(float Dt)
 		DisplayedCapProgress=FMath::FInterpConstantTo(DisplayedCapProgress,HasCap ? Bottle->GetCapSealed() : 0.f,Dt,2.f);
 		CappingHead->SetRelativeRotation(FRotator(0,DisplayedCapProgress*CapDisplayTurns,0));
 	}
-	if (HasAuthority() && !WasReady && Production->View.bLeverHeld && IsCradleInFillPosition()) Production->UpdateManualEquipment();
+	if (bAuthority && !WasReady && Production->View.bLeverHeld && IsCradleInFillPosition()) Production->UpdateManualEquipment();
 }
+
+void AManualColaFillingMachine::UpdateLeverVisual(float DeltaSeconds)
+{
+	if (Lever) Lever->SetRelativeRotation(FRotator(0,0,FMath::Lerp(35.f,75.f,CradleAlpha)));
+}
+
 void AManualColaFillingMachine::Tick(float Dt)
 {
 	Super::Tick(Dt);
@@ -308,12 +372,10 @@ void AManualColaFillingMachine::Tick(float Dt)
 	{
 		if (auto* Manager=APropManager::Get(this); Manager && Manager->PropManagerReady && GetOwner()!=Manager)
 		{
-			// Placed non-resting props are registered as pool actors, but do not
-			// receive a logical inventory ID until converted. Reuse that existing
-			// conversion once, then promote the same identity as working equipment.
+			// Register the placed stand as working equipment at its authored pose.
 			const int32 ID=Manager->ConvertPlacedActorToISM(this,true);
 			AActivePropActor* Equipment=nullptr;
-			if (ID>0) Manager->PromoteInstanceToASM(ID,EPropActivationReason::Interaction,false,Equipment);
+			if (ID>0) Manager->PromoteInstanceToASM(ID,EPropActivationReason::LevelPlacement,false,Equipment);
 			return;
 		}
 	}
@@ -321,7 +383,7 @@ void AManualColaFillingMachine::Tick(float Dt)
 	// A delivery callback can stop flow while the hose transaction is still guarded.
 	// Park that receiver on the next frame so replacing/removing the bottle keeps the hose connected.
 	if (HasAuthority()) if (auto* Registry=APropManager::Get(this))
-		for (UResourceTransferEndpointComponent* Port:ReceivingHosePorts)
+		for (UHoseSocketComponent* Port:HoseSockets)
 			if (Port && Port->IsManagedReceivingProxy() && !Port->bRequestsFlow && Port->GetManagedContentISID()>0)
 				Port->ConfigureManagedReceivingProxy(Registry,0,Port->ResourceID);
 	for (int32 Side:{-1,1})
@@ -331,8 +393,8 @@ void AManualColaFillingMachine::Tick(float Dt)
 			Location.X=FMath::FInterpTo(float(Location.X),Side*(Production->View.bLeverHeld ? 6.f : 14.f),Dt,12.f);
 			Jaw->SetRelativeLocation(Location);
 		}
-	if (ContentSelectorDial) ContentSelectorDial->SetRelativeRotation(FRotator(0,0,90).Quaternion()
-		* FQuat(FVector::UpVector,2.f*PI*Production->View.SelectedContentPort/FMath::Max(1,SupportedContentCount)));
+	if (ContentSelectorDial) ContentSelectorDial->SetRelativeRotation(ContentDialRestRotation
+		* FQuat(FVector::UpVector, 2.f * PI * Production->View.SelectedContentPort / Production->GetSupportedContentCount()));
 	auto* Manager=APropManager::Get(this);
 	for (int32 I=0; I<SupplyPipes.Num(); ++I)
 	{

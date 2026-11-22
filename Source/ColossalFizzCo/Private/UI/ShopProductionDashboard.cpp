@@ -17,7 +17,7 @@
 
 void UShopTerminalWidget::BuildProductionDashboard(UCanvasPanel* Canvas)
 {
-	const FLinearColor Cream(.91f,.93f,.87f), Muted(.48f,.64f,.66f), Mint(.23f,.85f,.65f), Gold(.94f,.7f,.36f);
+	const FLinearColor DashboardCream(.91f,.93f,.87f), DashboardMuted(.48f,.64f,.66f), Mint(.23f,.85f,.65f), Gold(.94f,.7f,.36f);
 	auto Label=[&](UVerticalBox* Parent,const FString& Value,int32 Size,FLinearColor Color,bool Bold=false)
 	{
 		auto* Text=WidgetTree->ConstructWidget<UTextBlock>(); Text->SetText(FText::FromString(Value)); Text->SetAutoWrapText(true);
@@ -36,42 +36,59 @@ void UShopTerminalWidget::BuildProductionDashboard(UCanvasPanel* Canvas)
 	if (!Manual)
 	{
 		auto* Store=Card(FVector2D(1,0),FVector2D(-18,18),FVector2D(340,650));
-		Label(Store,TEXT("COLOSSAL FIZZ CO."),10,Gold,true); Label(Store,TEXT("Supply depot"),22,Cream,true);
-		Summary=Label(Store,TEXT("Shop bank"),11,Muted);
+		Label(Store,TEXT("COLOSSAL FIZZ CO."),10,Gold,true); Label(Store,TEXT("Supply depot"),22,DashboardCream,true);
+		Summary=Label(Store,TEXT("Shop bank"),11,DashboardMuted);
 		auto* Scroll=WidgetTree->ConstructWidget<UScrollBox>(); Store->AddChildToVerticalBox(Scroll)->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
 		Body=WidgetTree->ConstructWidget<UVerticalBox>(); Scroll->AddChild(Body); ProductionSidebar=Body;
 		auto* CloseButton=WidgetTree->ConstructWidget<UShopTerminalButton>(); CloseButton->Configure(this,TEXT("ESC   Close depot")); CloseButton->bClose=true; Store->AddChild(CloseButton);
-		ResultText=Label(Store,TEXT("Purchases arrive at the delivery point."),10,Muted); return;
+		ResultText=Label(Store,TEXT("Purchases arrive at the delivery point."),10,DashboardMuted); return;
 	}
-	auto* Instrument=Card(FVector2D(0,0),FVector2D(18,18),FVector2D(330,310));
-	Label(Instrument,TEXT("COLOSSAL FIZZ CO.  /  MANUAL BOTTLING"),10,Gold,true);
-	ProductionStatus=Label(Instrument,TEXT("Ready for a bottle"),18,Cream,true);
-	Summary=Label(Instrument,TEXT("Connect a physical supply hose"),11,Muted);
+	auto* Instrument=Card(FVector2D(0,0),FVector2D(18,18),bWorldFillingDisplay ? FVector2D(304,248) : FVector2D(330,310));
+	Label(Instrument,bWorldFillingDisplay ? TEXT("BOTTLING") : TEXT("COLOSSAL FIZZ CO.  /  MANUAL BOTTLING"),10,Gold,true);
+	ProductionStatus=Label(Instrument,TEXT("Ready for a bottle"),18,DashboardCream,true);
+	if (!bWorldFillingDisplay) Summary=Label(Instrument,TEXT("Connect a physical supply hose"),11,DashboardMuted);
 	auto* Readings=WidgetTree->ConstructWidget<UHorizontalBox>(); Instrument->AddChild(Readings);
 	PressureGauge=WidgetTree->ConstructWidget<UManualFillingPressureGauge>();
-	auto* GaugeSize=WidgetTree->ConstructWidget<USizeBox>(); GaugeSize->SetWidthOverride(170); GaugeSize->SetHeightOverride(145); GaugeSize->SetContent(PressureGauge);
+	auto* GaugeSize=WidgetTree->ConstructWidget<USizeBox>(); GaugeSize->SetWidthOverride(bWorldFillingDisplay ? 129 : 170); GaugeSize->SetHeightOverride(bWorldFillingDisplay ? 124 : 145); GaugeSize->SetContent(PressureGauge);
 	Readings->AddChild(GaugeSize);
 	auto* Metrics=WidgetTree->ConstructWidget<UVerticalBox>(); auto* MetricSlot=Readings->AddChildToHorizontalBox(Metrics);
 	MetricSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill)); MetricSlot->SetVerticalAlignment(VAlign_Center);
-	FillReadout=Label(Metrics,TEXT("0% FULL"),14,Cream,true);
+	if (bWorldFillingDisplay) MetricSlot->SetPadding(FMargin(9,0,0,0));
+	FillReadout=Label(Metrics,TEXT("0% FULL"),14,DashboardCream,true);
 	auto Bar=[&](UProgressBar*& Result,FLinearColor Color)
 	{
 		auto* Height=WidgetTree->ConstructWidget<USizeBox>(); Height->SetHeightOverride(6);
-		Metrics->AddChildToVerticalBox(Height)->SetPadding(FMargin(0,7,0,12));
+		Metrics->AddChildToVerticalBox(Height)->SetPadding(bWorldFillingDisplay ? FMargin(0,3,0,7) : FMargin(0,7,0,12));
 		Result=WidgetTree->ConstructWidget<UProgressBar>(); Result->SetFillColorAndOpacity(Color); Height->SetContent(Result);
 		FProgressBarStyle Style; Style.SetBackgroundImage(FSlateRoundedBoxBrush(FLinearColor(.01f,.03f,.04f),3.f));
 		Style.SetFillImage(FSlateRoundedBoxBrush(FLinearColor::White,3.f)); Result->SetWidgetStyle(Style);
 	};
 	UProgressBar* Fill=nullptr; Bar(Fill,Mint); FillProgress=Fill;
-	SealReadout=Label(Metrics,TEXT("SEAL INACTIVE"),9,Muted,true);
+	if (bWorldFillingDisplay)
+	{
+		CapTightnessReadout=Label(Metrics,TEXT("CAP —"),11,DashboardCream,true);
+		UProgressBar* Cap=nullptr; Bar(Cap,FLinearColor(.48f,.76f,.97f)); CapTightnessProgress=Cap;
+	}
+	SealReadout=Label(Metrics,TEXT("SEAL INACTIVE"),9,DashboardMuted,true);
 	UProgressBar* Seal=nullptr; Bar(Seal,Gold); SealProgress=Seal;
-	ProductionHint=Label(Instrument,TEXT("Hold F to fill. Press X to stop flow, then keep holding until pressure is normal."),11,Muted);
+	ProductionHint=Label(Instrument,FString(),11,DashboardMuted);
+
+	if (bWorldFillingDisplay)
+	{
+		auto* Supply=Card(FVector2D(1,0),FVector2D(-18,18),FVector2D(268,182));
+		Label(Supply,TEXT("HOSE INPUT"),10,Gold,true);
+		Summary=Label(Supply,TEXT("Waiting for supply"),13,DashboardCream,true);
+		HoseReadout=Label(Supply,FString(),11,Mint,true);
+		Label(Supply,TEXT("E  Turn dial with lever released"),10,DashboardMuted);
+		SupplyTrayReadout=Label(Supply,TEXT("Caps 0 / 4    Seals 0 / 4"),11,DashboardMuted);
+		return;
+	}
 
 	auto* Controls=Card(FVector2D(0,1),FVector2D(18,-18),FVector2D(330,270));
 	Label(Controls,TEXT("BOTTLE CONTROLS"),10,Gold,true);
 	auto* WorkspaceScroll=WidgetTree->ConstructWidget<UScrollBox>(); Controls->AddChildToVerticalBox(WorkspaceScroll)->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
 	Body=WidgetTree->ConstructWidget<UVerticalBox>(); WorkspaceScroll->AddChild(Body);
-	Label(Controls,TEXT("F Hold   X Stop   V Resume   R Cap"),10,Muted);
+	Label(Controls,TEXT("F Hold   X Stop   V Resume   R Cap"),10,DashboardMuted);
 
 	auto* Ports=Card(FVector2D(1,0),FVector2D(-18,18),FVector2D(300,400));
 	Label(Ports,TEXT("CONTENT & HOSES"),10,Gold,true);
@@ -81,8 +98,8 @@ void UShopTerminalWidget::BuildProductionDashboard(UCanvasPanel* Canvas)
 
 	auto* Trays=Card(FVector2D(1,1),FVector2D(-18,-18),FVector2D(300,166));
 	Label(Trays,TEXT("PHYSICAL SUPPLY TRAYS"),10,Gold,true);
-	SupplyTrayReadout=Label(Trays,TEXT("Caps 0 / 4\nSeals 0 / 4"),16,Cream,true);
-	ResultText=Label(Trays,TEXT("Drop supplies into the trays.\nBuy refills at the supply depot."),10,Muted);
+	SupplyTrayReadout=Label(Trays,TEXT("Caps 0 / 4\nSeals 0 / 4"),16,DashboardCream,true);
+	ResultText=Label(Trays,TEXT("Drop supplies into the trays.\nBuy refills at the supply depot."),10,DashboardMuted);
 }
 
 UTextBlock* UShopTerminalWidget::AddSection(const FString& Title,const FString& Description,UVerticalBox* Target)

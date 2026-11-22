@@ -19,6 +19,10 @@ public:
     UFUNCTION(BlueprintCallable, Category="Cola|VFX")
     static bool AddStandaloneColorParameter(UNiagaraSystem* System);
 
+    /** Add the flow and pressure parameters used by the open tank outlet. */
+    UFUNCTION(BlueprintCallable, Category="Cola|VFX")
+    static bool AddOutletParameters(UNiagaraSystem* System);
+
     /** Remove the generated plume layers before rebuilding them in the same package. */
     UFUNCTION(BlueprintCallable, Category="Cola|VFX")
     static void ResetPlumeEmitters(UNiagaraSystem* System);

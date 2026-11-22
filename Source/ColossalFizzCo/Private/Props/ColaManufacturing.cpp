@@ -10,6 +10,7 @@ namespace
 		const auto& State=Bottle.LocalUniqueData.EventData;
 		FPropEventSyncDelta Delta; Delta.ISID=Bottle.ISID; Delta.ExtendedDirtyMask=EPropExtendedEventMask::TemporarySeal;
 		Delta.TemporarySealUntil=State.TemporarySealUntil; Delta.bTemporarySealUsed=State.bTemporarySealUsed;
+		Delta.TemporarySealDurationSeconds = State.TemporarySealDurationSeconds;
 		Delta.bTemporarySealArmed=State.bTemporarySealArmed; Delta.bManualFillPressure=State.bManualFillPressure;
 		return Delta;
 	}
@@ -79,15 +80,19 @@ bool AColaPropActor::CanApplyManufacturingSeal() const
 		&& !(RocketComp && RocketComp->IsPoweredFlight()) && FMath::IsFinite(TemporarySealDuration) && TemporarySealDuration>0;
 }
 
-bool AColaPropActor::BuildManufacturingSealDelta(FPropEventSyncDelta& OutDelta) const
+bool AColaPropActor::BuildManufacturingSealDelta(FPropEventSyncDelta& OutDelta, float DurationSeconds) const
 {
 	if (!HasAuthority() || GetNetMode()==NM_Client || !CanApplyManufacturingSeal()) return false;
+	if (DurationSeconds == 0.0f) DurationSeconds = TemporarySealDuration;
+	if (!FMath::IsFinite(DurationSeconds) || DurationSeconds <= 0.0f) return false;
+
 	OutDelta=ManufacturingState(*this);
 	OutDelta.bTemporarySealUsed=true;
 	OutDelta.bManualFillPressure=true;
+	OutDelta.TemporarySealDurationSeconds = DurationSeconds;
 	// An empty bottle may be prepared before the lever is touched. Once released, no subsequent lever press refreshes it.
 	OutDelta.bTemporarySealArmed=IsEmpty() || (ManualFillingStation.IsValid() && ManualFillingStation->IsLeverHoldingBottle(ISID));
-	OutDelta.TemporarySealUntil=OutDelta.bTemporarySealArmed ? 0.0 : PropManagerReference->WorldElapsedSeconds+TemporarySealDuration;
+	OutDelta.TemporarySealUntil=OutDelta.bTemporarySealArmed ? 0.0 : PropManagerReference->WorldElapsedSeconds+DurationSeconds;
 	return true;
 }
 
@@ -103,22 +108,30 @@ void AColaPropActor::NotifyManufacturingLeverReleased()
 	if (LocalUniqueData.EventData.bTemporarySealArmed)
 	{
 		auto Delta=ManufacturingState(*this); Delta.bTemporarySealArmed=false;
-		Delta.TemporarySealUntil=GetCapSealed()<1 ? PropManagerReference->WorldElapsedSeconds+FMath::Max(.1f,TemporarySealDuration) : 0;
+		Delta.TemporarySealDurationSeconds = GetCapSealed() < 1 ? FMath::Max(.1f, GetAppliedSealDuration()) : 0.0f;
+		Delta.TemporarySealUntil = Delta.TemporarySealDurationSeconds > 0.0f
+			? PropManagerReference->WorldElapsedSeconds + Delta.TemporarySealDurationSeconds : 0.0;
 		if (!PropManagerReference->SubmitInstanceEventUpdate(ISID,Delta)) return;
 	}
 	EvaluateManufacturingPressureFailure();
 }
 
+float AColaPropActor::GetAppliedSealDuration() const
+{
+	const float AppliedDuration = LocalUniqueData.EventData.TemporarySealDurationSeconds;
+	return AppliedDuration > 0.0f ? AppliedDuration : FMath::Max(0.0f, TemporarySealDuration);
+}
+
 float AColaPropActor::GetManufacturingSealSecondsRemaining() const
 {
 	if (!HasTemporaryManufacturingSeal()) return 0;
-	return LocalUniqueData.EventData.bTemporarySealArmed ? FMath::Max(0.f,TemporarySealDuration)
+	return LocalUniqueData.EventData.bTemporarySealArmed ? GetAppliedSealDuration()
 		: float(FMath::Max(0.,LocalUniqueData.EventData.TemporarySealUntil-PropManagerReference->WorldElapsedSeconds));
 }
 
 float AColaPropActor::GetManufacturingSealIntegrity() const
 {
-	return FMath::Clamp(GetManufacturingSealSecondsRemaining()/FMath::Max(.1f,TemporarySealDuration),0.f,1.f);
+	return FMath::Clamp(GetManufacturingSealSecondsRemaining()/FMath::Max(.1f,GetAppliedSealDuration()),0.f,1.f);
 }
 
 bool AColaPropActor::IsManufacturingSafeToRelease() const
@@ -162,6 +175,7 @@ bool AColaPropActor::CloseManufacturingCap(float Torque)
 	if (GetCapSealed()>=1 && (LocalUniqueData.EventData.bTemporarySealArmed || LocalUniqueData.EventData.TemporarySealUntil>0))
 	{
 		auto Delta=ManufacturingState(*this); Delta.bTemporarySealArmed=false; Delta.TemporarySealUntil=0;
+		Delta.TemporarySealDurationSeconds = 0.0f;
 		PropManagerReference->SubmitInstanceEventUpdate(ISID,Delta);
 	}
 	return true;
@@ -179,7 +193,7 @@ void AColaPropActor::UpdateManufacturingCapLeakage(float DeltaSeconds,bool bSuff
 
 bool AColaPropActor::EvaluateManufacturingPressureFailure(bool bOverfill)
 {
-	if (!HasAuthority() || GetNetMode()==NM_Client || !PropManagerReference || IsEmpty() || IsManufacturingFailureActive()
+	if (!HasAuthority() || GetNetMode()==NM_Client || IsCarriedForDrinking() || !PropManagerReference || IsEmpty() || IsManufacturingFailureActive()
 		|| AcceptedFailureType!=EContainmentFailureType::None || (RocketComp && RocketComp->IsPoweredFlight())) return false;
 	const bool Overfilled=bOverfill && GetContentLevel()>=FMath::Max(1.01f,ManufacturingOverfillFailureLevel);
 	const bool LeverHeld=ManualFillingStation.IsValid() && ManualFillingStation->IsLeverHoldingBottle(ISID);
@@ -194,7 +208,7 @@ bool AColaPropActor::EvaluateManufacturingPressureFailure(bool bOverfill)
 
 bool AColaPropActor::HandleManufacturingPressureFailure_Implementation(bool bTemporarySealFailure,bool bOverfill)
 {
-	if (!HasAuthority() || GetNetMode()==NM_Client) return false;
+	if (!HasAuthority() || GetNetMode()==NM_Client || IsCarriedForDrinking()) return false;
 	if (UsesPlasticPressure()) return StartPlasticPressureRelease(bTemporarySealFailure);
 	FContainmentFailureRequest Request; Request.FailureType=EContainmentFailureType::OverpressureBurst;
 	Request.FailureLocation=GetActorLocation(); Request.FailureDirection=GetActorUpVector();

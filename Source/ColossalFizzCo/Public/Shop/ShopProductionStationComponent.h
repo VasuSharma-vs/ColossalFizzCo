@@ -7,6 +7,8 @@
 class UBoxComponent;
 class USceneComponent;
 class UBottleFillingComponent;
+class APropManager;
+class AActivePropActor;
 
 UENUM(BlueprintType)
 enum class EShopProductionAction : uint8 { Fill, StopFilling, AttachCap, CloseCap, OpenCap, HoldCapRole, RotateCapRole, PressCap, TurnCap, LeaveCapRole, ConnectSupply, AlignBottle, HoldFillingLever, ReleaseFillingLever, ApplyTemporarySeal, SelectContentPort, DisconnectSupply, ResumeFilling };
@@ -101,6 +103,10 @@ public:
 	/** Legacy serialized threshold; AColaPropActor::ManufacturingOverfillFailureLevel owns failure admission. */
 	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Station|Manual Filling",meta=(ClampMin="1.01",ClampMax="2")) float OverfillFailureLevel=1.1f;
 	bool IsBottleAligned(int32 BottleISID) const;
+	bool CanSeatBottle(int32 BottleISID,const AActor* Carrier=nullptr) const;
+	bool SeatBottle(int32 BottleISID);
+	bool CanLoadCap(int32 CapISID,const AActor* Carrier) const;
+	bool CanLoadSeal(int32 SealISID,const AActor* Carrier) const;
 	bool IsBottleReadyForFilling(int32 BottleISID) const;
 	void UpdateManualEquipment();
 	void ResetEquipmentSession();
@@ -109,7 +115,8 @@ public:
 	void EndManualLever();
 	bool UseTemporarySeal(int32 BottleISID);
 	int32 GetSupportedContentCount() const;
-	void RefreshSupplyTrays();
+	void RefreshSupplyTrays(int32 PreferredCapISID=0,int32 PreferredSealISID=0);
+	void RefreshClientSupplyPlacement(APropManager& Manager);
 	void ReleaseStoredSupply(int32 ISID,bool bWakePhysics=true);
 	void HandleManualOverfill(int32 BottleISID);
 	EShopCheckoutResult ManualEquipmentAction(EShopProductionAction Action,int32 BottleISID,int32 OtherISID,AActor* Player);
@@ -129,6 +136,7 @@ public:
 	void UpdateManualCapping(float DeltaSeconds);
 	bool HasSufficientCapHold(int32 BottleISID) const;
 private:
+	friend class ASocketColaFillingMachine;
 	FTimerHandle RefreshTimer;
 	FGuid LiquidReleaseEpisode;
 	double LastManualUpdate=-1, LastHoldingPress=-1, LastRotationTurn=-1;
@@ -136,6 +144,11 @@ private:
 	float RequiredHoldingForce(int32 BottleISID) const;
 	bool OperatorInRange(const AActor* Player) const;
 	UFUNCTION() void OnRep_View();
+	void UpdateBottleInputTrace();
 	void UpdateSupplyTrayCollision();
+	void PlaceTraySupplies(APropManager& Manager,const TArray<int32>& Caps,const TArray<int32>& Seals);
+	FTransform GetTraySupplyPose(const AActivePropActor& Item, const UBoxComponent& Volume, int32 Index) const;
+	bool IsTraySupply(int32 ISID,bool bSeal,const AActor* Carrier=nullptr) const;
+	bool SupportsIncomingCap(int32 CapISID) const;
 	EShopCheckoutResult ManualCapAction(EShopProductionAction Action,int32 BottleISID,AActor* Player);
 };

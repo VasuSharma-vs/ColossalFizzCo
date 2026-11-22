@@ -174,6 +174,9 @@ bool UCollisionCableComponent::BeginPointGrab(AActor* Participant, int32 Index, 
         FVector::Distance(Participant->GetActorLocation(),Particles[Index].Position) > FMath::Max(1.f,MaxGrabDistance) ||
         FVector::Distance(Participant->GetActorLocation(),Target) > FMath::Max(1.f,MaxGrabDistance) ||
         (TargetComponent && TargetComponent->GetWorld()!=GetWorld())) return false;
+    if (ActiveGrabs.ContainsByPredicate([&](const FCableGrabState& Grab)
+        { return IsValid(Grab.Participant) && Grab.Participant != Participant && Grab.PointIndex == Index
+            && (Grab.Settings.bApproachingConnector || Settings.bApproachingConnector); })) return false;
     ActiveGrabs.RemoveAll([&](const auto& Grab) { return !IsValid(Grab.Participant) || Grab.Participant==Participant; });
     FCableGrabState Grab;
     Grab.Participant=Participant; Grab.PointIndex=Index; Grab.Target=Target; Grab.Settings=Settings;
@@ -229,15 +232,20 @@ void UCollisionCableComponent::GetDirectGrabVelocities(TArray<FVector>& Velociti
             const FTransform Transform=Grab.SocketName.IsNone()?Grab.TargetComponent->GetComponentTransform():Grab.TargetComponent->GetSocketTransform(Grab.SocketName);
             Target=Transform.TransformPosition(Grab.TargetOffset);
         }
-        const FVector Direction=(Target-Particles[Grab.PointIndex].Position).GetSafeNormal();
+        const FVector Offset = Target - Particles[Grab.PointIndex].Position;
+        const FVector Direction = Offset.GetSafeNormal();
+        const double Rate = Grab.Settings.bApproachingConnector
+            ? FMath::Min<double>(Grab.Settings.MovementRate, Offset.Size() * 18.)
+            : Grab.Settings.MovementRate;
         for (int32 I=0; I<Particles.Num(); ++I)
         {
             if (IsPinned(I)) continue;
             const double Distance=FMath::Abs(Arc[I]-Arc[Grab.PointIndex]);
             const double Influence=I==Grab.PointIndex?1.:Grab.Settings.InfluenceRadius>0?
                 FMath::Pow(FMath::Clamp(1.-Distance/Grab.Settings.InfluenceRadius,0.,1.),FMath::Max(.1f,Grab.Settings.FalloffExponent)):0.;
-            const double WeightScale=bEnablePointWeight?FMath::Min(1.,double(FMath::Max(.001f,GrabReferenceMassKg))/GetPointMass(I)):1.;
-            Velocities[I]+=Direction*(Grab.Settings.MovementRate*Influence*WeightScale);
+            const double WeightScale = bEnablePointWeight && !Grab.Settings.bApproachingConnector
+                ? FMath::Min(1., double(FMath::Max(.001f, GrabReferenceMassKg)) / GetPointMass(I)) : 1.;
+            Velocities[I] += Direction * (Rate * Influence * WeightScale);
         }
     }
 }
@@ -565,6 +573,7 @@ void UCollisionCableComponent::BuildCableRenderLocations(TArray<FVector>& Locati
         }
     }
     if (!Particles.IsEmpty()) Locations.Add(Particles.Last().Position);
+    FollowReplicatedHoseAttachments(Locations);
 }
 
 FMatrix UCollisionCableComponent::GetRenderMatrix() const

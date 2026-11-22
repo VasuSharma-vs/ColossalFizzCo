@@ -3,6 +3,7 @@
 #include "Components/ResourceTransferTypes.h"
 #include "Shop/ShopCheckoutComponent.h"
 #include "Curves/CurveFloat.h"
+#include <cmath>
 
 namespace HoseContent
 {
@@ -67,12 +68,12 @@ float APropManager::DeliverHoseContent(FHoseResourceBuffer& Buffer,int32 TargetI
     if (!Record || !Data || !Product || !Content || Product->ConsumableProfile.NumOfPortions<=0
         || !FMath::IsFinite(Data->EventData.ContentLevel) || Data->EventData.ContentLevel<0 || !FMath::IsFinite(Data->ContinuousData.Temperature)
         || (Data->EventData.ContentLevel>0 && Data->EventData.ContentID!=Buffer.ResourceID)
-        || Data->EventData.Strength<=.7f || !Data->EventData.bClean || Data->EventData.CapSealed>0 || Data->EventData.AttachedCapISID>0
+        || Product->GetEffectiveStrength(*Data)<=.7f || !Data->EventData.bClean || Data->EventData.CapSealed>0 || Data->EventData.AttachedCapISID>0
         || (!Data->EventData.bTemporarySealArmed && Data->EventData.TemporarySealUntil>WorldElapsedSeconds)
         || !IsAssemblyCompatible(Record->ProductID,Buffer.ResourceID,0) || HoseContent::Expired(*Content,Buffer.ContentCreationTime,WorldElapsedSeconds)) return 0;
     for (const auto& Pair:FillSessions) if (Pair.Value.SourceISID==TargetISID || Pair.Value.TargetISID==TargetISID) return 0;
     const bool Deforms=Product->BottleMaterialType==EBottleMaterialType::Plastic || Product->BottleMaterialType==EBottleMaterialType::HeavyMetal;
-    const float Capacity=Product->MaxOverfillLevel*(Deforms ? FMath::Clamp(Data->EventData.Strength,0.f,1.f) : 1.f);
+    const float Capacity=Product->MaxOverfillLevel*(Deforms ? FMath::Clamp(Product->GetEffectiveStrength(*Data),0.f,1.f) : 1.f);
     const float Flow=Product->FillSlowdownCurve ? Product->FillSlowdownCurve->GetFloatValue(Data->EventData.ContentLevel) : 1.f;
     const int32 Portions=Product->ConsumableProfile.NumOfPortions;
     if (!FMath::IsFinite(Capacity) || !FMath::IsFinite(Flow) || Flow<=0 || Data->EventData.ContentLevel>=Capacity) return 0;
@@ -109,18 +110,28 @@ float APropManager::DeliverHoseContent(FHoseResourceBuffer& Buffer,int32 TargetI
     return Actual;
 }
 
-float APropManager::ReleaseHoseContent(FHoseResourceBuffer& Buffer,FGuid ReleaseEpisode,FVector Location)
+float APropManager::ReleaseHoseContent(FHoseResourceBuffer& Buffer,FGuid ReleaseEpisode,FVector Location,float RequestedUnits,bool bContinueEpisode)
 {
     if (!HasAuthority() || GetNetMode()==NM_Client || !HoseContent::ValidBuffer(Buffer) || Buffer.Units<=0
-        || !ReleaseEpisode.IsValid() || Location.ContainsNaN() || Buffer.SourceISID<=0 || Buffer.SourceProductID<=0
+        || !FMath::IsFinite(RequestedUnits) || RequestedUnits<=0.f || !ReleaseEpisode.IsValid()
+        || Location.ContainsNaN() || Buffer.SourceISID<0 || Buffer.SourceProductID<=0
         || !FindContentDefinition(Buffer.ResourceID)) return 0;
+    if (Buffer.SourceISID==0 && Buffer.SourceProductID!=Buffer.ResourceID && !FindProductDefinition(Buffer.SourceProductID)) return 0;
     const int32 Existing=ReleasedLiquids.IndexOfByPredicate([&](const auto& Item){return Item.ReleaseID==ReleaseEpisode;});
-    if (Existing!=INDEX_NONE) return 0;
-    FReleasedLiquid Liquid; Liquid.ReleaseID=ReleaseEpisode; Liquid.SourceISID=Buffer.SourceISID; Liquid.SourceProductID=Buffer.SourceProductID;
-    Liquid.ContentID=Buffer.ResourceID; Liquid.Portions=Buffer.Units; Liquid.Temperature=Buffer.ContentTemperature;
-    Liquid.ContentCreationTime=Buffer.ContentCreationTime; Liquid.ReleaseTime=WorldElapsedSeconds; Liquid.Transform=FTransform(Location);
+    FReleasedLiquid Liquid=Existing!=INDEX_NONE ? ReleasedLiquids[Existing] : FReleasedLiquid();
+    if (Existing!=INDEX_NONE && (!bContinueEpisode || Liquid.SourceISID!=Buffer.SourceISID
+        || Liquid.SourceProductID!=Buffer.SourceProductID || Liquid.ContentID!=Buffer.ResourceID)) return 0;
+    float Remaining=FMath::Max(0.f,Buffer.Units-RequestedUnits);
+    if (Buffer.Units-Remaining>RequestedUnits) Remaining=std::nextafter(Remaining,Buffer.Units);
+    const float Released=Buffer.Units-Remaining;
+    if (Released<=0.f) return 0;
+    Liquid.ReleaseID=ReleaseEpisode; Liquid.SourceISID=Buffer.SourceISID; Liquid.SourceProductID=Buffer.SourceProductID;
+    Liquid.ContentID=Buffer.ResourceID;
+    Liquid.Temperature=float((Liquid.Portions*Liquid.Temperature+double(Released)*Buffer.ContentTemperature)/(Liquid.Portions+Released));
+    Liquid.ContentCreationTime=Liquid.Portions>0. ? FMath::Min(Liquid.ContentCreationTime,Buffer.ContentCreationTime) : Buffer.ContentCreationTime;
+    Liquid.Portions+=Released; Liquid.ReleaseTime=WorldElapsedSeconds; Liquid.Transform=FTransform(Location);
     if (!ValidateReleasedLiquids({Liquid},WorldElapsedSeconds)) return 0;
-    const float Released=Buffer.Units;
-    Buffer.Units=0; ReleasedLiquids.Add(Liquid);
+    Buffer.Units=Remaining;
+    if (Existing!=INDEX_NONE) ReleasedLiquids[Existing]=Liquid; else ReleasedLiquids.Add(Liquid);
     OnLiquidReleasesChanged.Broadcast(); ForceNetUpdate(); return Released;
 }

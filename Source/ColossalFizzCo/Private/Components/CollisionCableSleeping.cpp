@@ -79,7 +79,7 @@ void UCollisionCableComponent::UpdateSleeping(float Dt,const TArray<FVector>& Be
         }
         if(P.bSleeping) ++SleepingPointCount; else All=false;
     }
-    const bool HeldAttachment=(bAttachStart&&Cast<APawn>(ResolveMovementDriver(this))) ||
+    const bool HeldAttachment=(bAttachStart&&Cast<APawn>(ResolveMovementDriver(GetStartAttachmentSource()))) ||
         (bAttachEnd&&GetAttachedComponent()&&Cast<APawn>(ResolveMovementDriver(GetAttachedComponent())));
     bool ConstraintsClear=true;
     if(All)for(int32 I=1;I<Particles.Num();++I)
@@ -104,6 +104,7 @@ void UCollisionCableComponent::RefreshWakeSources()
     if(!GetWorld() || !GetWorld()->IsGameWorld() || !GetOwner() || !IsRegistered()) return;
     TSet<USceneComponent*> Sources;
     Sources.Add(this);
+    if(auto* Start=StartAttachmentOverride.Get()) Sources.Add(Start);
     if(auto* End=GetAttachedComponent()) Sources.Add(End);
     for(const auto& C:PointLineContacts) if(C.Component.IsValid() && !C.Normal.IsNearlyZero()) Sources.Add(C.Component.Get());
     for(const auto& C:SegmentLineContacts) if(C.Component.IsValid() && !C.Normal.IsNearlyZero()) Sources.Add(C.Component.Get());
@@ -181,7 +182,7 @@ void UCollisionCableComponent::OnObservedTransform(USceneComponent* Component,EU
     {MoveSurface(PointLineContacts[I]);WakePoint(I);Support=true;}
     for(int32 I=0;I<SegmentLineContacts.Num();++I)if(SegmentLineContacts[I].Component.Get()==Component)
     {MoveSurface(SegmentLineContacts[I]);WakePoint(I);WakePoint(I+1);Support=true;}
-    if(Component==this || Component==GetAttachedComponent()) {WakeCable();return;}
+    if(Component==this || Component==StartAttachmentOverride.Get() || Component==GetAttachedComponent()) {WakeCable();return;}
     if(!Support)
     {
         const auto* Body=Cast<UPrimitiveComponent>(Component);

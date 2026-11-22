@@ -118,7 +118,7 @@ void AColaPropActor::ApplyBottleImpact(const FVector& Impulse, int32 EventID)
 		AddAgitationPressure(Excitation*FMath::Max(0.f,ImpactPressureGain));
 	}
 	if (Severity <= 0) return;
-	LocalUniqueData.EventData.Strength = FMath::Clamp(GetStrength() - Severity * Def->StrengthDamageRate, 0.0f, 1.0f);
+	LocalUniqueData.EventData.Strength = FMath::Clamp(GetBaseStrength() - Severity * Def->StrengthDamageRate, 0.0f, 1.0f);
 	EmitPropEventUpdate(EPropEventDirtyMask::Strength);
 
 	if (GetStrength() <= 0 && (Def->BottleMaterialType == EBottleMaterialType::Glass || Def->BottleMaterialType == EBottleMaterialType::Concrete))

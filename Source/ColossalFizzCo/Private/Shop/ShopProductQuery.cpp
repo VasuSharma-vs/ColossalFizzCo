@@ -29,7 +29,7 @@ bool APropManager::GetProductScanData(int32 InISID, FShopProductScanData& OutDat
 	OutData.NominalPortions = Product->ConsumableProfile.NumOfPortions;
 	OutData.Temperature = Unique->ContinuousData.Temperature;
 	OutData.OptimumTemperature = Content->IdealServingTemperature;
-	OutData.Strength = Unique->EventData.Strength;
+	OutData.Strength = Product->GetEffectiveStrength(*Unique);
 	OutData.bClean = Unique->EventData.bClean;
 	OutData.CapSealed = Unique->EventData.CapSealed;
 	OutData.ContainerCreationTime = Unique->EventData.CreationTime;

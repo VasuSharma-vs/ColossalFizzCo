@@ -244,7 +244,7 @@ void AActivePropActor::ApplyDataAsset(const UInteractablePropDataAsset* InDataAs
 	ConsumableType = AssetToApply->ConsumableType;
 	Price = AssetToApply->Price;
 
-	NumOfPortions = AssetToApply->NumOfPortions;
+	NumOfPortions = AssetToApply->GetConsumablePortions();
 	RemainingPortions = NumOfPortions;
 	QuantityLevel = (NumOfPortions > 0) ? 1.0f : 0.0f;
 
@@ -266,7 +266,7 @@ void AActivePropActor::ApplyDataAsset(const UInteractablePropDataAsset* InDataAs
 	StimuliPerPortion = AssetToApply->StimuliPerPortion;
 	TasteProfile = AssetToApply->BuildTasteVector(false);
 
-	bIsGrabbable = AssetToApply->bCanGrab;
+	bIsGrabbable = AssetToApply->bCanGrab && AllowsPlayerGrab();
 
 	if (PhysicsSimComponent)
 	{
@@ -580,7 +580,7 @@ void AActivePropActor::InitializeFromISIDRecord(const FISIDRuntimeIndex& Record,
 		RemainingPortions = 0;
 	}
 	CurrentTemperature = Record.PackedRuntimeData.Temperature;
-	bIsGrabbable = Record.PackedRuntimeData.bIsGrabbable;
+	SetGrabbable(Record.PackedRuntimeData.bIsGrabbable);
 	QuantityLevel = (NumOfPortions > 0) ? static_cast<float>(RemainingPortions) / static_cast<float>(NumOfPortions) : 0.0f;
 	AgeMinutes = FMath::Max(0.0f, static_cast<float>(Record.PackedRuntimeData.LastUpdatedMinute - Record.PackedRuntimeData.CreationMinute));
 	if (bHasExpiry && ExpiryLifetimeMinutes > 0.0f)
@@ -703,7 +703,7 @@ void AActivePropActor::ActivateASMRepresentation(const FTransform& GameplayTrans
 	OnPropBecomeActive.Broadcast(this, ISID, ProductID, CurrentActiveTransform);
 
 	// 3. Now enable collision, replication, tick, and physics simulation state
-	if (!GetActorEnableCollision())
+	if (!IsCarriedForDrinking() && !GetActorEnableCollision())
 	{
 		SetActorEnableCollision(true);
 	}
@@ -1380,6 +1380,7 @@ void AActivePropActor::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	DOREPLIFETIME(AActivePropActor, ASMID);
 	DOREPLIFETIME(AActivePropActor, ISID);
 	DOREPLIFETIME(AActivePropActor, FillerSeatISID);
+	DOREPLIFETIME(AActivePropActor, DrinkingCarryISID);
 	DOREPLIFETIME(AActivePropActor, ProductID);
 	DOREPLIFETIME(AActivePropActor, State);
 	DOREPLIFETIME(AActivePropActor, Version);
@@ -1407,6 +1408,7 @@ void AActivePropActor::OnRep_ASMID()
 void AActivePropActor::OnRep_ISID()
 {
 	OnRep_FillerSeat();
+	if (IsCarriedForDrinking()) OnRep_DrinkingCarry();
 	if (!PropManagerReference)
 	{
 		PropManagerReference = APropManager::Get(this);
@@ -1415,7 +1417,8 @@ void AActivePropActor::OnRep_ISID()
 	{
 		const bool bHasMesh = (PropMesh && PropMesh->GetStaticMesh() != nullptr) || (SkeletalMeshComponent && SkeletalMeshComponent->GetSkeletalMeshAsset() != nullptr);
 		// If this ASM was already locally promoted on the Client for this exact ISID, do not re-run activation or snap its physics!
-		if (!bHasNotifiedBeforeReturnToRest && !IsHidden() && GetActorEnableCollision() && GetActorLocation().Z > -50000.0f && bHasMesh)
+		if (!bHasNotifiedBeforeReturnToRest && !IsHidden() && (GetActorEnableCollision() || IsCarriedForDrinking())
+			&& GetActorLocation().Z > -50000.0f && bHasMesh)
 		{
 			if (PropManagerReference && PropManagerReference->GetActiveActorFromISID(ISID) == this)
 			{
@@ -1808,7 +1811,7 @@ void AActivePropActor::OnRep_IsActive()
 	}
 
 	// 3. Enable collision, tick, and physics simulation state now that mesh and transform are placed
-	if (!GetActorEnableCollision())
+	if (!IsCarriedForDrinking() && !GetActorEnableCollision())
 	{
 		SetActorEnableCollision(true);
 	}
@@ -1980,8 +1983,8 @@ void AActivePropActor::OnRep_IsGrabbable()
 
 void AActivePropActor::SetGrabbable(bool bNewGrabbable)
 {
-	bIsGrabbable = bNewGrabbable;
-	PackedRuntimeData.bIsGrabbable = bNewGrabbable;
+	bIsGrabbable = bNewGrabbable && AllowsPlayerGrab();
+	PackedRuntimeData.bIsGrabbable = bIsGrabbable;
 }
 
 void AActivePropActor::RetriggerUnsettled(float NewDelay)
@@ -2074,7 +2077,7 @@ bool AActivePropActor::InteractWithPlayer_Implementation(APawn* PlayerPawn)
 
 bool AActivePropActor::AttachForInteraction(USceneComponent* Parent, FName SocketName)
 {
-	if (!IsValid(Parent) || Parent->GetWorld() != GetWorld() || !IsValid(Parent->GetOwner())) return false;
+	if (!AllowsPlayerGrab() || !IsValid(Parent) || Parent->GetWorld() != GetWorld() || !IsValid(Parent->GetOwner())) return false;
 	AActor* Holder = Parent->GetOwner();
 	// Container pockets carried by a pawn keep that pawn's exclusive interaction ownership.
 	for (AActor* Ancestor = Holder; IsValid(Ancestor); Ancestor = Ancestor->GetAttachParentActor())
@@ -2136,7 +2139,7 @@ bool AActivePropActor::MoveHeldToLocation(FVector Location)
 
 bool AActivePropActor::OnPlayerGrab_Implementation(USceneComponent* AttachToParent, FName SocketName)
 {
-	if (!AttachToParent) return false;
+	if (!AttachToParent || !AllowsPlayerGrab()) return false;
 	if (const auto* Flight=FindComponentByClass<URocketProjectileComponent>()) if (Flight->IsPoweredFlight()) return false;
 
 	State = EPropState::Held;
@@ -2176,6 +2179,7 @@ bool AActivePropActor::OnPlayerRelease_Implementation(FVector LaunchVelocity)
 {
 	if (PropMesh && IsValid(InteractionOwner)) PropMesh->IgnoreActorWhenMoving(InteractionOwner.Get(), false);
 	DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+	SetDrinkingCarry(false);
 	// Customer pockets and physical cap assemblies suppress collision while carried.
 	// Restore the body before the settling component can enable physics.
 	if (PropMesh)
@@ -2277,6 +2281,11 @@ bool AActivePropActor::ConsumePortion(AActor* ConsumerActor, float PortionRatio)
 	const float Ratio = FMath::Clamp(PortionRatio, 0.1f, 1.0f);
 	const bool bItemExpired = IsExpired() || IsSpoiled();
 	const float AutoBodyTempDelta = FInteractablePropData::CalculateBodyTemperatureDelta(CurrentTemperature, AmbientRoomTemperature) * Ratio;
+	const auto* Player = Cast<APawn>(ConsumerActor);
+	const bool bPlayerDrinking = bIsHeld && InteractionOwner == ConsumerActor
+		&& Player && Player->IsPlayerControlled() && GetConsumableType() == EConsumablePropType::Drink;
+	const int32 ConsumedBottleID = ISID;
+	APropManager* Manager = PropManagerReference;
 
 	if (PropManagerReference && ISID > 0)
 	{
@@ -2286,6 +2295,14 @@ bool AActivePropActor::ConsumePortion(AActor* ConsumerActor, float PortionRatio)
 	{
 		LocalUniqueData.EventData.ContentLevel = FMath::Max(0.0f, GetContentLevel() - Ratio / FMath::Max(1, GetNumPortions()));
 		bHasValidUniqueData = true; OnRep_LocalUniqueData();
+	}
+	if (bPlayerDrinking && Manager)
+	{
+		if (auto* Bottle = Manager->GetActiveActorFromISID(ConsumedBottleID); Bottle && Bottle->InteractionOwner == ConsumerActor)
+		{
+			constexpr float PlayerSipSeconds = .85f;
+			Bottle->SetDrinkingCarry(true, PlayerSipSeconds);
+		}
 	}
 	ANPCCharacter* NPC = Cast<ANPCCharacter>(ConsumerActor);
 	if (NPC)

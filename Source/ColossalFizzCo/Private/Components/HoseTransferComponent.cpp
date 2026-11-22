@@ -2,6 +2,7 @@
 #include "Components/ResourceTransferEndpointComponent.h"
 #include "Components/CollisionCableComponent.h"
 #include "Props/InteractablePropManager.h"
+#include "Resources/HoseCableActor.h"
 #include "Net/UnrealNetwork.h"
 #include <cmath>
 #include <limits>
@@ -46,12 +47,16 @@ void UHoseTransferComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty
 	DOREPLIFETIME(UHoseTransferComponent,bRequiresMotorDrive); DOREPLIFETIME(UHoseTransferComponent,RatedPressure);
 	DOREPLIFETIME(UHoseTransferComponent,FlowBoostPerPressure); DOREPLIFETIME(UHoseTransferComponent,MaxDrivenUnitsPerSecond);
 	DOREPLIFETIME(UHoseTransferComponent,BurstPressureThreshold); DOREPLIFETIME(UHoseTransferComponent,BurstDelay);
+	DOREPLIFETIME(UHoseTransferComponent,VacuumCollapseThreshold); DOREPLIFETIME(UHoseTransferComponent,FailureMode);
 	DOREPLIFETIME(UHoseTransferComponent,BlockedPressureRisePerSecond); DOREPLIFETIME(UHoseTransferComponent,CurrentPressure);
 	DOREPLIFETIME(UHoseTransferComponent,CurrentFlowRate); DOREPLIFETIME(UHoseTransferComponent,bBurst);
 	DOREPLIFETIME(UHoseTransferComponent,TotalReleasedUnits); DOREPLIFETIME(UHoseTransferComponent,SourceEndpoint);
+	DOREPLIFETIME(UHoseTransferComponent,Discharge);
 	DOREPLIFETIME(UHoseTransferComponent,TargetEndpoint); DOREPLIFETIME(UHoseTransferComponent,LastTransferredUnits);
 	DOREPLIFETIME(UHoseTransferComponent,LastIntakeUnits); DOREPLIFETIME(UHoseTransferComponent,BufferManager);
+	DOREPLIFETIME(UHoseTransferComponent,LastTransferUpdateSeconds);
 	DOREPLIFETIME(UHoseTransferComponent,bBufferUsesManagedContent);
+	DOREPLIFETIME(UHoseTransferComponent,LastStartPortFlowUnits); DOREPLIFETIME(UHoseTransferComponent,LastEndPortFlowUnits);
 }
 
 bool UHoseTransferComponent::HasValidBuffer() const
@@ -66,21 +71,41 @@ bool UHoseTransferComponent::CanConnect(const UResourceTransferEndpointComponent
 {
 	if (!GetWorld() || !HasValidBuffer() || bBurst || !IsValid(Source) || !IsValid(Target) || Source==Target
 		|| Source->GetWorld()!=GetWorld() || Target->GetWorld()!=GetWorld()
-		|| !Source->bCanSupply || !Target->bCanReceive || !Source->CanAcceptHose(this) || !Target->CanAcceptHose(this)
+		|| !Source->CanAcceptHose(this) || !Target->CanAcceptHose(this)
 		|| !Source->SupportsResource(Category,ResourceID) || !Target->SupportsResource(Category,ResourceID)) return false;
+	const bool Flexible=Category==EResourceTransportCategory::Content
+		&& (Source->bUseSignedPressure || Target->bUseSignedPressure || GetOwner()->IsA<AHoseCableActor>());
+	if (Flexible ? (!Source->bCanSupply && !Source->bCanReceive) || (!Target->bCanSupply && !Target->bCanReceive)
+		: !Source->bCanSupply || !Target->bCanReceive) return false;
 	if (Source->bManagedContent!=Target->bManagedContent
 		&& (Category!=EResourceTransportCategory::Content || (!Source->bAllowManagedContentBridge && !Target->bAllowManagedContentBridge))) return false;
 	APropManager* ConnectionManager=Source->bManagedContent ? Source->ContentManager.Get() : Target->ContentManager.Get();
-	if (Buffer.Units>0 && (bBufferUsesManagedContent!=Source->bManagedContent || BufferManager!=ConnectionManager)) return false;
+	if (Buffer.Units>0 && bBufferUsesManagedContent && BufferManager!=ConnectionManager) return false;
 	return !Source->bManagedContent || !Target->bManagedContent
 		|| (Source->ContentManager==Target->ContentManager && Source->ContentISID!=Target->ContentISID);
 }
 
 bool UHoseTransferComponent::HasValidConnection() const { return CanConnect(SourceEndpoint,TargetEndpoint); }
 
+UResourceTransferEndpointComponent* UHoseTransferComponent::GetOtherEndpoint(const UResourceTransferEndpointComponent* Port) const
+{
+	if (!IsValid(Port)) return nullptr;
+	auto* Other=Port==SourceEndpoint ? TargetEndpoint.Get() : Port==TargetEndpoint ? SourceEndpoint.Get() : nullptr;
+	return IsValid(Other) ? Other : nullptr;
+}
+
 bool UHoseTransferComponent::IsRequestingContent() const
 {
-	return bTransferEnabled && bIntakeEnabled && !bBurst && HasValidConnection() && TargetEndpoint->bRequestsFlow;
+	return IsRequestingContentFrom(SourceEndpoint) || (Category==EResourceTransportCategory::Content && IsRequestingContentFrom(TargetEndpoint));
+}
+
+bool UHoseTransferComponent::IsRequestingContentFrom(const UResourceTransferEndpointComponent* Port) const
+{
+	const auto* Receiver=GetOtherEndpoint(Port);
+	if (!bTransferEnabled || !bIntakeEnabled || !HasValidConnection() || !IsValid(Receiver) || !Receiver->bRequestsFlow) return false;
+	if (Category!=EResourceTransportCategory::Content) return Port==SourceEndpoint;
+	const float Pressure=Port->GetOperatingPressure();
+	return bDrainEnabled && Port->bCanSupply && Receiver->bCanReceive && Pressure>=0.f && Pressure>=Receiver->GetOperatingPressure();
 }
 
 bool UHoseTransferComponent::ConnectEndpoints(UResourceTransferEndpointComponent* Source,UResourceTransferEndpointComponent* Target)
@@ -89,16 +114,28 @@ bool UHoseTransferComponent::ConnectEndpoints(UResourceTransferEndpointComponent
 		|| !Source->GetOwner()->HasAuthority() || !Target->GetOwner()->HasAuthority()) return false;
 	{
 		TGuardValue<bool> Guard(bTransferInProgress,true);
-		if (!Source->CanTransferResource(true) || !IsValid(Target)
-			|| (!(Target->bManagedReceivingProxy && Target->ContentISID==0) && !Target->CanTransferResource(false)) || !CanConnect(Source,Target)) return false;
+		const bool Flexible=Category==EResourceTransportCategory::Content
+			&& (Source->bUseSignedPressure || Target->bUseSignedPressure || GetOwner()->IsA<AHoseCableActor>());
+		auto CanAdmit = [Flexible](UResourceTransferEndpointComponent* Port,bool bNominalSource)
+		{
+			if (!IsValid(Port)) return false;
+			if ((Flexible ? Port->bCanSupply : bNominalSource) && Port->CanTransferResource(true)) return true;
+			return IsValid(Port) && (Flexible ? Port->bCanReceive : !bNominalSource)
+				&& ((Port->bManagedReceivingProxy && Port->ContentISID==0) || Port->CanTransferResource(false));
+		};
+		if (!CanAdmit(Source,true) || !CanAdmit(Target,false) || !CanConnect(Source,Target)) return false;
 	}
 	UnbindEndpoints(); SourceEndpoint=Source; TargetEndpoint=Target;
 	Source->ConnectedHoses.AddUnique(this); Target->ConnectedHoses.AddUnique(this);
 	if (Buffer.Units==0)
 	{
 		Buffer=FHoseResourceBuffer(); Buffer.Category=Category; Buffer.ResourceID=ResourceID;
-		bBufferUsesManagedContent=Source->bManagedContent; BufferManager=Source->bManagedContent ? Source->ContentManager : Target->ContentManager;
+		bBufferUsesManagedContent=false; BufferManager=nullptr;
 	}
+	FailureMode=PendingBodyFailure=EHoseFailureMode::None;
+	BackPressure=OverpressureSeconds=0.f; CurrentPressure=0.f;
+	TrappedDrainPressure=0.f; LastUnpluggedTip=EHoseDischargePoint::None;
+	Discharge=FHoseDischargeState(); DischargeEpisodes.Reset(); EpisodePoint=EHoseDischargePoint::None;
 	GetOwner()->ForceNetUpdate(); return true;
 }
 
@@ -112,35 +149,118 @@ void UHoseTransferComponent::UnbindEndpoints()
 void UHoseTransferComponent::DisconnectEndpoints()
 {
 	if (!GetOwner() || !GetOwner()->HasAuthority() || GetNetMode()==NM_Client || bTransferInProgress) return;
-	UnbindEndpoints(); LastTransferredUnits=0; LastIntakeUnits=0; CurrentFlowRate=0; CurrentPressure=0; OverpressureSeconds=0;
+	UnbindEndpoints(); LastTransferredUnits=0; LastIntakeUnits=0; CurrentFlowRate=0;
+	LastStartPortFlowUnits=LastEndPortFlowUnits=0;
+	Discharge=FHoseDischargeState(); DischargeEpisodes.Reset(); EpisodePoint=EHoseDischargePoint::None;
+	if (!bBurst) CurrentPressure=0;
+	BackPressure=OverpressureSeconds=0; PendingBodyFailure=EHoseFailureMode::None;
+	LastTransferUpdateSeconds=0;
 	GetOwner()->ForceNetUpdate();
+}
+
+bool UHoseTransferComponent::GetContentEndpoints(UResourceTransferEndpointComponent*& First,UResourceTransferEndpointComponent*& Second) const
+{
+	First=nullptr; Second=nullptr;
+	if (HasValidConnection())
+	{
+		First=SourceEndpoint; Second=TargetEndpoint;
+		return First->GetOwner()->HasAuthority() && Second->GetOwner()->HasAuthority();
+	}
+	const auto* Hose=Cast<AHoseCableActor>(GetOwner());
+	if (!Hose || !HasValidBuffer()) return false;
+	if (!bBurst && (SourceEndpoint || TargetEndpoint || (IsValid(Hose->StartPort) && IsValid(Hose->EndPort)))) return false;
+	const auto CanUsePort = [this](const UResourceTransferEndpointComponent* Port)
+	{
+		return IsValid(Port) && Port->SupportsResource(Category,ResourceID) && Port->GetOwner()->HasAuthority() && Port->CanAcceptHose(this);
+	};
+	if (CanUsePort(Hose->StartPort)) First=Hose->StartPort;
+	if (CanUsePort(Hose->EndPort)) Second=Hose->EndPort;
+	return First || Second || (Buffer.Units>0.f && (bDrainEnabled || bBurst));
+}
+
+void UHoseTransferComponent::CaptureUnpluggedPressure(EHoseDischargePoint Point)
+{
+	if (Category!=EResourceTransportCategory::Content || bBurst) return;
+	LastUnpluggedTip=Point;
+	if (Buffer.Units<=0.f) TrappedDrainPressure=0.f;
+	else if (FMath::IsFinite(CurrentPressure)) TrappedDrainPressure=FMath::Max(TrappedDrainPressure,CurrentPressure);
+}
+
+EHoseDischargePoint UHoseTransferComponent::FindOpenTip() const
+{
+	const auto* Hose=Cast<AHoseCableActor>(GetOwner());
+	if (!Hose || !bDrainEnabled || bBurst || (IsValid(SourceEndpoint) && IsValid(TargetEndpoint))) return EHoseDischargePoint::None;
+	const bool SupplyMounted=IsValid(Hose->StartPort);
+	const bool ReceiverMounted=IsValid(Hose->EndPort);
+	if (SupplyMounted && ReceiverMounted) return EHoseDischargePoint::None;
+	if (SupplyMounted || ReceiverMounted)
+	{
+		const int32 LooseConnector=SupplyMounted ? Hose->GetReceivingConnectorIndex() : Hose->GetSupplyConnectorIndex();
+		return LooseConnector==0 ? EHoseDischargePoint::StartTip : EHoseDischargePoint::EndTip;
+	}
+	if (LastUnpluggedTip!=EHoseDischargePoint::None) return LastUnpluggedTip;
+	FTransform Start,End;
+	const bool StartLower=Hose->GetDischargeTransform(EHoseDischargePoint::StartTip,Start)
+		&& Hose->GetDischargeTransform(EHoseDischargePoint::EndTip,End) && Start.GetLocation().Z<=End.GetLocation().Z;
+	return StartLower ? EHoseDischargePoint::StartTip : EHoseDischargePoint::EndTip;
+}
+
+float UHoseTransferComponent::GetLastPortFlowUnits(const UResourceTransferEndpointComponent* Port) const
+{
+	if (!IsValid(Port)) return 0.f;
+	if (Category!=EResourceTransportCategory::Content)
+		return Port==SourceEndpoint ? LastIntakeUnits : Port==TargetEndpoint ? -LastTransferredUnits : 0.f;
+	if (const auto* Hose=Cast<AHoseCableActor>(GetOwner()))
+	{
+		if (Hose->StartPort==Port) return LastStartPortFlowUnits;
+		if (Hose->EndPort==Port) return LastEndPortFlowUnits;
+	}
+	return Port==SourceEndpoint ? LastStartPortFlowUnits : Port==TargetEndpoint ? LastEndPortFlowUnits : 0.f;
 }
 
 float UHoseTransferComponent::TransferForDuration(float DeltaSeconds)
 {
 	if (!GetOwner() || !GetOwner()->HasAuthority() || GetNetMode()==NM_Client || bTransferInProgress) return 0;
 	LastTransferredUnits=0; LastIntakeUnits=0; CurrentFlowRate=0;
-	if (!HasValidConnection() || !SourceEndpoint->GetOwner()->HasAuthority() || !TargetEndpoint->GetOwner()->HasAuthority()) { DisconnectEndpoints(); return 0; }
-	if (!bTransferEnabled || bBurst || !FMath::IsFinite(DeltaSeconds) || DeltaSeconds<=0 || !FMath::IsFinite(MaxUnitsPerSecond) || MaxUnitsPerSecond<=0) return 0;
+	LastStartPortFlowUnits=LastEndPortFlowUnits=0;
+	LastTransferUpdateSeconds=0;
+	Discharge=FHoseDischargeState(); DischargedDuringUpdate=0.f;
+	const bool bContent=Category==EResourceTransportCategory::Content;
+	if (bBurst && (!bContent || !GetOwner()->IsA<AHoseCableActor>())) return 0;
+	auto CanAdvance = [this,bContent]()
+	{
+		if (!bContent) return HasValidConnection() && SourceEndpoint->GetOwner()->HasAuthority() && TargetEndpoint->GetOwner()->HasAuthority();
+		UResourceTransferEndpointComponent* First=nullptr;
+		UResourceTransferEndpointComponent* Second=nullptr;
+		return GetContentEndpoints(First,Second);
+	};
+	if (!CanAdvance()) { DisconnectEndpoints(); return 0; }
+	if (!bTransferEnabled || !FMath::IsFinite(DeltaSeconds) || DeltaSeconds<=0 || !FMath::IsFinite(MaxUnitsPerSecond) || MaxUnitsPerSecond<=0) return 0;
 	TGuardValue<bool> Guard(bTransferInProgress,true);
 	if (!FMath::IsFinite(MaxTransferStepSeconds) || MaxTransferStepSeconds<=0) return 0;
 	float StepLimit=FMath::Clamp(MaxTransferStepSeconds,.001f,.1f);
 	if (BufferCapacityUnits>0 && FMath::IsFinite(MaxDrivenUnitsPerSecond) && MaxDrivenUnitsPerSecond>0)
 		StepLimit=FMath::Min(StepLimit,FMath::Max(UE_SMALL_NUMBER,BufferCapacityUnits/MaxDrivenUnitsPerSecond));
 	double Remaining=DeltaSeconds;
-	float TotalDrained=0,TotalIntake=0;
+	float TotalDrained=0,TotalIntake=0,TotalStartFlow=0,TotalEndFlow=0;
 	const int32 StepBudget=FMath::Clamp(MaxTransferSubsteps,1,1024);
 	int32 Steps=0;
-	for (;Steps<StepBudget && Remaining>UE_SMALL_NUMBER && bTransferEnabled && !bBurst && HasValidConnection();++Steps)
+	for (;Steps<StepBudget && Remaining>UE_SMALL_NUMBER && bTransferEnabled && CanAdvance();++Steps)
 	{
-		const float Consumed=IntegrateTransferStep(float(FMath::Min(Remaining,double(StepLimit))));
+		const float Step=float(FMath::Min(Remaining,double(StepLimit)));
+		const float Consumed=bContent ? IntegrateContentStep(Step) : IntegrateTransferStep(Step);
 		TotalDrained+=LastTransferredUnits; TotalIntake+=LastIntakeUnits;
+		TotalStartFlow+=LastStartPortFlowUnits; TotalEndFlow+=LastEndPortFlowUnits;
 		if (Consumed<=0) break;
 		Remaining=FMath::Max(0.,Remaining-Consumed);
 	}
-	if (Steps>=StepBudget && Remaining>0 && bTransferEnabled && !bBurst && HasValidConnection()) DroppedTransferTime+=Remaining;
-	LastTransferredUnits=TotalDrained; LastIntakeUnits=TotalIntake;
-	GetOwner()->ForceNetUpdate();
+	if (Steps>=StepBudget && Remaining>0 && bTransferEnabled && CanAdvance()) DroppedTransferTime+=Remaining;
+	LastTransferredUnits=TotalDrained; LastIntakeUnits=TotalIntake; LastTransferUpdateSeconds=DeltaSeconds;
+	LastStartPortFlowUnits=TotalStartFlow; LastEndPortFlowUnits=TotalEndFlow;
+	if (bContent) CurrentFlowRate=TotalDrained/DeltaSeconds;
+	Discharge.UnitsPerSecond=DischargedDuringUpdate/DeltaSeconds;
+	if (DischargedDuringUpdate<=0.f) { DischargeEpisodes.Reset(); EpisodePoint=EHoseDischargePoint::None; }
+	if (IsValid(GetOwner())) GetOwner()->ForceNetUpdate();
 	return TotalDrained;
 }
 
@@ -189,54 +309,13 @@ float UHoseTransferComponent::IntegrateTransferStep(float DeltaSeconds)
 		PoppedSocket->NotifyIntakeOverload(this,InitialPressure,OfferedRate);
 		return 0;
 	}
-	if (SupplyEnabled)
-	{
-		const float Intake=PotentialIntake;
-		if (FMath::IsFinite(Intake) && Intake>0)
-		{
-			UResourceTransferEndpointComponent* SupplyingSocket=SourceEndpoint;
-			if (Buffer.Units==0) { Buffer=FHoseResourceBuffer(); Buffer.Category=Category; Buffer.ResourceID=ResourceID; }
-			if (SourceEndpoint->bManagedContent)
-				LastIntakeUnits=SourceEndpoint->ContentManager->IntakeHoseContent(SourceEndpoint->ContentISID,Buffer,BufferCapacityUnits,Intake);
-			else
-			{
-				const float PreviousUnits=Buffer.Units;
-				LastIntakeUnits=MoveLocalResourceUnits(SourceEndpoint->StoredUnits,Buffer.Units,BufferCapacityUnits,Intake);
-				if (LastIntakeUnits>0 && Category==EResourceTransportCategory::Content)
-				{
-					Buffer.ContentTemperature=float((double(PreviousUnits)*Buffer.ContentTemperature+double(LastIntakeUnits)*SourceEndpoint->ContentTemperature)/Buffer.Units);
-					Buffer.ContentCreationTime=PreviousUnits>0 ? FMath::Min(Buffer.ContentCreationTime,SourceEndpoint->ContentCreationTime) : SourceEndpoint->ContentCreationTime;
-				}
-			}
-			if (LastIntakeUnits>0 && IsValid(SupplyingSocket))
-			{
-				SupplyingSocket->TotalSuppliedUnits+=LastIntakeUnits;
-				SupplyingSocket->GetOwner()->ForceNetUpdate();
-			}
-		}
-	}
+	LastIntakeUnits=IntakeFrom(SourceEndpoint,PotentialIntake);
 	// Canonical managed updates may invoke gameplay events; never use a connection invalidated by those events.
 	if (!HasValidConnection()) { UnbindEndpoints(); return 0; }
 	if (bDrainEnabled && ReceiveAllowed && IsValid(TargetEndpoint))
 	{
 		const float Drain=float(FMath::Min3(Budget,double(Buffer.Units),double(TargetEndpoint->GetFreeCapacityUnits())));
-		if (FMath::IsFinite(Drain) && Drain>0)
-		{
-			UResourceTransferEndpointComponent* ReceivingSocket=TargetEndpoint;
-			if (ReceivingSocket->bManagedContent) LastTransferredUnits=ReceivingSocket->ContentManager->DeliverHoseContent(Buffer,ReceivingSocket->ContentISID,Drain);
-			else
-			{
-				const float PreviousUnits=ReceivingSocket->StoredUnits;
-				LastTransferredUnits=MoveLocalResourceUnits(Buffer.Units,ReceivingSocket->StoredUnits,ReceivingSocket->CapacityUnits,Drain);
-				if (LastTransferredUnits>0 && Category==EResourceTransportCategory::Content)
-				{
-					ReceivingSocket->ContentTemperature=float((double(PreviousUnits)*ReceivingSocket->ContentTemperature+double(LastTransferredUnits)*Buffer.ContentTemperature)/ReceivingSocket->StoredUnits);
-					ReceivingSocket->ContentCreationTime=PreviousUnits>0 ? FMath::Min(ReceivingSocket->ContentCreationTime,Buffer.ContentCreationTime) : Buffer.ContentCreationTime;
-				}
-			}
-			if (LastTransferredUnits>0 && IsValid(ReceivingSocket))
-				ReceivingSocket->NotifyResourceReceived(this,LastTransferredUnits,InitialPressure,LastTransferredUnits/FMath::Max(DeltaSeconds,UE_SMALL_NUMBER));
-		}
+		LastTransferredUnits=DeliverTo(TargetEndpoint,Drain,InitialPressure,DeltaSeconds);
 	}
 	if (!HasValidConnection()) { UnbindEndpoints(); return DeltaSeconds; }
 	const bool Blocked=Buffer.Units>=BufferCapacityUnits && (!bDrainEnabled || !ReceiveAllowed || LastTransferredUnits<=0);
@@ -249,32 +328,149 @@ float UHoseTransferComponent::IntegrateTransferStep(float DeltaSeconds)
 		OverpressureSeconds=FMath::Min(DeltaSeconds,(CurrentPressure-BurstPressureThreshold)/(SourcePressure*BlockedPressureRisePerSecond));
 	else OverpressureSeconds=0;
 	if (ReachesBurst || (CurrentPressure>BurstPressureThreshold && OverpressureSeconds>=BurstDelay))
-	{
-		bBurst=true; bTransferEnabled=false;
-		const float Released=ReleaseBufferedContents();
-		UnbindEndpoints(); OnBurst.Broadcast(CurrentPressure,Released);
-	}
+		Rupture(EHoseFailureMode::OverpressureBurst);
 	return DeltaSeconds;
+}
+
+float UHoseTransferComponent::IntakeFrom(UResourceTransferEndpointComponent* Port,float Units)
+{
+	if (!IsValid(Port) || !FMath::IsFinite(Units) || Units<=0) return 0.f;
+	if (Buffer.Units<=0.f)
+	{
+		Buffer=FHoseResourceBuffer(); Buffer.Category=Category; Buffer.ResourceID=ResourceID;
+		bBufferUsesManagedContent=Port->bManagedContent;
+		BufferManager=Port->bManagedContent ? Port->ContentManager : nullptr;
+	}
+	// Preserve the managed inventory reference while liquid from that source remains in the line.
+	if (Port->bManagedContent!=bBufferUsesManagedContent || (Port->bManagedContent && Port->ContentManager!=BufferManager)) return 0.f;
+	float Accepted=0.f;
+	if (Port->bManagedContent)
+		Accepted=Port->ContentManager->IntakeHoseContent(Port->ContentISID,Buffer,BufferCapacityUnits,Units);
+	else
+	{
+		const float Previous=Buffer.Units;
+		Accepted=MoveLocalResourceUnits(Port->StoredUnits,Buffer.Units,BufferCapacityUnits,Units);
+		if (Accepted>0.f && Category==EResourceTransportCategory::Content)
+		{
+			if (Previous<=0.f) Buffer.SourceProductID=Port->ContentProductID>0 ? Port->ContentProductID : ResourceID;
+			Buffer.ContentTemperature=float((double(Previous)*Buffer.ContentTemperature+double(Accepted)*Port->ContentTemperature)/Buffer.Units);
+			Buffer.ContentCreationTime=Previous>0 ? FMath::Min(Buffer.ContentCreationTime,Port->ContentCreationTime) : Port->ContentCreationTime;
+		}
+	}
+	if (Accepted>0.f && IsValid(Port) && IsValid(Port->GetOwner()))
+	{
+		Port->TotalSuppliedUnits+=Accepted;
+		Port->GetOwner()->ForceNetUpdate();
+	}
+	return Accepted;
+}
+
+float UHoseTransferComponent::DeliverTo(UResourceTransferEndpointComponent* Port,float Units,float Pressure,float DeltaSeconds)
+{
+	if (!IsValid(Port) || !FMath::IsFinite(Units) || Units<=0) return 0.f;
+	float Delivered=0.f;
+	if (Port->bManagedContent) Delivered=Port->ContentManager->DeliverHoseContent(Buffer,Port->ContentISID,Units);
+	else
+	{
+		const float Previous=Port->StoredUnits;
+		Delivered=MoveLocalResourceUnits(Buffer.Units,Port->StoredUnits,Port->CapacityUnits,Units);
+		if (Delivered>0.f && Category==EResourceTransportCategory::Content)
+		{
+			Port->ContentTemperature=float((double(Previous)*Port->ContentTemperature+double(Delivered)*Buffer.ContentTemperature)/Port->StoredUnits);
+			Port->ContentCreationTime=Previous>0 ? FMath::Min(Port->ContentCreationTime,Buffer.ContentCreationTime) : Buffer.ContentCreationTime;
+		}
+	}
+	if (Delivered>0.f && IsValid(Port))
+		Port->NotifyResourceReceived(this,Delivered,Pressure,Delivered/FMath::Max(DeltaSeconds,UE_SMALL_NUMBER));
+	return Delivered;
+}
+
+void UHoseTransferComponent::Rupture(EHoseFailureMode Mode)
+{
+	bBurst=true; FailureMode=Mode;
+	TrappedDrainPressure=0.f;
+	const bool PhysicalContentHose=Category==EResourceTransportCategory::Content && GetOwner()->IsA<AHoseCableActor>();
+	if (!PhysicalContentHose) bTransferEnabled=false;
+	const float Released=PhysicalContentHose ? DischargeContents(EHoseDischargePoint::Rupture,Buffer.Units,FMath::Max(0.f,CurrentPressure)) : ReleaseBufferedContents();
+	if (Category!=EResourceTransportCategory::Content) UnbindEndpoints();
+	OnBurst.Broadcast(CurrentPressure,Released);
+}
+
+float UHoseTransferComponent::DischargeContents(EHoseDischargePoint Point,float Units,float Pressure)
+{
+	if (Units<=0.f || Buffer.Units<=0.f || !IsValid(GetOwner())) return 0.f;
+	const auto* Hose=Cast<AHoseCableActor>(GetOwner());
+	if (!Hose) return 0.f;
+	FTransform Outlet;
+	const FVector Location=Hose->GetDischargeTransform(Point,Outlet) ? Outlet.GetLocation() : Hose->GetActorLocation();
+	if (EpisodePoint!=Point) { DischargeEpisodes.Reset(); EpisodePoint=Point; }
+	const int32 ProductID=Buffer.SourceProductID>0 ? Buffer.SourceProductID : Buffer.ResourceID;
+	const FIntVector SourceKey(Buffer.SourceISID,ProductID,Buffer.ResourceID);
+	FGuid& Episode=DischargeEpisodes.FindOrAdd(SourceKey);
+	if (!Episode.IsValid()) Episode=FGuid::NewGuid();
+	const float Released=ReleaseContents(Units,Episode,Location,true);
+	if (Released>0.f)
+	{
+		if (Discharge.Point!=Point)
+		{
+			Discharge.Point=Point;
+			DischargedDuringUpdate=0.f;
+			Discharge.Pressure=0.f;
+		}
+		DischargedDuringUpdate+=Released;
+		Discharge.Pressure=FMath::Max(Discharge.Pressure,Pressure);
+	}
+	return Released;
+}
+
+float UHoseTransferComponent::DrainTrappedContents(EHoseDischargePoint Point,float DeltaSeconds,float SupplyPressure)
+{
+	if (Point==EHoseDischargePoint::None || Buffer.Units<=0.f || DeltaSeconds<=0.f) return 0.f;
+	const float Pressure=FMath::Max(TrappedDrainPressure,SupplyPressure);
+	const float GravityRate=FMath::IsFinite(UnpressurizedDrainUnitsPerSecond) ? FMath::Max(.01f,UnpressurizedDrainUnitsPerSecond) : 1.f;
+	const double PressureRate=.65*MaxUnitsPerSecond*FMath::Sqrt(double(Pressure)/FMath::Max(RatedPressure,.1f));
+	const double Rate=FMath::Min(double(MaxDrivenUnitsPerSecond),GravityRate+PressureRate);
+	const float Before=Buffer.Units;
+	const float Released=DischargeContents(Point,float(FMath::Min(double(Before),Rate*DeltaSeconds)),Pressure);
+	// Bleed the captured head in proportion to the liquid that actually left.
+	TrappedDrainPressure*=FMath::Clamp(Buffer.Units/Before,0.f,1.f);
+	return Released;
+}
+
+float UHoseTransferComponent::ReleaseContents(float Units,FGuid Episode,const FVector& Location,bool bContinueEpisode)
+{
+	if (!FMath::IsFinite(Buffer.Units) || Buffer.Units<=0.f || !FMath::IsFinite(Units) || Units<=0.f) return 0.f;
+	const EResourceTransportCategory ReleasedCategory=Buffer.Category; const int32 ReleasedID=Buffer.ResourceID;
+	float Released=0;
+	if (ReleasedCategory==EResourceTransportCategory::Content)
+	{
+		auto* Manager=bBufferUsesManagedContent ? BufferManager.Get() : APropManager::Get(this);
+		if (!bBufferUsesManagedContent && Buffer.SourceProductID<=0) Buffer.SourceProductID=Buffer.ResourceID;
+		if (IsValid(Manager)) Released=Manager->ReleaseHoseContent(Buffer,Episode,Location,Units,bContinueEpisode);
+	}
+	if (Released<=0 && !bBufferUsesManagedContent)
+	{
+		float Remaining=FMath::Max(0.f,Buffer.Units-Units);
+		if (Buffer.Units-Remaining>Units) Remaining=std::nextafter(Remaining,Buffer.Units);
+		Released=Buffer.Units-Remaining;
+		Buffer.Units=Remaining;
+	}
+	if (Buffer.Units<=0.f) TrappedDrainPressure=0.f;
+	if (Released>0) { TotalReleasedUnits+=Released; OnContentsReleased.Broadcast(ReleasedCategory,ReleasedID,Released); }
+	return Released;
 }
 
 float UHoseTransferComponent::ReleaseBufferedContents()
 {
-	if (!FMath::IsFinite(Buffer.Units) || Buffer.Units<=0) return 0;
-	const EResourceTransportCategory ReleasedCategory=Buffer.Category; const int32 ReleasedID=Buffer.ResourceID;
-	float Released=0;
-	if (bBufferUsesManagedContent)
+	if (Buffer.Units<=0.f) return 0.f;
+	FVector Location=GetOwner()->GetActorLocation();
+	if (const auto* Cable=GetOwner()->FindComponentByClass<UCollisionCableComponent>())
 	{
-		FVector ReleaseLocation=GetOwner()->GetActorLocation();
-		if (const auto* Cable=GetOwner()->FindComponentByClass<UCollisionCableComponent>())
-		{
-			TArray<FVector> Points; Cable->GetCableParticleLocations(Points);
-			if (!Points.IsEmpty() && !Points[Points.Num()/2].ContainsNaN()) ReleaseLocation=Points[Points.Num()/2];
-		}
-		if (IsValid(BufferManager)) Released=BufferManager->ReleaseHoseContent(Buffer,FGuid::NewGuid(),ReleaseLocation);
+		TArray<FVector> Points; Cable->GetCableRenderLocations(Points);
+		const int32 Middle=(Points.Num()-2)/2;
+		if (Points.Num()>=2) Location=(Points[Middle]+Points[Middle+1])*.5;
 	}
-	else { Released=Buffer.Units; Buffer.Units=0; }
-	if (Released>0) { TotalReleasedUnits+=Released; OnContentsReleased.Broadcast(ReleasedCategory,ReleasedID,Released); }
-	return Released;
+	return ReleaseContents(Buffer.Units,FGuid::NewGuid(),Location,false);
 }
 
 float UHoseTransferComponent::PurgeContents()
@@ -287,7 +483,11 @@ float UHoseTransferComponent::PurgeContents()
 bool UHoseTransferComponent::RepairHose()
 {
 	if (!GetOwner() || !GetOwner()->HasAuthority() || GetNetMode()==NM_Client || bTransferInProgress || Buffer.Units>0) return false;
-	bBurst=false; OverpressureSeconds=0; CurrentPressure=0; bTransferEnabled=true; GetOwner()->ForceNetUpdate(); return true;
+	bBurst=false; bTransferEnabled=true; FailureMode=PendingBodyFailure=EHoseFailureMode::None;
+	BackPressure=OverpressureSeconds=CurrentPressure=0.f;
+	TrappedDrainPressure=0.f; LastUnpluggedTip=EHoseDischargePoint::None;
+	Discharge=FHoseDischargeState(); DischargeEpisodes.Reset(); EpisodePoint=EHoseDischargePoint::None;
+	GetOwner()->ForceNetUpdate(); return true;
 }
 
 void UHoseTransferComponent::TickComponent(float DeltaTime,ELevelTick TickType,FActorComponentTickFunction* ThisTickFunction)

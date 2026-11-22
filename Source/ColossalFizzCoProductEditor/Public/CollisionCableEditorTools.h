@@ -15,4 +15,8 @@ public:
     /** Upgrade only the custom cable variant. Preserve endpoint interfaces, but replace its old gravity/braking loop with the native movement adapter. */
     UFUNCTION(BlueprintCallable, Category="Cable|Editor")
     static bool UpgradeCableFeatureIntegration(const FString& BlueprintPath);
+
+    /** Implement the world interaction attach request on the cola hose preset. */
+    UFUNCTION(BlueprintCallable, Category="Cable|Editor")
+    static bool InstallColaHoseHandGrip();
 };

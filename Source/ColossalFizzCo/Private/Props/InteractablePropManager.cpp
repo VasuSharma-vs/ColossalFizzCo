@@ -4581,7 +4581,7 @@ void APropManager::GetInteractionOptions(int32 InISID, AActor* InstigatorActor, 
 	if (!ProductDef) return;
 
 	const FPropInteractionProfile& Profile = ProductDef->InteractionProfile;
-	if (Profile.bCanGrab && Record->PackedRuntimeData.bIsGrabbable && Record->State != EPropState::Held)
+	if (Profile.bCanGrab && Record->PackedRuntimeData.bIsGrabbable && Record->State != EPropState::Held && AllowsPlayerGrab(*Record))
 	{
 		OutOptions.Add(EPropInteractionType::Grab);
 	}
@@ -4952,11 +4952,19 @@ bool APropManager::Server_RequestGrab_Validate(int32 InISID, AActor* InstigatorA
 	return InISID > 0;
 }
 
+bool APropManager::AllowsPlayerGrab(const FISIDRuntimeIndex& Record) const
+{
+	if (const auto* Active=Record.ActiveActor.Get()) return Active->AllowsPlayerGrab();
+	const auto ActiveClass=ASMComponent ? ASMComponent->GetEffectiveActivePropActorClass(Record.ProductID) : ActivePropActorClass;
+	const auto* Defaults=ActiveClass.GetDefaultObject();
+	return !Defaults || Defaults->AllowsPlayerGrab();
+}
+
 bool APropManager::ValidateGrab(int32 InISID, AActor* InstigatorActor) const
 {
 	if (ResolveRootISID(InISID) != InISID) return false;
 	const FISIDRuntimeIndex* Record = FindISIDData(InISID);
-	if (!Record) return false;
+	if (!Record || !AllowsPlayerGrab(*Record)) return false;
 	if (const auto* Active=Record->ActiveActor.Get()) if (const auto* Flight=Active->FindComponentByClass<URocketProjectileComponent>()) if (Flight->IsPoweredFlight()) return false;
 	if (!Record->PackedRuntimeData.bIsGrabbable) return false;
 	if (Record->Representation == EPropRepresentation::CompositeFragment) return false;
@@ -4980,20 +4988,37 @@ bool APropManager::BeginGrab(int32 InISID, AActor* InstigatorActor, USceneCompon
 
 bool APropManager::ExecuteGrab(int32 InISID, AActor* InstigatorActor, USceneComponent* AttachParent, FName SocketName)
 {
+	AActivePropActor* ASM = PrepareGrab(InISID, InstigatorActor, false);
+	if (!ASM) return false;
+
+	USceneComponent* TargetAttach = AttachParent;
+	if (!TargetAttach && InstigatorActor) TargetAttach = InstigatorActor->GetRootComponent();
+	if (TargetAttach) ASM->OnPlayerGrab(TargetAttach, SocketName);
+	return true;
+}
+
+AActivePropActor* APropManager::ReserveGrabForTravel(int32 InISID, AActor* Grabber)
+{
+	if (!HasAuthority() || GetNetMode() == NM_Client || !IsValid(Grabber) || !ValidateGrab(InISID, Grabber)) return nullptr;
+	return PrepareGrab(InISID, Grabber, true);
+}
+
+AActivePropActor* APropManager::PrepareGrab(int32 InISID, AActor* Grabber, bool bEnableReplication)
+{
 	InISID = ResolveRootISID(InISID);
 	// Section 11 Flow: Validate -> Promote ISM -> ASM -> Set State = Held -> Set interaction owner
 	FISIDRuntimeIndex* Record = FindISIDData(InISID);
-	if (!Record) return false;
-	if (const auto* Active=Record->ActiveActor.Get()) if (const auto* Flight=Active->FindComponentByClass<URocketProjectileComponent>()) if (Flight->IsPoweredFlight()) return false;
+	if (!Record || !AllowsPlayerGrab(*Record)) return nullptr;
+	if (const auto* Active=Record->ActiveActor.Get()) if (const auto* Flight=Active->FindComponentByClass<URocketProjectileComponent>()) if (Flight->IsPoweredFlight()) return nullptr;
 
 	AActivePropActor* ASM = nullptr;
-	if (!PromoteInstanceToASM(InISID, EPropActivationReason::Grab, false, ASM) || !ASM)
+	if (!PromoteInstanceToASM(InISID, EPropActivationReason::Grab, bEnableReplication, ASM) || !ASM)
 	{
-		return false;
+		return nullptr;
 	}
 
 	ASM->SetSeatedInFiller(false);
-	SetGrabber(InISID, InstigatorActor);
+	SetGrabber(InISID, Grabber);
 	SetPropState(InISID, EPropState::Held);
 
 	ASM->bIsHeld = true;
@@ -5011,18 +5036,7 @@ bool APropManager::ExecuteGrab(int32 InISID, AActor* InstigatorActor, USceneComp
 		ASM->PhysicsSimComponent->SetStateHeld();
 	}
 
-	USceneComponent* TargetAttach = AttachParent;
-	if (!TargetAttach && InstigatorActor)
-	{
-		TargetAttach = InstigatorActor->GetRootComponent();
-	}
-
-	if (TargetAttach)
-	{
-		ASM->OnPlayerGrab(TargetAttach, SocketName);
-	}
-
-	return true;
+	return ASM;
 }
 
 bool APropManager::SetGrabber(int32 InISID, AActor* GrabberActor)
@@ -5038,6 +5052,7 @@ bool APropManager::SetGrabber(int32 InISID, AActor* GrabberActor)
 
 	if (AActivePropActor* ASM = GetActiveActorFromISID(InISID))
 	{
+		if (ASM->InteractionOwner != GrabberActor) ASM->SetDrinkingCarry(false);
 		ASM->InteractionOwner = GrabberActor;
 		ASM->InteractionState = Record->RuntimeData.InteractionState;
 		ASM->bIsHeld = (GrabberActor != nullptr);
@@ -6100,7 +6115,7 @@ bool APropManager::GetIsGrabbable(int32 InISID) const
 {
 	if (const FISIDRuntimeIndex* Record = FindISIDData(InISID))
 	{
-		return Record->PackedRuntimeData.bIsGrabbable && Record->State != EPropState::Held;
+		return Record->PackedRuntimeData.bIsGrabbable && Record->State != EPropState::Held && AllowsPlayerGrab(*Record);
 	}
 	return false;
 }
@@ -8882,14 +8897,19 @@ bool APropManager::GetPackedRuntimeData(int32 InISID, FPropPackedRuntimeData& Ou
 
 bool APropManager::ConsumeInstancePortion(int32 InISID, AActor* ConsumerActor, float PortionRatio)
 {
-	if (!HasAuthority() || !IsValid(ConsumerActor) || !FMath::IsFinite(PortionRatio) || PortionRatio <= 0 || PortionRatio > 1) return false;
+	return PortionRatio <= 1.f && ConsumeInstancePortions(InISID, ConsumerActor, PortionRatio);
+}
+
+bool APropManager::ConsumeInstancePortions(int32 InISID, AActor* ConsumerActor, float Portions)
+{
+	if (!HasAuthority() || !IsValid(ConsumerActor) || !FMath::IsFinite(Portions) || Portions <= 0.f) return false;
 	if (ShopCheckout && ShopCheckout->IsReserved(InISID)) return false;
 	FISIDRuntimeIndex* R = FindISIDData(InISID);
 	FPropInstanceUniqueData* U = FindUniqueData(InISID);
 	const FPropProductDefinition* D = R ? FindProductDefinition(R->ProductID) : nullptr;
 	if (!D || !U || U->EventData.ContentLevel <= 0 || U->EventData.CapSealed > 0 || D->ConsumableProfile.NumOfPortions <= 0) return false;
 	FPropEventSyncDelta Delta; Delta.SetFlag(EPropEventDirtyMask::ContentLevel);
-	Delta.ContentLevel = FMath::Max(0.0f, U->EventData.ContentLevel - PortionRatio / D->ConsumableProfile.NumOfPortions);
+	Delta.ContentLevel = FMath::Max(0.0f, U->EventData.ContentLevel - Portions / D->ConsumableProfile.NumOfPortions);
 	if (!SubmitInstanceEventUpdate(InISID, Delta)) return false;
 	if (Delta.ContentLevel <= UE_SMALL_NUMBER && D->EmptyBottleProductID > 0) ChangePropProductWithMode(InISID, D->EmptyBottleProductID, EPropProductResetMode::ContentReset);
 	return true;

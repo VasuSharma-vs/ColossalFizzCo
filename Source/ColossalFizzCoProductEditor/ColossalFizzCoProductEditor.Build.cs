@@ -6,5 +6,6 @@ public class ColossalFizzCoProductEditor : ModuleRules
   PCHUsage=PCHUsageMode.UseExplicitOrSharedPCHs;
   PrivateDependencyModuleNames.AddRange(new[]{"Core","CoreUObject","Engine","ColossalFizzCo","Slate","SlateCore","PropertyEditor","AssetRegistry","UnrealEd","Json","AssetTools","BlueprintGraph","KismetCompiler","CableComponent"});
   PrivateDependencyModuleNames.AddRange(new[]{"UMG","RenderCore","Niagara","NiagaraEditor"});
+  PrivateDependencyModuleNames.AddRange(new[]{"AnimGraph","AnimGraphRuntime"});
  }
 }

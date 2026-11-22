@@ -6,12 +6,14 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/MovementComponent.h"
+#include "Resources/HoseCableActor.h"
 
 namespace CableConnectedPull
 {
     constexpr int32 MaxConnectedNodes=128;
     constexpr int32 MaxConnectedCables=128;
     constexpr int32 MaxWorldCables=4096;
+    constexpr double TensionApproachTime = .18;
     TArray<TWeakObjectPtr<UCollisionCableComponent>> RegisteredCables;
 
     struct FPointKey
@@ -34,6 +36,7 @@ namespace CableConnectedPull
         double Mass=0,Resistance=0;
         double Distance=DBL_MAX;
         int32 Depth=0;
+        bool bPullsAway=false;
         TArray<int32> Edges;
     };
     struct FEdge
@@ -65,7 +68,7 @@ namespace CableConnectedPull
             return A>UE_SMALL_NUMBER?FMath::Max(0.,(-B+FMath::Sqrt(Discriminant))/A):DBL_MAX;
         }
 
-        void FindLoads()
+        void FindLoads(double SearchFraction)
         {
             if(Root==INDEX_NONE)return;
             Bodies[Root].Distance=0;
@@ -74,7 +77,7 @@ namespace CableConnectedPull
             // or amplify motion: each body is settled once and each cable is counted once.
             for(;;)
             {
-                int32 Next=INDEX_NONE;double Best=1.+UE_KINDA_SMALL_NUMBER;
+                int32 Next=INDEX_NONE;double Best=SearchFraction+UE_KINDA_SMALL_NUMBER;
                 for(int32 I=0;I<Bodies.Num();++I)if(!Settled.Contains(I) && Bodies[I].Distance<Best)
                 {Next=I;Best=Bodies[I].Distance;}
                 if(Next==INDEX_NONE)break;
@@ -91,7 +94,13 @@ namespace CableConnectedPull
                     const int32 Other=Edge.A==Next?Edge.B:Edge.A;
                     const double Distance=Body.Distance+Slack(Next,Edge);
                     if(Distance<Bodies[Other].Distance-UE_SMALL_NUMBER)
-                    {Bodies[Other].Distance=Distance;Bodies[Other].Depth=Body.Depth+1;}
+                    {
+                        FBody& NextBody = Bodies[Other];
+                        NextBody.Distance = Distance;
+                        NextBody.Depth = Body.Depth+1;
+                        const FVector Away = Next==Edge.A ? Edge.PositionA-Edge.PositionB : Edge.PositionB-Edge.PositionA;
+                        NextBody.bPullsAway = Next==Root ? FVector::DotProduct(Away.GetSafeNormal(),Direction)>UE_KINDA_SMALL_NUMBER : Body.bPullsAway;
+                    }
                 }
             }
             Order.Sort([&](int32 A,int32 B)
@@ -125,6 +134,23 @@ namespace CableConnectedPull
             }
             if(TotalMass)*TotalMass=Mass;
             return Needed;
+        }
+
+        double SpeedWhenTaut(double SlackFraction) const
+        {
+            double Mass = 0.;
+            double RemainingForce = Force;
+            for (const auto& Pair : CableDistances)
+                if (Pair.Value <= SlackFraction + UE_SMALL_NUMBER) Mass += Pair.Key->GetCableMassKg();
+            for (int32 Index : Order)
+            {
+                const FBody& Body = Bodies[Index];
+                if (Index == Root || Body.Fixed || !Body.Actor || Body.Distance > SlackFraction + UE_SMALL_NUMBER) continue;
+                Mass += Body.Mass;
+                RemainingForce -= Body.Resistance;
+            }
+            // Match the pull solver's force budget for one movement step.
+            return Mass > UE_SMALL_NUMBER ? FMath::Max(0., RemainingForce) / Mass * (100. * Dt) : DBL_MAX;
         }
     };
 
@@ -172,7 +198,7 @@ namespace CableConnectedPull
         return false;
     }
 
-    FGraph Build(AActor* Driver,FVector Old,FVector Requested,float Dt,float Force)
+    FGraph Build(AActor* Driver,FVector Old,FVector Requested,float Dt,float Force,double LookAheadDistance=0.)
     {
         FGraph Graph;Graph.Driver=Driver;Graph.Old=Old;Graph.Delta=Requested-Old;
         Graph.Direction=Graph.Delta.GetSafeNormal();Graph.Dt=FMath::Clamp(double(Dt),.001,.25);Graph.Force=FMath::Max(0.,double(Force));
@@ -184,6 +210,10 @@ namespace CableConnectedPull
         {
             auto* Cable=Weak.Get();
             if(!Cable || !Cable->IsRegistered() || Cable->GetWorld()!=Driver->GetWorld() || !Cable->bEnableMovementRestrictions)continue;
+            // Loose hand-carried hoses use the carry speed limit. The pull graph
+            // handles external restraints and can move the bodies they connect to.
+            if (const auto* Hose=Cast<AHoseCableActor>(Cable->GetOwner()); Hose && Hose->Cable==Cable
+                && Hose->IsLooseHoseHeldBy(Driver)) continue;
             if(CablePoints.Num()>=MaxWorldCables){Graph.Limited=true;return Graph;}
             TArray<FCableMovementAttachment> Attachments;Cable->GetMovementAttachments(Attachments);
             for(const auto& Attachment:Attachments)
@@ -252,7 +282,9 @@ namespace CableConnectedPull
                 const int32 EdgeIndex=Graph.Edges.Add(Edge);Graph.Bodies[A].Edges.Add(EdgeIndex);if(A!=B)Graph.Bodies[B].Edges.Add(EdgeIndex);
             }
         }
-        Graph.FindLoads();return Graph;
+        const double StepDistance = Graph.Delta.Size();
+        Graph.FindLoads(StepDistance > UE_SMALL_NUMBER ? 1. + LookAheadDistance / StepDistance : 1.);
+        return Graph;
     }
 
     double SweepFraction(AActor* Actor,AActor* Driver,const FVector& Delta)
@@ -334,6 +366,69 @@ namespace CableConnectedPull
 void UCableMovementConstraintComponent::RegisterWorldCable(UCollisionCableComponent* Cable)
 {
     if(IsValid(Cable) && Cable->GetWorld() && Cable->GetWorld()->IsGameWorld())CableConnectedPull::RegisteredCables.AddUnique(Cable);
+}
+
+double UCableMovementConstraintComponent::GetConnectedBrakingSpeed(const FVector& OldLocation, const FVector& PlanarRequest,
+    float DeltaSeconds, float AvailableForceNewtons, double Deceleration) const
+{
+    const double StepDistance = FVector::Distance(OldLocation, PlanarRequest);
+    const double RequestedSpeed = StepDistance / DeltaSeconds;
+    const double LookAhead = FMath::Max(FMath::Square(RequestedSpeed) / (2. * Deceleration),
+        RequestedSpeed * CableConnectedPull::TensionApproachTime);
+    const auto Graph = CableConnectedPull::Build(GetOwner(), OldLocation, PlanarRequest, DeltaSeconds, AvailableForceNewtons, LookAhead);
+    if (Graph.Limited) return DBL_MAX;
+
+    double SpeedLimit = DBL_MAX;
+    for (int32 Index : Graph.Order)
+    {
+        const auto& Body = Graph.Bodies[Index];
+        if (!Body.bPullsAway || (!Body.Fixed && !Body.Actor)) continue;
+        const double TautSpeed = Body.Fixed ? 0. : Graph.SpeedWhenTaut(Body.Distance);
+        if (TautSpeed >= RequestedSpeed) continue;
+        const double Slack = Body.Distance * StepDistance;
+        const double StopSpeed = FMath::Sqrt(FMath::Square(TautSpeed) + 2. * Deceleration * Slack);
+        const double ApproachSpeed = TautSpeed + Slack / CableConnectedPull::TensionApproachTime;
+        SpeedLimit = FMath::Min3(SpeedLimit, StopSpeed, ApproachSpeed);
+    }
+    return SpeedLimit;
+}
+
+bool UCableMovementConstraintComponent::ConstrainHoseSwing(const AHoseCableActor& Hose, const FVector& OldLocation,
+    const FVector& RequestedLocation, FVector& AllowedLocation, FVector& Pivot) const
+{
+    const auto* Cable = Hose.Cable.Get();
+    const int32 HandIndex = Hose.FindHandHeldConnector(GetOwner());
+    if (HandIndex == INDEX_NONE || (!Hose.StartPort && !Hose.EndPort) || !Cable->FixedPointIndices.IsEmpty()) return false;
+
+    TArray<FCableMovementAttachment> Attachments;
+    Cable->GetMovementAttachments(Attachments);
+    if (Attachments.Num() != 2) return false;
+    const auto& Hand = Attachments[HandIndex == 0 ? 0 : 1];
+    const auto& Anchor = Attachments[HandIndex == 0 ? 1 : 0];
+    if (Hand.Driver.Get() != GetOwner() || !Anchor.Source.IsValid()) return false;
+    CableConnectedPull::FBody Mount;
+    Mount.Actor = Anchor.Driver.Get();
+    Mount.Fixed = Anchor.bFixed;
+    CableConnectedPull::DescribeBody(Mount, GetOwner());
+    if (!Mount.Fixed) return false;
+
+    // Express the sphere in capsule space using the current hand offset. Use
+    // the prior span if an authored pose was already stretched, as in the pull solver.
+    Pivot = Anchor.Position - (Hand.Position - RequestedLocation);
+    const double Reach = FMath::Max(1.f, Cable->CableLength) + FMath::Max(0.f, Cable->LengthSlackTolerance);
+    const double Radius = FMath::Max(Reach, FVector::Distance(Pivot, OldLocation));
+    const FVector Span = RequestedLocation - Pivot;
+    if (Span.SizeSquared() < FMath::Square(Radius)) return false;
+
+    AllowedLocation = Pivot + Span.GetSafeNormal() * Radius;
+    return true;
+}
+
+FVector UCableMovementConstraintComponent::ConstrainToFixedReach(const FVector& OldLocation, const FVector& RequestedLocation,
+    float DeltaSeconds) const
+{
+    const auto Graph = CableConnectedPull::Build(GetOwner(), OldLocation, RequestedLocation, DeltaSeconds, 0.f);
+    return Graph.Limited ? RequestedLocation : OldLocation + Graph.Delta * FMath::Clamp(Graph.MaximumFraction, 0., 1.);
 }
 
 FCablePullResult UCableMovementConstraintComponent::QueryConnectedPull(FVector OldLocation,FVector RequestedLocation,float DeltaSeconds,float AvailableForceNewtons) const

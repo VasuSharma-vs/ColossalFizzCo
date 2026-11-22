@@ -8,6 +8,7 @@ struct COLOSSALFIZZCO_API FReleasedLiquid
 {
 	GENERATED_BODY()
 	UPROPERTY(BlueprintReadOnly, SaveGame) FGuid ReleaseID;
+	/** Zero for a local tank whose liquid is cataloged but which has no managed instance. */
 	UPROPERTY(BlueprintReadOnly, SaveGame) int32 SourceISID = 0;
 	UPROPERTY(BlueprintReadOnly, SaveGame) int32 SourceProductID = 0;
 	UPROPERTY(BlueprintReadOnly, SaveGame) int32 ContentID = 0;

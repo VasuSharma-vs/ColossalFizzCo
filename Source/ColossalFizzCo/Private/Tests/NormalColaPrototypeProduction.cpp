@@ -8,7 +8,7 @@
 #include "Shop/ShopSupplyDepot.h"
 #include "Shop/ColaSupplyContainer.h"
 #include "Shop/ManualColaFillingMachine.h"
-#include "Components/SphereComponent.h"
+#include "Components/HoseSocketComponent.h"
 #include "Shop/ShopShelfStockComponent.h"
 #include "Shop/SharedTeamWalletComponent.h"
 #include "Props/InteractablePropManager.h"
@@ -201,7 +201,7 @@ void ANormalColaPrototypeTestActor::TickReinvestment()
 			if (auto* Machine=Cast<AManualColaFillingMachine>(Bench->GetOwner()))
 			{
 				auto* Container=Cast<AColaSupplyContainer>(Manager->GetActiveActorFromISID(NewID));
-				if (!Container || !Machine->AttachSupplyNozzle(FHitResult(Machine,Machine->HosePorts[0],Machine->GetHosePortTransform(0).GetLocation(),FVector::UpVector),Container->SupplyNozzle,NewID,Pawn))
+				if (!Container || !Machine->AttachSupplyNozzle(FHitResult(Machine,Machine->GetHoseSocket(0)->GetTraceVolume(),Machine->GetHosePortTransform(0).GetLocation(),FVector::UpVector),Container->SupplyNozzle,NewID,Pawn))
 				{ Fail(TEXT("Physical supply hose failed to attach")); return; }
 			}
 		}

@@ -174,6 +174,12 @@ public:
     UFUNCTION(BlueprintCallable, Category="Cable") void SetAttachEndTo(AActor* Actor, FName ComponentProperty, FName SocketName = NAME_None);
     UFUNCTION(BlueprintCallable, Category="Cable") AActor* GetAttachedActor() const;
     UFUNCTION(BlueprintCallable, Category="Cable") USceneComponent* GetAttachedComponent() const;
+    UFUNCTION(BlueprintPure, Category="Cable") USceneComponent* GetStartAttachmentComponent() const;
+    /** Pin the first point to an external component while leaving the cable in its render frame. */
+    void SetStartAttachmentOverride(USceneComponent* Component, FName SocketName = NAME_None);
+    /** Seat one attached end immediately and leave the other particles in their current positions. */
+    void SnapAttachedEndpoint(bool bStart);
+    void SetSocketMountedEndpoints(bool bStartMounted, bool bEndMounted);
     UFUNCTION(BlueprintCallable, Category="Cable") void GetCableParticleLocations(TArray<FVector>& Locations) const;
     /** Explicit reset/teleport. The supplied world-space path must have NumSegments+1 points. */
     UFUNCTION(BlueprintCallable, Category="Cable") bool SetCableParticleLocations(const TArray<FVector>& Locations);
@@ -192,6 +198,10 @@ public:
     UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cable|Weight") bool AddImpulseToPoint(int32 PointIndex, FVector Impulse);
     UFUNCTION(BlueprintPure, Category="Cable|Grabbing") int32 FindNearestCablePoint(FVector WorldPosition, float MaxDistance = 350) const;
     UFUNCTION(BlueprintPure, Category="Cable|Grabbing") bool FindCablePointAlongRay(FVector Start, FVector Direction, float Reach, float Radius, int32& PointIndex, FVector& HitPosition, float& RayDistance) const;
+    /** Query the visible tube analytically, without cooking physics bodies or issuing world-collision queries. Item identifies the simulation point. */
+    bool TraceCableInteraction(FVector Start, FVector End, float Padding, FHitResult& Hit) const;
+    /** Accept hits along a visible span, including its middle on a low-resolution cable. */
+    int32 FindCableGrabPoint(FVector Position, float Tolerance) const;
     /** Shared-server API. Remote players use their owned ShopPlayerInteractionComponent RPC boundary. */
     UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cable|Grabbing") bool BeginPointGrab(AActor* Participant, int32 PointIndex, FVector Target, const FCableGrabSettings& Settings, USceneComponent* TargetComponent = nullptr, FName SocketName = NAME_None);
     UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cable|Grabbing") bool UpdatePointGrab(AActor* Participant, FVector Target);
@@ -205,6 +215,10 @@ public:
     float GetCableMassKg() const;
     void NotifyConnectedPullApplied();
     UFUNCTION(BlueprintPure, Category="Cable|Rendering") void GetCableRenderLocations(TArray<FVector>& Locations) const;
+    /** Cosmetic changes to the hose wall keep cable anchors, grabs and collision stable. */
+    void SetHoseVisualState(float DiameterScale, bool bCenterRuptured);
+    UFUNCTION(BlueprintPure, Category="Cable|Rendering") float GetRenderingDiameter() const { return FMath::Max(.1f,CableWidth*VisualDiameterScale); }
+    UFUNCTION(BlueprintPure, Category="Cable|Rendering") bool HasVisibleRupture() const { return bVisualCenterRuptured; }
     bool HasSimulationAuthority() const;
 
 private:
@@ -261,6 +275,8 @@ private:
     uint32 PublishedRenderSignature = 0;
     FVector PublishedRenderOrigin = FVector(UE_BIG_NUMBER);
     float PublishedWidth = -1;
+    float VisualDiameterScale = 1.f;
+    bool bVisualCenterRuptured = false;
     float PublishedTiling = -1;
     int32 PublishedSubdivisions = -1;
     TArray<FVector> ClientSnapshotTargets;
@@ -272,6 +288,16 @@ private:
     uint64 LastConnectedPullFrame=MAX_uint64;
     UPROPERTY(ReplicatedUsing=OnRep_SimulationSnapshot) FCableSimulationSnapshot SimulationSnapshot;
     UPROPERTY(Replicated) TObjectPtr<USceneComponent> ReplicatedEndComponent;
+    // The owning hose restores this from its replicated port or hand grip on each peer.
+    TWeakObjectPtr<USceneComponent> StartAttachmentOverride;
+    FName StartOverrideSocket = NAME_None;
+    bool bStartSocketMounted = false;
+    bool bEndSocketMounted = false;
+    bool bSocketSnapPending = false;
+    USceneComponent* GetStartAttachmentSource() const;
+    FVector GetStartAttachmentLocation() const;
+    const AActor* GetSocketMountOwner(int32 PointIndex) const;
+    const FCollisionQueryParams& GetSpanCollisionParams(int32 SpanIndex, TOptional<FCollisionQueryParams>& LocalParams) const;
     bool IsPinned(int32 Index) const;
     double InversePointMass(int32 Index) const;
     bool IsWorldAnchor(int32 Index) const;
@@ -281,6 +307,7 @@ private:
     void RefreshCollisionParams();
     void PublishSimulation();
     void BuildCableRenderLocations(TArray<FVector>& Locations) const;
+    void FollowReplicatedHoseAttachments(TArray<FVector>& Locations) const;
     void ConstrainRenderPath(TArray<FVector>& Locations);
     void Simulate(float Dt, const FVector& StartTarget, const FVector& EndTarget);
     void CheckCollisionPointBatch(const FVector& StartTarget, const FVector& EndTarget);
@@ -296,8 +323,8 @@ private:
     void ProjectLineContacts();
     void ProjectLinePoint(int32 Index, const FLineContact& Contact);
     void ProjectLineSegment(int32 Index, const FLineContact& Contact);
-    bool QueryPointMotion(const FVector& From, const FVector& To, FHitResult& Hit);
-    bool RefreshLineContact(const FVector& Position, FLineContact& Contact);
+    bool QueryPointMotion(const FVector& From, const FVector& To, FHitResult& Hit, const FCollisionQueryParams* ParamsOverride = nullptr);
+    bool RefreshLineContact(const FVector& Position, FLineContact& Contact, const FCollisionQueryParams* ParamsOverride = nullptr);
     bool MakePenetrationContact(const FVector& From, const FVector& Position, const FHitResult& Hit, FLineContact& Contact);
     void MoveContactParticle(int32 Index, const FVector& Correction, const FLineContact& Contact);
     FVector ConstrainMotionToKnownContacts(int32 Index, FVector Motion) const;

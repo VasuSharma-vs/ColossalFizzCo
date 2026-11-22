@@ -39,6 +39,19 @@ bool UColaRocketPlumeEditorLibrary::AddStandaloneColorParameter(UNiagaraSystem* 
     return Store.SetParameterValue(FLinearColor(.25f, .08f, .02f, 1.f), Color, true);
 }
 
+bool UColaRocketPlumeEditorLibrary::AddOutletParameters(UNiagaraSystem* System)
+{
+    if (!AddStandaloneColorParameter(System)) return false;
+    System->Modify();
+    auto& Store = System->GetExposedParameters();
+    for (const FName Name : {FName(TEXT("User.OutletFlow")), FName(TEXT("User.OutletPressure"))})
+    {
+        const FNiagaraVariable Input(FNiagaraTypeDefinition::GetFloatDef(), Name);
+        if (Store.IndexOf(Input)==INDEX_NONE && !Store.SetParameterValue(4.f, Input, true)) return false;
+    }
+    return true;
+}
+
 void UColaRocketPlumeEditorLibrary::ResetPlumeEmitters(UNiagaraSystem* System)
 {
     if (!System) return;

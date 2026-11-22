@@ -2,13 +2,18 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/LocalPlayer.h"
+#include "Camera/CameraActor.h"
 #include "GameFramework/WorldSettings.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Components/BoxComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Components/ResourceTransferEndpointComponent.h"
 #include "Components/HoseTransferComponent.h"
+#include "Components/HoseSocketComponent.h"
 #include "Components/ResourcePumpComponent.h"
 #include "Components/CollisionCableComponent.h"
 #include "Components/CableMovementConstraintComponent.h"
@@ -59,6 +64,15 @@ struct FFixture
 		Result->BufferCapacityUnits=10; Result->BurstPressureThreshold=100; Result->BlockedPressureRisePerSecond=0;
 		return Result;
 	}
+	UHoseSocketComponent* Socket(AActor* Owner, const FVector& Offset=FVector::ZeroVector)
+	{
+		auto* Result=NewObject<UHoseSocketComponent>(Owner);
+		Owner->AddInstanceComponent(Result);
+		Result->SetupAttachment(Owner->GetRootComponent());
+		Result->SetRelativeLocation(Offset);
+		Result->RegisterComponent();
+		return Result;
+	}
 	AActor* PullBody(FVector Position,float Weight=10,float Resistance=0,bool Fixed=false)
 	{
 		auto* Result=World->SpawnActor<AActor>(); auto* Root=NewObject<UBoxComponent>(Result);
@@ -84,6 +98,29 @@ struct FFixture
 		auto* Result=Driver->FindComponentByClass<UCableMovementConstraintComponent>();
 		if (!Result) { Result=NewObject<UCableMovementConstraintComponent>(Driver); Driver->AddInstanceComponent(Result); Result->RegisterComponent(); }
 		Result->RegisterCable(Seed); return Result;
+	}
+	void AddWalkingFloor()
+	{
+		auto* Floor = PullBody(FVector(0, 0, -25), 10, 0, true);
+		CastChecked<UBoxComponent>(Floor->GetRootComponent())->SetBoxExtent(FVector(4000, 4000, 25));
+	}
+	ACharacter* SpawnWalker(FVector Location)
+	{
+		auto* Player = World->SpawnActor<ACharacter>(Location, FRotator::ZeroRotator);
+		if (!Player) return nullptr;
+		Location.Z = Player->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() + 2.15;
+		Player->SetActorLocation(Location);
+		auto* Movement = Player->GetCharacterMovement();
+		Movement->bRunPhysicsWithNoController = true;
+		Movement->SetMovementMode(MOVE_Walking);
+		Movement->Velocity = FVector(Movement->GetMaxSpeed(), 0, 0);
+		return Player;
+	}
+	void Walk(ACharacter& Player, FVector Direction, float Step = 1.f / 60.f)
+	{
+		Player.AddMovementInput(Direction, 1.f, true);
+		auto* Movement = Player.GetCharacterMovement();
+		Movement->TickComponent(Step, LEVELTICK_All, &Movement->PrimaryComponentTick);
 	}
 	bool ManagedStocks(APropManager*& Manager,int32& Source,int32& Target)
 	{
@@ -128,6 +165,374 @@ bool FHoseTypedRulesTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Resource changes after connection cannot move incompatible content"),Hose->TransferForDuration(1),0.f);
 	TestEqual(TEXT("Invalidated connection cannot debit the source"),Source->GetStoredUnits(),8.f);
 	TestEqual(TEXT("Invalidated connection cannot credit the target"),Target->GetStoredUnits(),0.f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHoseSocketFlowTest,"ColossalFizzCo.Hose.ReusableSocket.FlowAndBreakLimits",CableHoseTests::Flags)
+bool FHoseSocketFlowTest::RunTest(const FString& Parameters)
+{
+	CableHoseTests::FFixture F;
+	if (!F.World) return false;
+	auto* Outlet=F.Socket(F.Actor(FVector(0,0,150)));
+	auto* Inlet=F.Socket(F.Actor(FVector(200,0,150)));
+	Outlet->bCanSupply=true;
+	Outlet->bCanReceive=false;
+	Outlet->ResourceID=7;
+	Outlet->PushPressure=1.f;
+	Outlet->MaxSupplyUnitsPerSecond=2.f;
+	Outlet->SetStoredUnits(20.f);
+	Inlet->ResourceID=7;
+	Inlet->CapacityUnits=10.f;
+	Inlet->BreakAtStoredUnits=3.f;
+	Inlet->PullPressure=1.f;
+	Inlet->SetRelativeRotation(FRotator(27,64,18));
+	auto* Hose=F.World->SpawnActor<AHoseCableActor>();
+	if (!Hose) return false;
+	Hose->Transfer->BurstPressureThreshold=100.f;
+	if (!TestTrue(TEXT("An empty adaptable hose accepts the typed receiving socket first, using either end"),Inlet->AttachHose(Hose,0))) return false;
+	TestTrue(TEXT("The socket tracks a physically attached hose before the other end is connected"),Inlet->ConnectedHose==Hose && !Inlet->IsHoseSupplying());
+	TestEqual(TEXT("The receiver sets the subtype of the empty unconnected hose"),Hose->Transfer->ResourceID,7);
+	Hose->Tick(0.f);
+	TestTrue(TEXT("The hose connector aligns to the component's location and arrow axis"),Hose->StartEndpointMesh->GetComponentLocation().Equals(Inlet->GetComponentLocation(),.01)
+		&& Hose->StartEndpointMesh->GetUpVector().Equals(Inlet->GetUpVector(),.001));
+	if (!TestTrue(TEXT("The remaining connector joins the configured outlet"),Outlet->AttachHose(Hose,Hose->Cable->NumSegments))) return false;
+	TestTrue(TEXT("Flow starts when both compatible sockets are connected"),FMath::IsNearlyEqual(Hose->Transfer->TransferForDuration(.5f),1.f,.002f));
+	TestTrue(TEXT("Both ends expose the measured rate after the outlet cap"),Inlet->IsHoseSupplying() && Outlet->IsHoseSupplying()
+		&& FMath::IsNearlyEqual(Inlet->GetCurrentFlowUnitsPerSecond(),2.f,.004f)
+		&& FMath::IsNearlyEqual(Outlet->GetCurrentFlowUnitsPerSecond(),2.f,.004f));
+	TestEqual(TEXT("Incoming pressure includes configured suction"),Inlet->LastIncomingPressure,2.f);
+	Inlet->SetFlowRequested(false);
+	Hose->Transfer->TransferForDuration(.5f);
+	TestFalse(TEXT("Closing demand clears the live flow reading"),Inlet->IsHoseSupplying());
+	Inlet->SetFlowRequested(true);
+	Hose->Transfer->TransferForDuration(3.f);
+	TestTrue(TEXT("The stored-volume limit stops flow and pops only the inlet"),Inlet->bIsBroken && !Inlet->ConnectedHose
+		&& !Hose->EndPort && Hose->StartPort==Outlet && !Hose->Transfer->HasValidConnection());
+	TestTrue(TEXT("Storage and received total stop at the configured amount"),FMath::IsNearlyEqual(Inlet->GetStoredUnits(),3.f,.002f)
+		&& FMath::IsNearlyEqual(Inlet->TotalReceivedUnits,3.0,.002));
+	TestFalse(TEXT("A broken inlet rejects another connection"),Inlet->AttachHose(Hose));
+	TestFalse(TEXT("The storage limit must be cleared before repair"),Inlet->RepairSocket());
+	Inlet->SetStoredUnits(0.f);
+	if (!TestTrue(TEXT("A drained inlet can be repaired and reconnected"),Inlet->RepairSocket() && Inlet->AttachHose(Hose))) return false;
+
+	Inlet->MaxIntakePressure=1.f;
+	TestEqual(TEXT("Excess pressure breaks the inlet before any credit"),Hose->Transfer->TransferForDuration(.5f),0.f);
+	TestTrue(TEXT("Pressure overload leaves the outlet connected"),Inlet->bIsBroken && !Hose->EndPort && Hose->StartPort==Outlet);
+	Inlet->MaxIntakePressure=6.f;
+	Inlet->MaxIntakeUnitsPerSecond=.5f;
+	if (!TestTrue(TEXT("Repair restores the pressure-popped inlet"),Inlet->RepairSocket() && Inlet->AttachHose(Hose))) return false;
+	TestEqual(TEXT("Excess intake rate also fails before any credit"),Hose->Transfer->TransferForDuration(.5f),0.f);
+	TestTrue(TEXT("Rate overload breaks the socket before transferring stored resource"),Inlet->bIsBroken && !Hose->EndPort && Inlet->GetStoredUnits()==0.f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHoseSocketInteractionTest,"ColossalFizzCo.Hose.ReusableSocket.SelectsExactVolume",CableHoseTests::Flags)
+bool FHoseSocketInteractionTest::RunTest(const FString& Parameters)
+{
+	CableHoseTests::FFixture F;
+	if (!F.World) return false;
+	auto* Player=F.World->SpawnActor<ACharacter>();
+	auto* PC=F.World->SpawnActor<APlayerController>();
+	Player->SetActorEnableCollision(false);
+	Player->GetCharacterMovement()->DisableMovement();
+	PC->Possess(Player);
+	auto* Local=NewObject<ULocalPlayer>(GEngine);
+	Local->PlayerController=PC;
+	PC->Player=Local;
+	FVector Eye;
+	FRotator Aim;
+	Player->GetActorEyesViewPoint(Eye,Aim);
+	auto* Camera=F.World->SpawnActor<ACameraActor>(Eye,Aim);
+	if (!Camera) return false;
+	PC->SetViewTarget(Camera);
+	PC->UpdateCameraManager(0);
+	auto* Actions=NewObject<UShopPlayerInteractionComponent>(Player);
+	Player->AddInstanceComponent(Actions);
+	Actions->RegisterComponent();
+	PC->GetPlayerViewPoint(Eye,Aim);
+	const FVector Direction=Aim.Vector();
+	const FVector Side=FRotationMatrix(Aim).GetUnitAxis(EAxis::Y);
+	auto* SocketActor=F.Actor(Eye+Direction*180);
+	auto* Wrong=F.Socket(SocketActor,-Side*45);
+	Wrong->Category=EResourceTransportCategory::Fuel;
+	auto* Right=F.Socket(SocketActor,Side*45);
+	if (!TestTrue(TEXT("Each addable socket registers its own trace-only box"),Right->GetTraceVolume()
+		&& Right->GetTraceVolume()->GetCollisionEnabled()==ECollisionEnabled::QueryOnly
+		&& Right->GetTraceVolume()->GetCollisionResponseToChannel(ECC_Pawn)==ECR_Ignore
+		&& UHoseSocketComponent::GetSocketFromHitComponent(Right->GetTraceVolume())==Right)) return false;
+	TestNull(TEXT("The actor-only fallback cannot select a socket without its specific hit"),
+		UResourcePortLibrary::ResolveResourcePort(SocketActor,EResourceTransportCategory::Content,1,false));
+
+	auto* Hose=F.World->SpawnActor<AHoseCableActor>();
+	Hose->bCarryConnectorOnPickup=true;
+	Hose->Cable->bEnableGrabbing=true;
+	Hose->Cable->bEnableCollision=false;
+	const FVector Near=Eye+Direction*80;
+	TArray<FVector> Points;
+	for (int32 Index=0; Index<=Hose->Cable->NumSegments; ++Index) Points.Add(Near+Side*(5*Index));
+	Hose->Cable->SetCableParticleLocations(Points);
+	Hose->Tick(0);
+	if (!TestTrue(TEXT("The player's grab takes the physical connector"),Actions->TryToggleCableGrabFromView() && Hose->FindHandHeldConnector(Player)==0)) return false;
+
+	auto AimAtSocket = [&](const UHoseSocketComponent* Target)
+	{
+		const FRotator DirectionToSocket=(Target->GetTraceVolume()->Bounds.Origin-Eye).Rotation();
+		Camera->SetActorRotation(DirectionToSocket);
+		PC->SetControlRotation(DirectionToSocket);
+		PC->UpdateCameraManager(0);
+	};
+	AimAtSocket(Wrong);
+	TestTrue(TEXT("E on an incompatible socket leaves the hose in hand"),Actions->TryOpenTerminalFromView() && Actions->IsCableGrabActive() && !Wrong->ConnectedHose);
+	AimAtSocket(Right);
+	TestTrue(TEXT("E attaches to the exact compatible component and consumes the hold"),Actions->TryOpenTerminalFromView()
+		&& !Actions->IsCableGrabActive() && Right->ConnectedHose==Hose && Hose->EndPort==Right && !Wrong->ConnectedHose);
+
+	auto* Source=F.Endpoint(EResourceTransportCategory::Content,Hose->Transfer->ResourceID,10,5,F.Actor(Eye+Direction*220-Side*90));
+	if (!TestTrue(TEXT("The supply side connects before rupture"), Hose->ConnectStart(Source))) return false;
+	Source->PushPressure=2;
+	Source->MaxSupplyUnitsPerSecond=1;
+	Right->SetFlowRequested(false);
+	Hose->Transfer->BurstPressureThreshold=1;
+	Hose->Transfer->BurstDelay=.1f;
+	Hose->Transfer->TransferForDuration(.2f);
+	if (!TestTrue(TEXT("A ruptured content hose stays mounted until unplugged"),
+		Hose->Transfer->bBurst && Right->ConnectedHose==Hose)) return false;
+	TestTrue(TEXT("Grab takes the burst connector out of the socket while preserving the supply end"),
+		Actions->TryGrabSocketHoseFromView(true) && !Right->ConnectedHose && Hose->StartPort==Source
+		&& Hose->FindHandHeldConnector(Player)==Hose->GetReceivingConnectorIndex());
+	Actions->RequestCableRelease();
+	TestTrue(TEXT("A released burst connector can be grabbed again"), Hose->CanGrabConnector(Hose->GetReceivingConnectorIndex()));
+	TestFalse(TEXT("Burst connectors cannot be plugged back in"), Right->AttachHose(Hose));
+	Hose->DisconnectStart();
+	Hose->Cable->SetCableParticleLocations(Points);
+	Hose->Tick(0);
+	Camera->SetActorRotation(Aim);
+	PC->SetControlRotation(Aim);
+	PC->UpdateCameraManager(0);
+	if (!TestTrue(TEXT("A fully loose burst hose can be picked up from the floor"), Actions->TryGrabLooseHoseFromView())) return false;
+	const int32 HeldPoint=Hose->FindHandHeldConnector(Player);
+	Hose->Cable->GetCableParticleLocations(Points);
+	if (!TestTrue(TEXT("Picking up the burst hose still takes a connector into the hand"), Points.IsValidIndex(HeldPoint))) return false;
+	const FVector ThrowOrigin=Points[HeldPoint];
+	for (int32 I=0; I<Points.Num(); ++I) Points[I]=ThrowOrigin+Side*5*(I-HeldPoint);
+	Hose->Cable->CableLength=5*Hose->Cable->NumSegments;
+	Hose->Cable->CableGravityScale=0;
+	Hose->Cable->SetCableParticleLocations(Points);
+	Actions->RequestCableDrop();
+	Hose->Cable->TickComponent(1.f/30.f, LEVELTICK_All, nullptr);
+	Hose->Cable->GetCableParticleLocations(Points);
+	TestTrue(TEXT("Dropping a loose blown hose tosses it along the player's aim"), !Actions->IsCableGrabActive()
+		&& Hose->FindHandHeldConnector(Player)==INDEX_NONE && FVector::DotProduct(Points[HeldPoint]-ThrowOrigin,Direction)>.5);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLooseHoseCarryWeightTest, "ColossalFizzCo.Hose.Interaction.LooseCarryWeight", CableHoseTests::Flags)
+bool FLooseHoseCarryWeightTest::RunTest(const FString& Parameters)
+{
+	CableHoseTests::FFixture F;
+	if (!F.World) return false;
+	F.AddWalkingFloor();
+	auto* HoseClass = LoadClass<AHoseCableActor>(nullptr, TEXT("/Game/Resources/Hoses/BP_ContentHose.BP_ContentHose_C"));
+	if (!TestNotNull(TEXT("The saved content hose preset loads"), HoseClass)) return false;
+	const FVector Forward(1, 0, 0);
+	double Speeds[2]{};
+	for (int32 Trial = 0; Trial < 2; ++Trial)
+	{
+		const double Lane = Trial * 500.;
+		auto* Player = F.SpawnWalker(FVector(0, Lane, 100));
+		auto* Hose = F.World->SpawnActor<AHoseCableActor>(HoseClass, FVector(150, Lane, 100), FRotator::ZeroRotator);
+		if (!Player || !Hose) return false;
+		Hose->Cable->PointMassKg = Trial == 0 ? .05f : 5.f;
+		const int32 Connector = Trial == 0 ? 0 : Hose->Cable->NumSegments;
+		if (!TestTrue(TEXT("A loose connector enters the normal hand-grip path"),
+			Hose->RequestConnectorHandGrip(Connector, Player->GetMesh(), NAME_None))) return false;
+		auto* Movement = Player->GetCharacterMovement();
+		const float BaseSpeed = Movement->MaxWalkSpeed;
+		F.Walk(*Player, Forward);
+		TestTrue(TEXT("Picking up the hose lets walking speed ease down"),
+			Movement->Velocity.X > BaseSpeed - 90. && Movement->Velocity.X < BaseSpeed);
+		for (int32 Frame = 0; Frame < 54; ++Frame) F.Walk(*Player, Forward);
+		Speeds[Trial] = Movement->Velocity.X;
+		TestTrue(TEXT("The loose hose still lets the holder move freely across the floor"),
+			Movement->IsMovingOnGround() && Speeds[Trial] > BaseSpeed * .2 && Player->GetActorLocation().X > 100.);
+		TestEqual(TEXT("Holding the hose leaves the character's configured walk speed intact"), Movement->MaxWalkSpeed, BaseSpeed);
+
+		if (!TestTrue(TEXT("Release the loose connector"), Hose->ReleaseHandHeldConnector(Player))) return false;
+		for (int32 Frame = 0; Frame < 30; ++Frame) F.Walk(*Player, Forward);
+		TestTrue(TEXT("Releasing the hose restores normal walking speed"), FMath::IsNearlyEqual(Movement->Velocity.X, double(BaseSpeed), 1.));
+
+		if (Trial == 1)
+		{
+			if (!TestTrue(TEXT("Regrab the loose connector before falling"),
+				Hose->RequestConnectorHandGrip(Connector, Player->GetMesh(), NAME_None))) return false;
+			Player->SetActorLocation(FVector(0, Lane, 900));
+			Movement->SetMovementMode(MOVE_Falling);
+			Movement->Velocity = FVector(BaseSpeed, 0, -100);
+			constexpr float Step = 1.f / 60.f;
+			F.Walk(*Player, FVector::ZeroVector, Step);
+			TestTrue(TEXT("Carrying the loose hose preserves falling speed"),
+				FMath::IsNearlyEqual(Movement->Velocity.Z, double(-100.f + Movement->GetGravityZ() * Step), .1));
+		}
+	}
+	TestTrue(TEXT("A heavier loose hose slows walking more than a light hose"), Speeds[0] > Speeds[1] * 1.5);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FConnectedHoseBrakingTest, "ColossalFizzCo.Hose.Interaction.ConnectedWalkingBraking", CableHoseTests::Flags)
+bool FConnectedHoseBrakingTest::RunTest(const FString& Parameters)
+{
+	CableHoseTests::FFixture F;
+	if (!F.World) return false;
+	F.AddWalkingFloor();
+	const FVector Forward(1, 0, 0);
+	for (int32 Trial = 0; Trial < 2; ++Trial)
+	{
+		const FVector Start(0, Trial * 500., 100);
+		auto* Player = F.SpawnWalker(Start);
+		auto* Hose = F.World->SpawnActor<AHoseCableActor>();
+		if (!Player || !Hose) return false;
+		Hose->bCarryConnectorOnPickup = true;
+		Hose->Cable->CableLength = 450.f;
+		Hose->Cable->LengthSlackTolerance = 0.f;
+		Hose->Cable->bEnablePointWeight = false;
+		Hose->Cable->bEnableCollision = false;
+		if (!TestTrue(TEXT("Grab the connector from a normal hand grip"),
+			Hose->RequestConnectorHandGrip(Hose->Cable->NumSegments, Player->GetMesh(), NAME_None))) return false;
+		const FVector MountLocation = Player->GetMesh()->GetComponentLocation() - Forward * 275.;
+		auto* Mount = Trial == 0 ? F.Actor(MountLocation) : F.PullBody(MountLocation, 200.f, 100.f);
+		Mount->SetActorEnableCollision(false);
+		auto* Supply = F.Endpoint(EResourceTransportCategory::Content, 1, 100, 30, Mount);
+		if (!TestTrue(TEXT("Attach the other end to the test load"), Hose->ConnectStart(Supply))) return false;
+
+		auto* Movement = Player->GetCharacterMovement();
+		const double NormalSpeed = Movement->GetMaxSpeed();
+		double BiggestSpeedDrop = 0.;
+		bool bBrakedWithSlack = false;
+		double GreatestSpan = 0.;
+		for (int32 Frame = 0; Frame < 135; ++Frame)
+		{
+			const double PreviousSpeed = Movement->Velocity.X;
+			F.Walk(*Player, Forward);
+			const double Span = FVector::Distance(Player->GetMesh()->GetComponentLocation(), Supply->GetComponentLocation());
+			GreatestSpan = FMath::Max(GreatestSpan, Span);
+			BiggestSpeedDrop = FMath::Max(BiggestSpeedDrop, PreviousSpeed - Movement->Velocity.X);
+			bBrakedWithSlack |= Span < Hose->Cable->CableLength - 15. && Movement->Velocity.X < NormalSpeed - 30.;
+		}
+		TestTrue(TEXT("Walking speed eases down before the connected hose is taut"), bBrakedWithSlack);
+		TestTrue(TEXT("Tension avoids a one-frame speed drop"), BiggestSpeedDrop < 90.);
+		TestTrue(TEXT("The eased movement stays within the cable length"), GreatestSpan <= Hose->Cable->CableLength + .25);
+		TestTrue(TEXT("The player keeps the physical hand grip"), Hose->FindHandHeldConnector(Player) == Hose->Cable->NumSegments);
+		if (Trial == 0)
+		{
+			TestTrue(TEXT("The fixed mount holds the player at full reach"),
+				Movement->Velocity.X < 1. && GreatestSpan > Hose->Cable->CableLength - 2.);
+			TestTrue(TEXT("The fixed supply stays in place"), Mount->GetActorLocation().Equals(MountLocation, .01));
+		}
+		else
+		{
+			TestTrue(TEXT("The heavy movable body keeps progressing under an affordable pull"),
+				Mount->GetActorLocation().X > MountLocation.X + 5. && Movement->Velocity.X > 2. && Movement->Velocity.X < 40.);
+		}
+		const double TurnPoint = Player->GetActorLocation().X;
+		for (int32 Frame = 0; Frame < 12; ++Frame) F.Walk(*Player, -Forward);
+		TestTrue(TEXT("Moving back toward the mount immediately frees the player to accelerate"),
+			Player->GetActorLocation().X < TurnPoint - 12. && Movement->Velocity.X < -150.);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHeldHoseFallTest, "ColossalFizzCo.Hose.Interaction.FallingWithMountedHose", CableHoseTests::Flags)
+bool FHeldHoseFallTest::RunTest(const FString& Parameters)
+{
+	CableHoseTests::FFixture F;
+	if (!F.World) return false;
+	const FVector Start(0, 0, 600);
+	auto* Player = F.World->SpawnActor<ACharacter>(Start, FRotator::ZeroRotator);
+	auto* Reference = F.World->SpawnActor<ACharacter>(Start + FVector(0, 1000, 0), FRotator::ZeroRotator);
+	auto* Controller = F.World->SpawnActor<APlayerController>();
+	auto* Hose = F.World->SpawnActor<AHoseCableActor>();
+	if (!Player || !Reference || !Controller || !Hose) return false;
+	Controller->Possess(Player);
+	auto* LocalPlayer = NewObject<ULocalPlayer>(GEngine);
+	LocalPlayer->PlayerController = Controller;
+	Controller->Player = LocalPlayer;
+	Controller->SetViewTarget(Player);
+	Controller->SetControlRotation(FRotator::ZeroRotator);
+	Controller->UpdateCameraManager(0);
+	auto* Actions = NewObject<UShopPlayerInteractionComponent>(Player);
+	Player->AddInstanceComponent(Actions);
+	Actions->RegisterComponent();
+
+	FVector Eye;
+	FRotator Aim;
+	Controller->GetPlayerViewPoint(Eye, Aim);
+	const FVector LooseEnd = Eye + Aim.Vector() * 100;
+	auto* Supply = F.Endpoint(EResourceTransportCategory::Content, 1, 100, 30, F.Actor(LooseEnd + FVector(0, 150, 0)));
+	Hose->bCarryConnectorOnPickup = true;
+	Hose->Cable->CableLength = 450;
+	Hose->Cable->bEnablePointWeight = true;
+	Hose->Cable->PointMassKg = 500;
+	if (!TestTrue(TEXT("Mount the weighted hose to a fixed supply"), Hose->ConnectStart(Supply))) return false;
+	TArray<FVector> Points;
+	for (int32 Index = 0; Index <= Hose->Cable->NumSegments; ++Index)
+		Points.Add(FMath::Lerp(Supply->GetComponentLocation(), LooseEnd, double(Index) / Hose->Cable->NumSegments));
+	Hose->Cable->SetCableParticleLocations(Points);
+	Hose->Tick(0);
+	if (!TestTrue(TEXT("Grab the other connector through the player action"), Actions->TryToggleCableGrabFromView()
+		&& Hose->FindHandHeldConnector(Player) == Hose->Cable->NumSegments)) return false;
+
+	auto* Movement = Player->GetCharacterMovement();
+	auto* ReferenceMovement = Reference->GetCharacterMovement();
+	ReferenceMovement->bRunPhysicsWithNoController = true;
+	for (auto* Component : {Movement, ReferenceMovement})
+	{
+		Component->SetMovementMode(MOVE_Falling);
+		Component->Velocity = FVector(180, 0, 0);
+	}
+	constexpr float Step = 1.f / 60.f;
+	auto Advance = [&](int32 Frames)
+	{
+		for (int32 Frame = 0; Frame < Frames; ++Frame)
+		{
+			Movement->TickComponent(Step, LEVELTICK_All, &Movement->PrimaryComponentTick);
+			ReferenceMovement->TickComponent(Step, LEVELTICK_All, &ReferenceMovement->PrimaryComponentTick);
+		}
+	};
+	Advance(16);
+	TestTrue(TEXT("The player keeps the weighted hose while it still has slack"), Actions->IsCableGrabActive());
+	TestTrue(TEXT("Weight still limits horizontal movement while carrying the hose"),
+		Player->GetActorLocation().X < Reference->GetActorLocation().X - 1);
+	TestTrue(TEXT("Slack hose preserves falling speed and distance"), Movement->Velocity.Z < -200
+		&& FMath::IsNearlyEqual(Movement->Velocity.Z, ReferenceMovement->Velocity.Z, .01)
+		&& FMath::IsNearlyEqual(Player->GetActorLocation().Z, Reference->GetActorLocation().Z, .01));
+	const FVector BeforeSwing = Player->GetActorLocation();
+	const FVector Anchor = Supply->GetComponentLocation();
+	Advance(60);
+	const auto* Hand = Hose->Cable->GetAttachedComponent();
+	const double Reach = Hose->Cable->CableLength + Hose->Cable->LengthSlackTolerance;
+	if (!TestTrue(TEXT("The player swings at the hose's full reach with the connector in hand"),
+		Actions->IsCableGrabActive() && Hose->FindHandHeldConnector(Player) == Hose->Cable->NumSegments
+		&& Hand && Hand->GetOwner() == Player
+		&& FMath::IsNearlyEqual(FVector::Distance(Hand->GetComponentLocation(), Anchor), Reach, .1))) return false;
+	const FVector Radial = (Hand->GetComponentLocation() - Anchor).GetSafeNormal();
+	TestTrue(TEXT("The fall builds swing speed along the arc with no outward velocity"),
+		FMath::Abs(FVector::DotProduct(Movement->Velocity, Radial)) < .1
+		&& Movement->Velocity.Size2D() > 60 && FVector::Dist2D(Player->GetActorLocation(), BeforeSwing) > 30);
+	Advance(20);
+	TestTrue(TEXT("The hose stays mounted and supports the player throughout the swing"), Actions->IsCableGrabActive()
+		&& Movement->IsFalling() && Supply->GetComponentLocation().Equals(Anchor, .01)
+		&& FVector::Distance(Hand->GetComponentLocation(), Anchor) <= Reach + .1
+		&& Player->GetActorLocation().Z > Reference->GetActorLocation().Z + 100);
+
+	const FVector ReleaseVelocity = Movement->Velocity;
+	Actions->RequestCableRelease();
+	Advance(1);
+	TestTrue(TEXT("Manual release retains swing momentum and resumes free flight"), !Actions->IsCableGrabActive()
+		&& Hose->FindHandHeldConnector(Player) == INDEX_NONE
+		&& ReleaseVelocity.Size2D() > 60
+		&& Movement->Velocity.Equals(ReleaseVelocity + FVector(0, 0, Movement->GetGravityZ() * Step), .1));
+	TestTrue(TEXT("The supply connector remains mounted after manual release"), Hose->StartPort == Supply
+		&& Hose->Cable->GetStartAttachmentComponent() == Supply);
 	return true;
 }
 
@@ -346,7 +751,8 @@ bool FHosePhysicalBreakTest::RunTest(const FString& Parameters)
 	Hose->Cable->bEnableCollision=false; Hose->Transfer->Category=EResourceTransportCategory::Fuel; Hose->Transfer->ResourceID=4;
 	Hose->Transfer->BufferCapacityUnits=2; Hose->Transfer->BurstPressureThreshold=100;
 	if (!TestTrue(TEXT("Reusable hose connects both typed physical endpoints"),Hose->ConnectStart(Source) && Hose->ConnectEnd(Target))) return false;
-	TestTrue(TEXT("Both cable ends follow their connected socket components"),Hose->Cable->GetAttachParent()==Source && Hose->Cable->GetAttachedComponent()==Target);
+    TestTrue(TEXT("Both anchors follow their connected sockets and the render component stays on the hose"),
+        Hose->Cable->GetStartAttachmentComponent()==Source && Hose->Cable->GetAttachedComponent()==Target && Hose->Cable->GetAttachParent()==Hose->SceneRoot);
 	Hose->Transfer->TransferForDuration(1);
 	TestEqual(TEXT("Blocked receiver leaves two units trapped in the physical hose"),Hose->Transfer->Buffer.Units,2.f);
 	Hose->DisconnectEnd();
@@ -361,6 +767,46 @@ bool FHosePhysicalBreakTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Burst releases the cable end anchor"),Hose->Cable->bAttachEnd);
 	TestEqual(TEXT("Physical burst empties exactly its trapped contents"),Hose->Transfer->TotalReleasedUnits,2.f);
 	TestEqual(TEXT("Physical burst leaves no inventory inside hose"),Hose->Transfer->Buffer.Units,0.f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHoseSocketHousingTest,"ColossalFizzCo.Hose.SocketHousingKeepsConnectorSeated",CableHoseTests::Flags)
+bool FHoseSocketHousingTest::RunTest(const FString& Parameters)
+{
+	CableHoseTests::FFixture F;
+	if (!F.World) return false;
+	for (const bool bStart : {true, false})
+	{
+		const FVector Mount(0,bStart ? 0 : 500,150);
+		auto* Housing = F.Actor(Mount);
+		auto* Body = NewObject<UBoxComponent>(Housing);
+		Housing->AddInstanceComponent(Body);
+		Body->SetupAttachment(Housing->GetRootComponent());
+		Body->SetBoxExtent(FVector(10,40,40));
+		Body->SetCollisionProfileName(TEXT("BlockAll"));
+		Body->RegisterComponent();
+		auto* Socket = F.Endpoint(EResourceTransportCategory::Content,1,10,5,Housing);
+		auto* Hose = F.World->SpawnActor<AHoseCableActor>();
+		auto* Cable = Hose->Cable.Get();
+		Cable->bEnableCollision = true;
+		Cable->bUseFullCollisionQueries = !bStart;
+		Cable->CableGravityScale = 0;
+		Cable->CableLength = 400;
+		Cable->CollisionPointsPerFrame = Cable->NumSegments+1;
+		TArray<FVector> Points;
+		for (int32 Index=0; Index<=Cable->NumSegments; ++Index)
+		{
+			const int32 FromMount = bStart ? Index : Cable->NumSegments-Index;
+			Points.Add(Mount+FVector(16+FromMount*400.0/Cable->NumSegments,0,0));
+		}
+		Cable->SetCableParticleLocations(Points);
+		const int32 Index = bStart ? 0 : Cable->NumSegments;
+		if (!TestTrue(TEXT("The plug can seat inside the authored housing"),Hose->ConnectSupplyAtConnector(Socket,Index))) return false;
+		for (int32 Frame=0; Frame<12; ++Frame) Cable->TickComponent(1.f/60,LEVELTICK_All,nullptr);
+		Cable->GetCableRenderLocations(Points);
+		TestTrue(TEXT("The housing cannot push the rendered cable away from the seated connector"),
+			(bStart ? Points[0] : Points.Last()).Equals(Mount,.01) && !Cable->bAttachmentBlocked);
+	}
 	return true;
 }
 
@@ -534,5 +980,112 @@ bool FCablePullBlockingTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Swept remote body cannot pass through blocking world geometry"),B->GetActorLocation().X>=86-.2);
 	TestTrue(TEXT("Blocked downstream movement also restricts the driver"),Blocked.AllowedLocation.X>Requested.X+.5);
 	return true;
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHoseConnectorTraceTest,"ColossalFizzCo.Hose.Interaction.SavedConnectorTraces",CableHoseTests::Flags)
+bool FHoseConnectorTraceTest::RunTest(const FString& Parameters)
+{
+    CableHoseTests::FFixture F;
+    UClass* Class=LoadClass<AHoseCableActor>(nullptr,TEXT("/Game/Assest/Blueprints/Cola_Container/BP_ColaHose.BP_ColaHose_C"));
+    if(!TestNotNull(TEXT("Requested saved hose Blueprint"),Class))return false;
+    auto* Hose=F.World->SpawnActor<AHoseCableActor>(Class,FVector(0,0,200),FRotator::ZeroRotator);
+    if(!TestNotNull(TEXT("Actual saved hose instance"),Hose))return false;
+    for(auto* Mesh:{Hose->StartEndpointMesh.Get(),Hose->EndEndpointMesh.Get()})
+    {
+        TestEqual(TEXT("Saved connector is query-only at runtime"),Mesh->GetCollisionEnabled(),ECollisionEnabled::QueryOnly);
+        TestEqual(TEXT("Player Visibility traces can see the mesh"),Mesh->GetCollisionResponseToChannel(ECC_Visibility),ECR_Block);
+        TestEqual(TEXT("Connectors still ignore Pawn movement"),Mesh->GetCollisionResponseToChannel(ECC_Pawn),ECR_Ignore);
+        TestEqual(TEXT("Connectors do not participate in rope/world simulation collision"),Mesh->GetCollisionResponseToChannel(ECC_WorldStatic),ECR_Ignore);
+        const FVector Center=Mesh->Bounds.Origin;FHitResult Hit;
+        TestTrue(TEXT("An ordinary complex world line trace hits the actual connector mesh"),F.World->LineTraceSingleByChannel(Hit,Center-FVector(0,100,0),Center+FVector(0,100,0),ECC_Visibility,FCollisionQueryParams(NAME_None,true)));
+        TestTrue(TEXT("The hit resolves the correct endpoint component"),Hit.GetComponent()==Mesh);
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHoseCableRayTest,"ColossalFizzCo.Hose.Interaction.VisibleTubeRay",CableHoseTests::Flags)
+bool FHoseCableRayTest::RunTest(const FString& Parameters)
+{
+    CableHoseTests::FFixture F;auto* Hose=F.World->SpawnActor<AHoseCableActor>();auto* Cable=Hose->Cable.Get();
+    Cable->bEnableCollision=false;Cable->NumSegments=1;Cable->CableWidth=4;Cable->CableLength=200;
+    Cable->SetCableParticleLocations({FVector(100,-100,100),FVector(100,100,100)});
+    FHitResult Hit;
+    TestTrue(TEXT("The middle of a long visible span is selectable"),Cable->TraceCableInteraction(FVector(0,0,100),FVector(200,0,100),0,Hit));
+    TestTrue(TEXT("Capsule entry includes the actual tube radius"),FMath::IsNearlyEqual(Hit.Distance,98.f,.001f));
+    TestTrue(TEXT("Hit identifies the cable component and owning hose"),Hit.GetComponent()==Cable && Hit.GetActor()==Hose);
+    TestTrue(TEXT("Server resolves a span hit instead of requiring a nearby raw knot"),Cable->FindCableGrabPoint(Hit.ImpactPoint,5)!=INDEX_NONE);
+    TestEqual(TEXT("The old knot-only proximity would miss this long span"),Cable->FindNearestCablePoint(Hit.ImpactPoint,19),INDEX_NONE);
+    TestFalse(TEXT("A ray outside the visible tube misses"),Cable->TraceCableInteraction(FVector(0,0,103),FVector(200,0,103),0,Hit));
+    TestTrue(TEXT("Aiming padding is optional"),Cable->TraceCableInteraction(FVector(0,0,103),FVector(200,0,103),2,Hit));
+    TestTrue(TEXT("Parallel rays can hit the rounded endpoint cap"),Cable->TraceCableInteraction(FVector(100,-200,100),FVector(100,0,100),0,Hit));
+    TestTrue(TEXT("Starting inside the tube is a zero-distance hit"),Cable->TraceCableInteraction(FVector(100,0,100),FVector(200,0,100),0,Hit)&&Hit.Distance==0);
+    Cable->NumSegments=3;Cable->CableWidth=.2f;Cable->VisualSubdivisions=8;Cable->bEnableVisualSubdivision=true;
+    Cable->VisualSmoothing=1;Cable->bLimitVisualDeviation=false;
+    Cable->SetCableParticleLocations({FVector(-100,0,100),FVector(-50,0,100),FVector(0,50,100),FVector(50,50,100)});
+    TArray<FVector> Curve;Cable->GetCableRenderLocations(Curve);const FVector OnCurve=Curve[10];
+    const int32 Queries=Cable->CollisionQueryCount,RenderQueries=Cable->RenderCollisionQueryCount;
+    TestTrue(TEXT("Pick trace follows the rounded visible curve"),Cable->TraceCableInteraction(OnCurve+FVector(0,0,20),OnCurve-FVector(0,0,20),0,Hit));
+    TestTrue(TEXT("A curved-span hit maps to a real simulation point"),Hit.Item>=0 && Hit.Item<4);
+    TestTrue(TEXT("Server accepts the same visible rounded span"),Cable->FindCableGrabPoint(Hit.ImpactPoint,.2f)!=INDEX_NONE);
+    TestEqual(TEXT("Picking issues no additional simulation collision queries"),Cable->CollisionQueryCount,Queries);
+    TestEqual(TEXT("Picking reuses render locations without shape queries"),Cable->RenderCollisionQueryCount,RenderQueries);
+    Cable->bEnableGrabbing=false;
+    TestFalse(TEXT("Disabled grabbing prevents selection"),Cable->TraceCableInteraction(OnCurve+FVector(0,0,20),OnCurve-FVector(0,0,20),0,Hit));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHoseViewGrabTest,"ColossalFizzCo.Hose.Interaction.ViewSelectionAndOcclusion",CableHoseTests::Flags)
+bool FHoseViewGrabTest::RunTest(const FString& Parameters)
+{
+    CableHoseTests::FFixture F;auto* Player=F.World->SpawnActor<ACharacter>();Player->SetActorEnableCollision(false);Player->GetCharacterMovement()->DisableMovement();
+    auto* PC=F.World->SpawnActor<APlayerController>();PC->Possess(Player);
+    auto* Local=NewObject<ULocalPlayer>(GEngine);PC->Player=Local;Local->PlayerController=PC;
+    PC->SetViewTarget(Player);PC->UpdateCameraManager(0);
+    auto* Actions=NewObject<UShopPlayerInteractionComponent>(Player);Player->AddInstanceComponent(Actions);Actions->RegisterComponent();
+    FVector Eye;FRotator Rotation;PC->GetPlayerViewPoint(Eye,Rotation);const FVector Forward=Rotation.Vector();
+    auto* Hose=F.World->SpawnActor<AHoseCableActor>();auto* Cable=Hose->Cable.Get();
+    Cable->bEnableCollision=false;Cable->NumSegments=1;Cable->CableWidth=4;Cable->CableLength=200;
+    const FVector Center=Eye+Forward*100;
+    Cable->SetCableParticleLocations({Center-FVector(0,100,0),Center+FVector(0,100,0)});
+    Hose->Tick(0);
+    TestTrue(TEXT("Native player view grab finds and grabs the middle of a coarse span"),Actions->TryToggleCableGrabFromView());
+    TestTrue(TEXT("The authoritative point grab belongs to this player"),Cable->GetActiveGrabs().Num()==1&&Cable->GetActiveGrabs()[0].Participant==Player);
+    Actions->RequestCableRelease();
+    // Aim at a connector deliberately offset outside the cable's padded radius.
+    Hose->StartMeshOffset.SetTranslation(FVector(0,0,60));Hose->Tick(0);
+    const FVector Connector=Hose->StartEndpointMesh->Bounds.Origin;
+    PC->SetControlRotation((Connector-Eye).Rotation());PC->UpdateCameraManager(0);
+    TestTrue(TEXT("A direct connector mesh hit selects its cable endpoint"),Actions->TryToggleCableGrabFromView());
+    if(Actions->IsCableGrabActive())TestEqual(TEXT("Source connector selects point zero"),Cable->GetActiveGrabs()[0].PointIndex,0);
+    Actions->RequestCableRelease();
+    auto* Wall=F.World->SpawnActor<AActor>();auto* Box=NewObject<UBoxComponent>(Wall);Wall->SetRootComponent(Box);Wall->AddInstanceComponent(Box);
+    Box->SetBoxExtent(FVector(1,500,500));Box->SetCollisionProfileName(TEXT("BlockAll"));Box->RegisterComponent();Wall->SetActorLocation(Eye+Forward*50);
+    PC->SetControlRotation(Rotation);PC->UpdateCameraManager(0);
+    TestFalse(TEXT("A foreground wall prevents native view grabbing"),Actions->TryToggleCableGrabFromView());
+    Wall->SetActorLocation(Eye+Forward*90);
+    TestFalse(TEXT("Aiming padding cannot reach through a wall near the cable"),Actions->TryToggleCableGrabFromView());
+    TestFalse(TEXT("Server rejects a forged visible hit for a point behind a wall"),Actions->ExecuteCableGrab(Cable,Eye+Forward*83,Center-FVector(0,100,0),100));
+    return true;
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHoseHeldConnectorPortTest,"ColossalFizzCo.Hose.Interaction.HeldConnectorDoesNotHidePort",CableHoseTests::Flags)
+bool FHoseHeldConnectorPortTest::RunTest(const FString& Parameters)
+{
+    CableHoseTests::FFixture F;auto* Player=F.World->SpawnActor<ACharacter>();Player->SetActorEnableCollision(false);Player->GetCharacterMovement()->DisableMovement();
+    auto* PC=F.World->SpawnActor<APlayerController>();PC->Possess(Player);
+    auto* Local=NewObject<ULocalPlayer>(GEngine);PC->Player=Local;Local->PlayerController=PC;
+    PC->SetViewTarget(Player);PC->UpdateCameraManager(0);
+    auto* Actions=NewObject<UShopPlayerInteractionComponent>(Player);Player->AddInstanceComponent(Actions);Actions->RegisterComponent();
+    FVector Eye;FRotator View;PC->GetPlayerViewPoint(Eye,View);const FVector Forward=View.Vector();
+    auto* Hose=F.World->SpawnActor<AHoseCableActor>();Hose->Transfer->Category=EResourceTransportCategory::Fuel;Hose->Transfer->ResourceID=7;
+    auto* Cable=Hose->Cable.Get();Cable->bEnableCollision=false;Cable->NumSegments=1;Cable->CableLength=100;
+    const FVector Start=Eye+Forward*100;
+    Cable->SetCableParticleLocations({Start,Start+FVector(0,100,0)});Hose->Tick(0);
+    if(!TestTrue(TEXT("Player grabs the traceable source connector"),Actions->TryToggleCableGrabFromView()))return false;
+    auto* Target=F.World->SpawnActor<AActor>();auto* Box=NewObject<UBoxComponent>(Target);Target->SetRootComponent(Box);Target->AddInstanceComponent(Box);
+    Box->SetBoxExtent(FVector(5));Box->SetCollisionProfileName(TEXT("BlockAll"));Box->RegisterComponent();Target->SetActorLocation(Eye+Forward*200);
+    auto* Port=F.Endpoint(EResourceTransportCategory::Fuel,7,10,5,Target);Port->bCanReceive=false;
+    TestTrue(TEXT("Receiving-port view trace ignores the currently held connector art"),Actions->TryConnectSupplyHoseFromView());
+    TestTrue(TEXT("The source end connects to the visible resource socket"),Hose->StartPort==Port);
+    TestFalse(TEXT("A successful socket connection releases the point grab"),Actions->IsCableGrabActive());
+    return true;
 }
 #endif

@@ -92,7 +92,7 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cola|Manufacturing") void OnManufacturingSupplyReceived(float ActualUnits,float IncomingPressure,float ActualRate);
 	UFUNCTION(BlueprintPure, Category="Cola|Manufacturing") bool IsManufacturingFlowActive() const;
 	UFUNCTION(BlueprintPure, Category="Cola|Manufacturing|Seal") bool CanApplyManufacturingSeal() const;
-	bool BuildManufacturingSealDelta(FPropEventSyncDelta& OutDelta) const;
+	bool BuildManufacturingSealDelta(FPropEventSyncDelta& OutDelta, float DurationSeconds = 0.0f) const;
 	/** Applies the bottle state; stations use BuildManufacturingSealDelta for atomic consumption of a physical seal. */
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cola|Manufacturing|Seal") bool AddManufacturingSeal();
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cola|Manufacturing|Seal") void NotifyManufacturingLeverReleased();
@@ -295,6 +295,7 @@ protected:
 	virtual void HandleRocketSettled();
 
 private:
+	float GetAppliedSealDuration() const;
 	float LiquidHeightCm = 150.f;
 	float LiquidRadiusCm = 35.f;
 	float LiquidResponseGain = 1.f;

@@ -22,8 +22,71 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/PackageName.h"
+#include "Resources/HoseCableActor.h"
 #include "UObject/SavePackage.h"
 #include "UObject/UnrealType.h"
+
+bool UCollisionCableEditorTools::InstallColaHoseHandGrip()
+{
+    auto* Blueprint = LoadObject<UBlueprint>(nullptr, TEXT("/Game/Assest/Blueprints/Cola_Container/BP_ColaHose.BP_ColaHose"));
+    auto* Interface = LoadObject<UClass>(nullptr, TEXT("/Game/WorldInteractionSystem/BPI_World_Intractions_System.BPI_World_Intractions_System_C"));
+    if (!Blueprint || !Blueprint->ParentClass->IsChildOf(AHoseCableActor::StaticClass()) || !Interface) return false;
+    if (!Blueprint->GeneratedClass->ImplementsInterface(Interface)
+        && !FBlueprintEditorUtils::ImplementNewInterface(Blueprint, Interface->GetClassPathName())) return false;
+
+    TArray<UEdGraph*> Graphs;
+    Blueprint->GetAllGraphs(Graphs);
+    UEdGraph** RequestGraph = Graphs.FindByPredicate([](const UEdGraph* Graph)
+    {
+        return Graph->GetFName() == TEXT("Request Attach to Component");
+    });
+    if (!RequestGraph) return false;
+    UEdGraph* Graph = *RequestGraph;
+    auto* Function = AHoseCableActor::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(AHoseCableActor, AttachSelectedConnectorToHand));
+    UK2Node_FunctionEntry* Entry = nullptr;
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        if (auto* FunctionEntry = Cast<UK2Node_FunctionEntry>(Node)) Entry = FunctionEntry;
+        else if (auto* Call = Cast<UK2Node_CallFunction>(Node); Call && Call->GetTargetFunction() == Function)
+            return Blueprint->Status != BS_Error;
+        else if (!Node->IsA<UK2Node_FunctionResult>()) return false;
+    }
+    if (!Entry || !Function) return false;
+    auto* Result = FBlueprintEditorUtils::FindOrCreateFunctionResultNode(Entry);
+    UEdGraphPin* Success = nullptr;
+    for (UEdGraphPin* Pin : Result->Pins)
+        if (Pin->Direction == EGPD_Input && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Boolean) Success = Pin;
+    if (!Success) return false;
+
+    auto* Call = NewObject<UK2Node_CallFunction>(Graph);
+    Call->SetFromFunction(Function);
+    Graph->AddNode(Call, false, false);
+    Call->CreateNewGuid();
+    Call->AllocateDefaultPins();
+    Call->NodePosX = Entry->NodePosX + 320;
+    Call->NodePosY = Entry->NodePosY;
+    Result->NodePosX = Call->NodePosX + 380;
+
+    UEdGraphPin* EntryExec = Entry->FindPin(UEdGraphSchema_K2::PN_Then);
+    UEdGraphPin* Component = Entry->FindPin(TEXT("Component"));
+    UEdGraphPin* Socket = Entry->FindPin(TEXT("Socket Name"));
+    UEdGraphPin* ReturnExec = Result->FindPin(UEdGraphSchema_K2::PN_Execute);
+    if (!EntryExec || !Component || !Socket || !ReturnExec) return false;
+    const auto* Schema = GetDefault<UEdGraphSchema_K2>();
+    if (!Schema->TryCreateConnection(EntryExec, Call->GetExecPin())
+        || !Schema->TryCreateConnection(Component, Call->FindPinChecked(TEXT("Hand")))
+        || !Schema->TryCreateConnection(Socket, Call->FindPinChecked(TEXT("Socket")))
+        || !Schema->TryCreateConnection(Call->GetThenPin(), ReturnExec)
+        || !Schema->TryCreateConnection(Call->GetReturnValuePin(), Success)) return false;
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+    FKismetEditorUtilities::CompileBlueprint(Blueprint);
+    if (Blueprint->Status == BS_Error || !Blueprint->GeneratedClass->ImplementsInterface(Interface)) return false;
+    FSavePackageArgs Save;
+    Save.TopLevelFlags = RF_Public | RF_Standalone;
+    const FString Filename = FPackageName::LongPackageNameToFilename(Blueprint->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension());
+    return UPackage::SavePackage(Blueprint->GetOutermost(), Blueprint, *Filename, Save);
+}
 
 bool UCollisionCableEditorTools::CreateCollisionCableVariant(const FString& SourcePath, const FString& DestinationPath)
 {

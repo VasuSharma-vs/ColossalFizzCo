@@ -116,7 +116,7 @@ public:
 	/** Atomic transfers between canonical content inventory and a server-owned hose buffer. */
 	float IntakeHoseContent(int32 SourceISID, FHoseResourceBuffer& Buffer, float Capacity, float Requested);
 	float DeliverHoseContent(FHoseResourceBuffer& Buffer, int32 TargetISID, float Requested);
-	float ReleaseHoseContent(FHoseResourceBuffer& Buffer, FGuid ReleaseEpisode, FVector Location);
+	float ReleaseHoseContent(FHoseResourceBuffer& Buffer, FGuid ReleaseEpisode, FVector Location, float RequestedUnits=MAX_flt, bool bContinueEpisode=false);
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Shop|Filling")
 	void EndLiquidTransfer(FGuid SessionID);
 	void CancelLiquidTransfers();
@@ -942,6 +942,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Prop Manager|Runtime Data")
 	bool ConsumeInstancePortion(int32 InISID, AActor* ConsumerActor, float PortionRatio = 1.0f);
 
+	/** Consumes the specified number of portions in one update, up to the amount remaining. */
+	bool ConsumeInstancePortions(int32 InISID, AActor* ConsumerActor, float Portions);
+
 	/** Acquires an inactive ASM from ActiveActorPool or spawns a new one */
 	UFUNCTION(BlueprintCallable, Category = "Prop Manager|Representation")
 	AActivePropActor* AcquireActiveActor(int32 InProductID);
@@ -1015,6 +1018,7 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Prop Manager|Grab")
 	bool ExecuteGrab(int32 InISID, AActor* InstigatorActor, USceneComponent* AttachParent = nullptr, FName SocketName = NAME_None);
+	AActivePropActor* ReserveGrabForTravel(int32 InISID, AActor* Grabber);
 
 	UFUNCTION(BlueprintCallable, Category = "Prop Manager|Grab")
 	bool SetGrabber(int32 InISID, AActor* GrabberActor);
@@ -1757,6 +1761,8 @@ protected:
 	FPropInstanceDelta BuildDeltaForRecord(const FISIDRuntimeIndex& Record) const;
 
 private:
+	AActivePropActor* PrepareGrab(int32 InISID, AActor* Grabber, bool bEnableReplication);
+	bool AllowsPlayerGrab(const FISIDRuntimeIndex& Record) const;
 	void StoreContentDefinition(FPropContentDefinition Definition);
 	uint32 ContentDefinitionRevision = 0;
 };

@@ -1,11 +1,15 @@
 #include "Shop/ShopProductionStationComponent.h"
 #include "Shop/ManualColaFillingMachine.h"
+#include "Shop/SocketColaFillingMachine.h"
 #include "Shop/BottleFillingComponent.h"
 #include "Shop/ShopInstanceVolumeQuery.h"
 #include "Shop/ShopProcurementComponent.h"
+#include "Shop/ShopCheckoutComponent.h"
 #include "Props/InteractablePropManager.h"
+#include "Props/InteractablePropDataAsset.h"
 #include "Props/ColaPropActor.h"
 #include "Components/BoxComponent.h"
+#include "Components/ASMComponent.h"
 #include "Components/StaticMeshPhysicsSimulationComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/RocketProjectileComponent.h"
@@ -25,7 +29,7 @@ namespace ManualEquipment
 		if (FMath::IsNearlyZero(Travel)) return false;
 		const FTransform Parent=Machine.CradlePivot->GetAttachParent() ? Machine.CradlePivot->GetAttachParent()->GetComponentTransform() : Machine.GetActorTransform();
 		const FTransform BottleTransform=Manager.GetTransform(BottleID);
-		const FTransform HolderLocal=Machine.BottleHolderPoint->GetRelativeTransform();
+		const FTransform HolderLocal=Machine.BottleHolderPoint->GetComponentTransform().GetRelativeTransform(Machine.CradlePivot->GetComponentTransform());
 		const FQuat CradleRotation=Parent.GetRotation().Inverse()*BottleTransform.GetRotation()*HolderLocal.GetRotation().Inverse();
 		const FVector CradleUp=CradleRotation.GetUpVector();
 		const float Pitch=Machine.RestCradlePitch+FMath::FindDeltaAngleDegrees(Machine.RestCradlePitch,float(FMath::RadiansToDegrees(FMath::Atan2(-CradleUp.X,CradleUp.Z))));
@@ -78,7 +82,9 @@ bool UShopProductionStationComponent::IsBottleAligned(int32 ID) const
 	const auto* Record=Manager ? Manager->FindISIDData(ID) : nullptr;
 	const auto* Product=Record ? Manager->FindProductDefinition(Record->ProductID) : nullptr;
 	if (!Record || !Product || Product->ConsumableProfile.NumOfPortions<=0 || Record->State==EPropState::Held || Record->State==EPropState::InMotion || !BottleHolder) return false;
-	if (const auto* Active=Manager->GetActiveActorFromISID(ID))
+	const auto* Active=Manager->GetActiveActorFromISID(ID);
+	if (View.SeatedBottleISID==ID && (!Active || !Active->IsSeatedInFiller())) return false;
+	if (Active)
 	{
 		if (Active->bIsHeld || Active->bIsInMotion) return false;
 		if (const auto* Bottle=Cast<AColaPropActor>(Active)) if (Bottle->RocketComp && Bottle->RocketComp->IsPoweredFlight()) return false;
@@ -94,6 +100,66 @@ bool UShopProductionStationComponent::IsBottleReadyForFilling(int32 ID) const
 	return IsBottleAligned(ID) && (!Machine || Machine->IsCradleInFillPosition());
 }
 
+bool UShopProductionStationComponent::CanSeatBottle(int32 ID,const AActor* Carrier) const
+{
+	const auto* Machine = Cast<AActivePropActor>(GetOwner());
+	const auto* Manager = APropManager::Get(this);
+	if (!Machine || !Machine->HasAuthority() || Machine->ISID <= 0 || Machine->bIsHeld || !Manager || !BottleHolder
+		|| !Filler || Filler->bIsFilling || View.bLeverHeld || (View.SeatedBottleISID && View.SeatedBottleISID != ID)) return false;
+	if (const auto* Layout = Cast<ASocketColaFillingMachine>(Machine); Layout && Layout->IsBottleHolderReserved(ID)) return false;
+
+	const auto* Record = Manager->FindISIDData(ID);
+	const auto* Definition = Record ? Manager->FindProductDefinition(Record->ProductID) : nullptr;
+	if (!Definition || Definition->bIsBottleCap || Definition->ConsumableProfile.NumOfPortions <= 0
+		|| Record->Attachment.OwnerISID || Record->State == EPropState::InMotion) return false;
+	if (Record->State == EPropState::Held && (!Carrier || Record->RuntimeData.InteractionOwner.Get() != Carrier)) return false;
+
+	FShopStockEntry Stock;
+	if (Manager->ShopCheckout && Manager->ShopCheckout->GetStockEntry(ID,Stock) && !Manager->ShopCheckout->IsAvailableShopStock(ID)) return false;
+	if (const auto* Active = Manager->GetActiveActorFromISID(ID))
+	{
+		const auto* Bottle = Cast<AColaPropActor>(Active);
+		if (!Bottle) return false;
+		if (Bottle->bIsInMotion || (Bottle->RocketComp && Bottle->RocketComp->IsPoweredFlight())) return false;
+		if (Bottle->IsSeatedInFiller() && Bottle->ManualFillingStation.IsValid() && Bottle->ManualFillingStation.Get() != this) return false;
+		return true;
+	}
+	const UClass* ActiveClass = Manager->ASMComponent ? Manager->ASMComponent->GetEffectiveActivePropActorClass(Record->ProductID).Get() : nullptr;
+	return ActiveClass && ActiveClass->IsChildOf(AColaPropActor::StaticClass());
+}
+
+bool UShopProductionStationComponent::SeatBottle(int32 ID)
+{
+	if (!CanSeatBottle(ID)) return false;
+	if (View.SeatedBottleISID == ID && IsBottleAligned(ID)) return true;
+
+	auto* Manager = APropManager::Get(this);
+	AActivePropActor* Active = nullptr;
+	if (!Manager->PromoteInstanceToASM(ID,EPropActivationReason::Interaction,false,Active)) return false;
+	auto* Bottle = Cast<AColaPropActor>(Active);
+	if (!Bottle) return false;
+
+	Bottle->SetSeatedInFiller(true);
+	const FTransform Pose(BottleHolder->GetComponentQuat(),BottleHolder->GetComponentLocation(),Bottle->GetActorScale3D());
+	if (!Manager->InitializeInstanceTransform(ID,Pose))
+	{
+		Bottle->SetSeatedInFiller(false);
+		return false;
+	}
+	View.SeatedBottleISID = ID;
+	Bottle->ManualFillingStation = this;
+	Manager->MarkInstanceDirty(ID, EPropDirtyFlags::Transform);
+	UpdateBottleInputTrace();
+	GetOwner()->ForceNetUpdate();
+	return true;
+}
+
+void UShopProductionStationComponent::UpdateBottleInputTrace()
+{
+	if (BottleInput && GetOwner()->IsA<ASocketColaFillingMachine>())
+		BottleInput->SetCollisionResponseToChannel(ECC_Visibility, View.SeatedBottleISID>0 ? ECR_Ignore : ECR_Block);
+}
+
 bool UShopProductionStationComponent::IsLeverHoldingBottle(int32 ID) const
 {
 	const auto* Machine=Cast<AActivePropActor>(GetOwner());
@@ -105,15 +171,21 @@ bool UShopProductionStationComponent::IsLeverHoldingBottle(int32 ID) const
 bool UShopProductionStationComponent::UseTemporarySeal(int32 ID)
 {
 	auto* Manager=APropManager::Get(this); auto* Machine=Cast<AActivePropActor>(GetOwner());
-	const auto* Equipment=Manager && Machine ? Manager->FindUniqueData(Machine->ISID) : nullptr;
+	if (!Machine || !Machine->HasAuthority()) return false;
+	const auto* Equipment=Manager ? Manager->FindUniqueData(Machine->ISID) : nullptr;
 	auto* Bottle=Manager ? Cast<AColaPropActor>(Manager->GetActiveActorFromISID(ID)) : nullptr;
 	if (!Equipment || !Bottle || Equipment->EventData.LoadedSealISIDs.IsEmpty() || !Bottle->CanApplyManufacturingSeal()) return false;
 	const int32 SealID=Equipment->EventData.LoadedSealISIDs[0];
 	const auto* Supply=Manager->FindUniqueData(SealID);
 	if (!Supply || Supply->EventData.bTemporarySealUsed || Supply->EventData.StoredInMachineISID!=Machine->ISID) return false;
+	const auto* SealRecord = Manager->FindISIDData(SealID);
+	const auto* SealProduct = SealRecord ? Manager->FindProductDefinition(SealRecord->ProductID) : nullptr;
+	const auto* SealAsset = SealProduct ? SealProduct->SourceDataAsset.Get() : nullptr;
+	const float BaseDuration = SealAsset && SealAsset->bIsTemporaryPressureSeal ? static_cast<float>(SealAsset->NumOfPortions) : 0.0f;
+	const float Duration = BaseDuration > 0.0f ? FMath::FRandRange(FMath::Max(.1f, BaseDuration - 1.0f), BaseDuration + 1.0f) : 0.0f;
 	auto D=ManualEquipment::State(Equipment->EventData,GetSupportedContentCount()); D.ISID=Machine->ISID; D.LoadedSealISIDs.RemoveAt(0);
 	FPropEventSyncDelta Seal;
-	if (!Bottle->BuildManufacturingSealDelta(Seal)) return false;
+	if (!Bottle->BuildManufacturingSealDelta(Seal, Duration)) return false;
 	Seal.ISID=ID;
 	FPropEventSyncDelta Burn; Burn.ISID=SealID; Burn.ExtendedDirtyMask=EPropExtendedEventMask::TemporarySeal; Burn.bTemporarySealUsed=true;
 	if (!Manager->SubmitAtomicInstanceEventUpdates({Seal,D,Burn})) return false;
@@ -128,6 +200,7 @@ void UShopProductionStationComponent::EndManualLever()
 	const bool WasHeld=View.bLeverHeld;
 	const int32 BottleID=View.SeatedBottleISID;
 	View.bLeverHeld=false; View.bDepressurizing=false; View.LeverOperator=nullptr;
+	View.bFilling=false; View.bFlowStopped=false;
 	if (Filler) { Filler->StopFilling(); Filler->LeverOperator.Reset(); Filler->LeverExpiresAt=0; }
 	if (!WasHeld) return;
 	auto* Manager=APropManager::Get(this);
@@ -142,17 +215,21 @@ void UShopProductionStationComponent::EndManualLever()
 
 void UShopProductionStationComponent::HandleManualOverfill(int32 BottleID)
 {
-	if (!GetOwner()->HasAuthority()) return;
-	View.bLeverHeld=false; View.bFlowStopped=true; View.LeverOperator=nullptr; View.bFilling=false;
+	if (!GetOwner()->HasAuthority() || BottleID<=0 || View.SeatedBottleISID!=BottleID) return;
+	View.bLeverHeld=false; View.LeverOperator=nullptr; View.bFilling=false;
+	View.bFlowStopped=false; View.bDepressurizing=false;
 	if (Filler) { Filler->StopFilling(); Filler->LeverExpiresAt=0; Filler->LeverOperator.Reset(); }
 	ReleaseSeatedBottle(); GetOwner()->ForceNetUpdate();
 }
 
 void UShopProductionStationComponent::ReleaseSeatedBottle()
 {
+	if (!View.SeatedBottleISID) return;
 	auto* Manager=APropManager::Get(this);
 	auto* Previous=Manager ? Manager->GetActiveActorFromISID(View.SeatedBottleISID) : nullptr;
 	View.SeatedBottleISID=0;
+	UpdateBottleInputTrace();
+	GetOwner()->ForceNetUpdate();
 	if (auto* Bottle=Cast<AColaPropActor>(Previous)) if (Bottle->ManualFillingStation.Get()==this) Bottle->ManualFillingStation.Reset();
 	if (!Previous || !Previous->IsSeatedInFiller()) return;
 	Previous->SetSeatedInFiller(false);
@@ -181,8 +258,10 @@ void UShopProductionStationComponent::UpdateManualEquipment()
 			{
 				Port.ContentID=Source->EventData.ContentID;
 				if (const auto* Content=Manager->FindContentDefinition(Port.ContentID)) Port.ContentName=Content->DisplayName;
-				Port.bInRange=FVector::DistSquared(GetOwner()->GetActorLocation(),Manager->GetTransform(Port.SourceISID).GetLocation())<=FMath::Square(Filler->MaxConnectionDistance);
-				if (const auto* Equipment=Cast<AManualColaFillingMachine>(Machine)) Port.bInRange &= Equipment->HasSupplyNozzle(I,Port.SourceISID);
+				const auto* Equipment=Cast<AManualColaFillingMachine>(Machine);
+				const FVector Origin=Equipment ? Equipment->GetSupplyConnectionOrigin() : GetOwner()->GetActorLocation();
+				Port.bInRange=FVector::DistSquared(Origin,Manager->GetTransform(Port.SourceISID).GetLocation())<=FMath::Square(Filler->MaxConnectionDistance);
+				if (Equipment) Port.bInRange &= Equipment->HasSupplyNozzle(I,Port.SourceISID);
 			}
 			if (const auto* Equipment=Cast<AManualColaFillingMachine>(Machine); Equipment && Equipment->GetSupplyHoseForPort(I))
 			{
@@ -198,27 +277,26 @@ void UShopProductionStationComponent::UpdateManualEquipment()
 	if (MovingMachine) { Filler->StopFilling(); return; }
 	if (!View.SeatedBottleISID) for (const auto& Bottle:View.Bottles)
 	{
+		if (!CanSeatBottle(Bottle.ISID)) continue;
 		if (!IsBottleAligned(Bottle.ISID))
 		{
 			auto* Equipment=Cast<AManualColaFillingMachine>(Machine);
 			if (!Equipment || !ManualEquipment::RestoreCradlePose(*Equipment,*Manager,Bottle.ISID)) continue;
 		}
-		View.SeatedBottleISID=Bottle.ISID;
-		// An interrupted saved fill resumes with its valve closed. Explicit V is
-		// required to add more liquid, including after a saved seal expires.
-		if (const auto* Restored=Manager->FindUniqueData(Bottle.ISID)) View.bFlowStopped=Restored->EventData.bManualFillPressure && Restored->EventData.ContentLevel>0;
-		break;
+		if (SeatBottle(Bottle.ISID)) break;
 	}
-	if (View.SeatedBottleISID)
+	if (auto* Layout = Cast<ASocketColaFillingMachine>(Machine); !View.SeatedBottleISID && Layout && BottleInput)
 	{
-		if (auto* Active=Manager->GetActiveActorFromISID(View.SeatedBottleISID))
-		{
-			Active->SetSeatedInFiller(true);
-			if (auto* Bottle=Cast<AColaPropActor>(Active)) Bottle->ManualFillingStation=this;
-		}
+		// Poll the actual collision volume. Settled instanced props and props that
+		// were held when overlap began need no new physics overlap event to seat.
+		for (const FShopProductionItem& Item : View.Bottles)
+			if (CanSeatBottle(Item.ISID) && Layout->BeginInputPlacement(*Manager, Item.ISID, *BottleInput)) break;
 	}
 	if (Filler->bIsFilling && (!View.bLeverHeld || Filler->TargetISID!=View.SeatedBottleISID || Filler->SourceISID!=View.ConnectedSourceISID)) Filler->StopFilling();
-	auto* Bottle=Cast<AColaPropActor>(Manager->GetActiveActorFromISID(View.SeatedBottleISID));
+	auto* Seated=Manager->GetActiveActorFromISID(View.SeatedBottleISID);
+	auto* Bottle=Cast<AColaPropActor>(Seated);
+	if (Seated) Seated->SetSeatedInFiller(true);
+	if (Bottle) Bottle->ManualFillingStation=this;
 	if (View.bLeverHeld && !View.bFlowStopped && !Filler->bIsFilling && Bottle && IsBottleReadyForFilling(Bottle->ISID))
 	{
 		const auto* Source=Manager->FindUniqueData(View.ConnectedSourceISID);
@@ -247,11 +325,11 @@ EShopCheckoutResult UShopProductionStationComponent::ManualEquipmentAction(EShop
 		if (Action==EShopProductionAction::ConnectSupply)
 		{
 			const auto* Source=Manager->FindISIDData(OtherID);
-			if (!Source || !Manager->ShopSupplies || !Manager->ShopSupplies->IsCylinderProduct(Source->ProductID)
-				|| FVector::DistSquared(GetOwner()->GetActorLocation(),Manager->GetTransform(OtherID).GetLocation())>FMath::Square(Filler->MaxConnectionDistance)) return EShopCheckoutResult::Unavailable;
-			const auto* SourceData=Manager->FindUniqueData(OtherID);
 			const auto* EquipmentActor=Cast<AManualColaFillingMachine>(Machine);
-			if (!SourceData || !EquipmentActor || !EquipmentActor->HasSupplyNozzle(BottleID,OtherID)
+			if (!Source || !EquipmentActor || !Manager->ShopSupplies || !Manager->ShopSupplies->IsCylinderProduct(Source->ProductID)
+				|| FVector::DistSquared(EquipmentActor->GetSupplyConnectionOrigin(),Manager->GetTransform(OtherID).GetLocation())>FMath::Square(Filler->MaxConnectionDistance)) return EShopCheckoutResult::Unavailable;
+			const auto* SourceData=Manager->FindUniqueData(OtherID);
+			if (!SourceData || !EquipmentActor->HasSupplyNozzle(BottleID,OtherID)
 				|| (SourceData->EventData.StoredInMachineISID && SourceData->EventData.StoredInMachineISID!=Machine->ISID)) return EShopCheckoutResult::Unavailable;
 			D.ConnectedSupplyISIDs[BottleID]=OtherID;
 		}
@@ -272,17 +350,9 @@ EShopCheckoutResult UShopProductionStationComponent::ManualEquipmentAction(EShop
 	}
 	else if (Action==EShopProductionAction::AlignBottle)
 	{
-		if (!BottleHolder || View.bLeverHeld || Filler->bIsFilling || !ShopInstanceVolumeQuery::Query(BottleInput).Contains(BottleID)) return EShopCheckoutResult::Unavailable;
-		const auto* Record=Manager->FindISIDData(BottleID);
-		const auto* Product=Record ? Manager->FindProductDefinition(Record->ProductID) : nullptr;
-		if (!Product || Product->ConsumableProfile.NumOfPortions<=0
-			|| (View.SeatedBottleISID && View.SeatedBottleISID!=BottleID)) return EShopCheckoutResult::OperationConflict;
-		AActivePropActor* Bottle=nullptr;
-		if (!Manager->PromoteInstanceToASM(BottleID,EPropActivationReason::Interaction,false,Bottle) || !Bottle || Bottle->bIsHeld || Bottle->bIsInMotion) return EShopCheckoutResult::Unavailable;
-		if (const auto* Cola=Cast<AColaPropActor>(Bottle)) if (Cola->RocketComp && Cola->RocketComp->IsPoweredFlight()) return EShopCheckoutResult::Unavailable;
-		Manager->InitializeInstanceTransform(BottleID,FTransform(BottleHolder->GetComponentQuat(),BottleHolder->GetComponentLocation(),Manager->GetTransform(BottleID).GetScale3D()));
-		Bottle->SetSeatedInFiller(true); View.SeatedBottleISID=BottleID; View.bFlowStopped=false;
-		if (auto* Cola=Cast<AColaPropActor>(Bottle)) Cola->ManualFillingStation=this;
+		if (View.SeatedBottleISID && View.SeatedBottleISID!=BottleID) return EShopCheckoutResult::OperationConflict;
+		if (View.SeatedBottleISID != BottleID && !ShopInstanceVolumeQuery::Query(BottleInput).Contains(BottleID)) return EShopCheckoutResult::Unavailable;
+		if (!SeatBottle(BottleID)) return EShopCheckoutResult::Unavailable;
 	}
 	else if (Action==EShopProductionAction::HoldFillingLever)
 	{

@@ -21,6 +21,8 @@ struct FCableGrabSettings
     UPROPERTY(EditAnywhere, BlueprintReadWrite, meta=(ClampMin="0", Units="N")) float MaxForceNewtons = 100;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, meta=(ClampMin="0", Units="cm")) float InfluenceRadius = 150;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, meta=(ClampMin="0.1")) float FalloffExponent = 1;
+    /** A connector moving toward a hand applies force to the hose without tethering the player. */
+    UPROPERTY() bool bApproachingConnector = false;
 };
 
 USTRUCT(BlueprintType)

@@ -11,6 +11,7 @@
 #include "Components/ButtonSlot.h"
 #include "Components/HorizontalBox.h"
 #include "Components/HorizontalBoxSlot.h"
+#include "Components/InputComponent.h"
 #include "Components/ProgressBar.h"
 #include "UI/ManualFillingPressureGauge.h"
 #include "Styling/SlateTypes.h"
@@ -22,6 +23,7 @@
 #include "Shop/ShopScannerComponent.h"
 #include "Shop/ShopCheckoutComponent.h"
 #include "Shop/SharedTeamWalletComponent.h"
+#include "Shop/SocketColaFillingMachine.h"
 #include "Input/Reply.h"
 #include "InputCoreTypes.h"
 
@@ -63,7 +65,7 @@ TSharedRef<SWidget> UShopTerminalWidget::RebuildWidget()
 	if (Production)
 	{
 		auto* Canvas=WidgetTree->ConstructWidget<UCanvasPanel>(); Canvas->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
-		BuildProductionDashboard(Canvas); WidgetTree->RootWidget=Canvas; SetIsFocusable(true); return Super::RebuildWidget();
+		BuildProductionDashboard(Canvas); WidgetTree->RootWidget=Canvas; SetIsFocusable(!bWorldFillingDisplay); return Super::RebuildWidget();
 	}
 	auto* Size = WidgetTree->ConstructWidget<USizeBox>(); Size->SetWidthOverride(Production ? 1080 : 720); Size->SetHeightOverride(Production ? 740 : 650);
 	auto* Border = WidgetTree->ConstructWidget<UBorder>(); Border->SetPadding(FMargin(26)); Border->SetBrush(FSlateRoundedBoxBrush(FLinearColor(.025f,.06f,.075f,.99f),16.f)); Size->SetContent(Border);
@@ -80,24 +82,93 @@ TSharedRef<SWidget> UShopTerminalWidget::RebuildWidget()
 void UShopTerminalWidget::Configure(UShopPlayerInteractionComponent* InActions, AActor* InStation)
 {
 	Actions = InActions; Station = InStation;
+	bWorldFillingDisplay = InStation && InStation->IsA<ASocketColaFillingMachine>();
+	if (bWorldFillingDisplay) SetVisibility(ESlateVisibility::HitTestInvisible);
 	InActions->OnActionResult.AddUniqueDynamic(this, &UShopTerminalWidget::ActionResult);
 	LastContents.Empty(); RefreshCountdown = 0;
 }
 void UShopTerminalWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+	if (bWorldFillingDisplay) BindWorldFillingControls();
 	Refresh(); // Populate the first visible frame rather than flashing an empty tree.
 }
+
+void UShopTerminalWidget::BindWorldFillingControls()
+{
+	auto* PC = GetOwningPlayer();
+	if (!PC || !PC->IsLocalController() || WorldFillingInput) return;
+	WorldFillingInput = NewObject<UInputComponent>(PC);
+	WorldFillingInput->RegisterComponent();
+	auto Bind = [this](const FKey& Key, EShopProductionAction Action, bool bShift = false)
+	{
+		FInputKeyBinding Binding(FInputChord(Key, bShift, false, false, false), IE_Pressed);
+		Binding.bConsumeInput = false;
+		Binding.KeyDelegate.GetDelegateForManualSet().BindUObject(this, &UShopTerminalWidget::UseWorldFillingControl, Action);
+		WorldFillingInput->KeyBindings.Add(MoveTemp(Binding));
+	};
+	Bind(EKeys::X, EShopProductionAction::StopFilling);
+	Bind(EKeys::V, EShopProductionAction::ResumeFilling);
+	Bind(EKeys::R, EShopProductionAction::AttachCap);
+	Bind(EKeys::R, EShopProductionAction::OpenCap, true);
+	Bind(EKeys::T, EShopProductionAction::ApplyTemporarySeal);
+	PC->PushInputComponent(WorldFillingInput);
+}
+
+void UShopTerminalWidget::UnbindWorldFillingControls()
+{
+	if (!IsValid(WorldFillingInput)) return;
+	if (auto* PC = Cast<APlayerController>(WorldFillingInput->GetOwner())) PC->PopInputComponent(WorldFillingInput);
+	WorldFillingInput->DestroyComponent();
+	WorldFillingInput = nullptr;
+}
+
+void UShopTerminalWidget::UseWorldFillingControl(EShopProductionAction Action)
+{
+	if (!IsInViewport() || !Station.IsValid() || !Actions.IsValid() || !Actions->IsStationReachable(Station.Get())) return;
+	auto* Production = Station->FindComponentByClass<UShopProductionStationComponent>();
+	if (!Production) return;
+	const auto& View = Production->View;
+	if (!View.SessionID.IsValid() || View.SeatedBottleISID <= 0) return;
+	int32 CapID = 0;
+	if (Action == EShopProductionAction::StopFilling || Action == EShopProductionAction::ResumeFilling)
+	{
+		if (!View.bLeverHeld || View.LeverOperator != Actions->GetOwner()) return;
+	}
+	else
+	{
+		const auto* Bottle = View.Bottles.FindByPredicate([&View](const auto& Item) { return Item.ISID == View.SeatedBottleISID; });
+		if (!Bottle) return;
+		if (Action == EShopProductionAction::AttachCap)
+		{
+			if (Bottle->AttachedCapISID > 0)
+			{
+				if (Bottle->CapSealed >= 1) return;
+				Action = EShopProductionAction::TurnCap;
+			}
+			else
+			{
+				if (View.Caps.IsEmpty()) return;
+				CapID = View.Caps[0].ISID;
+			}
+		}
+		else if (Action == EShopProductionAction::OpenCap && Bottle->AttachedCapISID <= 0) return;
+		else if (Action == EShopProductionAction::ApplyTemporarySeal && (Bottle->bTemporarySealUsed || View.SealTrayCount <= 0)) return;
+	}
+	Actions->RequestProductionAction(Production, View.SessionID, Action, View.SeatedBottleISID, CapID);
+}
+
 void UShopTerminalWidget::NativeTick(const FGeometry& Geometry, float DeltaSeconds)
 {
 	Super::NativeTick(Geometry, DeltaSeconds);
-	if (ProductionSidebar && GetOwningPlayer())
+	if (!CornerPanels.IsEmpty() && GetOwningPlayer())
 	{
 		int32 Width=0,Height=0; GetOwningPlayer()->GetViewportSize(Width,Height);
 		if (Width>0 && Height>0)
 		{
 			const float DPI=FMath::Max(.1f,UWidgetLayoutLibrary::GetViewportScale(this));
-			const float Scale=FMath::Clamp(FMath::Min((Width/DPI-32.f)/1000.f,(Height/DPI-32.f)/650.f),.35f,1.f);
+			const FVector2D LayoutSize = bWorldFillingDisplay ? FVector2D(660, 260) : FVector2D(1000, 650);
+			const float Scale=FMath::Clamp(FMath::Min((Width/DPI-32.f)/float(LayoutSize.X),(Height/DPI-32.f)/float(LayoutSize.Y)),.35f,1.f);
 			for (UWidget* Panel:CornerPanels) if (Panel) Panel->SetRenderScale(FVector2D(Scale,Scale));
 		}
 	}
@@ -112,6 +183,7 @@ void UShopTerminalWidget::NativeTick(const FGeometry& Geometry, float DeltaSecon
 }
 FReply UShopTerminalWidget::NativeOnKeyDown(const FGeometry& Geometry, const FKeyEvent& Event)
 {
+	if (bWorldFillingDisplay) return Super::NativeOnKeyDown(Geometry, Event);
 	if (Event.GetKey() == EKeys::Escape) { Close(); return FReply::Handled(); }
 	if (Event.GetKey()==EKeys::F && Station.IsValid())
 		if (auto* Production=Station->FindComponentByClass<UShopProductionStationComponent>(); Production && Production->bManualLeverMode)
@@ -163,8 +235,16 @@ UShopTerminalButton* UShopTerminalWidget::AddButton(const FString& Label)
 }
 void UShopTerminalWidget::Refresh()
 {
-	if (!Body || !Summary) return;
+	if (!Summary) return;
 	if (!Actions.IsValid() || !Station.IsValid() || !Actions->IsStationReachable(Station.Get())) { Close(); return; }
+	if (bWorldFillingDisplay)
+	{
+		const auto* Machine = CastChecked<ASocketColaFillingMachine>(Station.Get());
+		if (!Machine->bIsActive || Machine->bIsHeld) { Close(); return; }
+		RefreshProduction(Machine->Production);
+		return;
+	}
+	if (!Body) return;
 	auto* Manager = APropManager::Get(this);
 	if (!Manager || !Manager->SharedWallet || !Manager->ShopCheckout) return;
 	Summary->SetText(FText::FromString(FString::Printf(TEXT("Shop bank: %s    Physical shop cash: %s\n"), *ShopTerminal::Money(Manager->SharedWallet->GetWalletState().BalanceCents), *ShopTerminal::Money(Manager->ShopCheckout->TeamCashCents))));
@@ -270,7 +350,7 @@ FReply UShopTerminalWidget::NativeOnKeyUp(const FGeometry& Geometry,const FKeyEv
 	return Super::NativeOnKeyUp(Geometry,Event);
 }
 void UShopTerminalWidget::NativeOnFocusLost(const FFocusEvent& Event) { EndLever(); Super::NativeOnFocusLost(Event); }
-void UShopTerminalWidget::NativeDestruct() { EndLever(); Super::NativeDestruct(); }
+void UShopTerminalWidget::NativeDestruct() { UnbindWorldFillingControls(); EndLever(); Super::NativeDestruct(); }
 void UShopTerminalWidget::BeginLever(int32 BottleID)
 {
 	if (BottleID<=0 || !Actions.IsValid() || !Station.IsValid()) return;
@@ -295,6 +375,8 @@ void UShopTerminalWidget::Close()
 			if (Production->View.CapHolder==Actions->GetOwner() || Production->View.CapRotator==Actions->GetOwner())
 				Actions->RequestProductionAction(Production,Production->View.SessionID,EShopProductionAction::LeaveCapRole,Production->View.ManualBottleISID);
 	if (Actions.IsValid()) Actions->OnActionResult.RemoveDynamic(this, &UShopTerminalWidget::ActionResult);
+	if (bWorldFillingDisplay) UnbindWorldFillingControls();
 	RemoveFromParent();
+	if (bWorldFillingDisplay) return;
 	if (auto* PC = GetOwningPlayer()) { PC->SetInputMode(FInputModeGameOnly()); PC->SetShowMouseCursor(false); }
 }

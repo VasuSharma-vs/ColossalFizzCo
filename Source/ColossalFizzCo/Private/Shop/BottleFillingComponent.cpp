@@ -30,8 +30,6 @@ void UBottleFillingComponent::GetLifetimeReplicatedProps(TArray<FLifetimePropert
 bool UBottleFillingComponent::ConnectionsInRange() const
 {
 	if (!Manager.IsValid() || !GetOwner() || !FMath::IsFinite(MaxConnectionDistance) || MaxConnectionDistance <= 0 || !Manager->FindISIDData(TargetISID)) return false;
-	if (bRequireLever && (!LeverOperator.IsValid() || GetWorld()->GetTimeSeconds()>=LeverExpiresAt
-		|| FVector::DistSquared(LeverOperator->GetActorLocation(),GetOwner()->GetActorLocation())>FMath::Square(400.f))) return false;
 	if (bRequireLever)
 	{
 		const auto* Pawn=Cast<APawn>(LeverOperator.Get());
@@ -76,7 +74,7 @@ bool UBottleFillingComponent::StartFilling(int32 Source, int32 Target)
 		Port->SetFlowRequested(false);
 		if (!Port->ConfigureManagedReceivingProxy(Manager.Get(),Target,ContentID)) { SourceISID=TargetISID=0; return false; }
 		Port->MaximumManagedContentLevel=TargetContentLevel;
-		auto* SourcePort=Hose->SourceEndpoint.Get();
+		auto* SourcePort=Hose->GetOtherEndpoint(Port);
 		if (!SourcePort) if (auto* Container=Cast<AColaSupplyContainer>(Hose->GetOwner())) SourcePort=Container->SupplyPort;
 		Port->SetFlowRequested(true);
 		if (!Hose->HasValidConnection())
@@ -84,7 +82,7 @@ bool UBottleFillingComponent::StartFilling(int32 Source, int32 Target)
 			Hose->Category=EResourceTransportCategory::Content; Hose->ResourceID=ContentID;
 			if (!Hose->ConnectEndpoints(SourcePort,Port)) { Port->SetFlowRequested(false); SourceISID=TargetISID=0; return false; }
 		}
-		if (Hose->TargetEndpoint!=Port) { Port->SetFlowRequested(false); SourceISID=TargetISID=0; return false; }
+		if (!Hose->GetOtherEndpoint(Port)) { Port->SetFlowRequested(false); SourceISID=TargetISID=0; return false; }
 		ActiveHose=Hose; ActiveReceivingPort=Port; bRestoreHoseTick=Hose->IsComponentTickEnabled();
 		Hose->SetComponentTickEnabled(false);
 		bIsFilling=true; AccumulatedSeconds=0; DeliveredPortionsPerSecond=DeliveredSupplyPressure=0;
@@ -128,15 +126,16 @@ void UBottleFillingComponent::TickComponent(float Dt, ELevelTick TickType, FActo
 		if (auto* Hose=ActiveHose.Get())
 		{
 			auto* Port=ActiveReceivingPort.Get();
-			if (!Port || Hose->TargetEndpoint!=Port || !Hose->HasValidConnection() || !ConnectionsInRange()) { StopFilling(); break; }
+			if (!Port || !Hose->GetOtherEndpoint(Port) || !Hose->HasValidConnection() || !ConnectionsInRange()) { StopFilling(); break; }
 			const auto* Data=Manager->FindUniqueData(TargetISID);
 			if (!Data || (TargetContentLevel>0 && Data->EventData.ContentLevel>=TargetContentLevel)) { StopFilling(); break; }
 			Port->MaximumManagedContentLevel=TargetContentLevel;
 			DeliveredPortionsPerSecond=DeliveredSupplyPressure=0;
-			const float Delivered=Hose->TransferForDuration(Step);
+			Hose->TransferForDuration(Step);
 			// Delivery callbacks may launch the bottle or pop this socket. Never resume that fill in the same frame.
 			if (!bIsFilling || ActiveHose.Get()!=Hose) break;
 			if (Hose->bBurst || !Hose->HasValidConnection()) { StopFilling(); break; }
+			const float Delivered=FMath::Max(0.f,-Hose->GetLastPortFlowUnits(Port));
 			DeliveredPortionsPerSecond=Delivered/Step;
 			if (TargetContentLevel>0)
 				if (const auto* Updated=Manager->FindUniqueData(TargetISID); Updated && Updated->EventData.ContentLevel>=TargetContentLevel)

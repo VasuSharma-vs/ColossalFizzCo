@@ -1,5 +1,6 @@
 #include "Components/CollisionCableComponent.h"
 #include "Engine/World.h"
+#include "Resources/HoseCableActor.h"
 
 bool UCollisionCableComponent::HasSimulationAuthority() const
 {
@@ -48,4 +49,23 @@ void UCollisionCableComponent::OnRep_SimulationSnapshot()
     bCableSleeping=SimulationSnapshot.bSleeping;
     Super::SetComponentTickEnabled(!bCableSleeping);
     RefreshMovementBindings();RefreshWakeSources();PublishSimulation();
+}
+
+void UCollisionCableComponent::FollowReplicatedHoseAttachments(TArray<FVector>& Locations) const
+{
+    if (Locations.Num() < 2 || HasSimulationAuthority() || !Cast<AHoseCableActor>(GetOwner())) return;
+    FVector Start, End;
+    GetEndPositions(Start, End);
+    const FVector StartOffset = bAttachStart && StartAttachmentOverride.IsValid() ? Start - Locations[0] : FVector::ZeroVector;
+    const FVector EndOffset = bAttachEnd && IsValid(GetAttachedComponent()) ? End - Locations.Last() : FVector::ZeroVector;
+    if (StartOffset.IsNearlyZero() && EndOffset.IsNearlyZero()) return;
+
+    // Keep the visible ends on the current hand and socket while the middle follows the interpolated snapshot.
+    const int32 Last = Locations.Num() - 1;
+    for (int32 Index = 0; Index <= Last; ++Index)
+    {
+        const double Along = double(Index) / Last;
+        Locations[Index] += StartOffset * (1. - FMath::SmoothStep(0., .5, Along))
+            + EndOffset * FMath::SmoothStep(.5, 1., Along);
+    }
 }

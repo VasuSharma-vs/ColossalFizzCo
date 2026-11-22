@@ -52,7 +52,8 @@ float AColaPropActor::GetBottlePressureTolerance() const
 
 void AColaPropActor::AddAgitationPressure(float Amount)
 {
-	if (!HasAuthority() || GetNetMode()==NM_Client || !UsesPlasticPressure() || !FMath::IsFinite(Amount) || Amount<=0 || IsEmpty() || !PropManagerReference) return;
+	if (!HasAuthority() || GetNetMode()==NM_Client || IsCarriedForDrinking() || !UsesPlasticPressure()
+		|| !FMath::IsFinite(Amount) || Amount<=0 || IsEmpty() || !PropManagerReference) return;
 	const auto* Def=ResolveProductDefinition();
 	const float Pressure=LocalUniqueData.ContinuousData.SealedPressure+Amount/FMath::Max(.01f,Def->PressureResistanceMultiplier);
 	// Active handling integrates locally every tick. The existing 5 Hz pressure channel
@@ -71,7 +72,7 @@ bool AColaPropActor::HasTemporaryManufacturingSeal() const
 
 bool AColaPropActor::StartPlasticPressureRelease(bool bTemporarySealFailure)
 {
-	if (!HasAuthority() || GetNetMode()==NM_Client || !UsesPlasticPressure() || IsEmpty() || !PropManagerReference || !RocketComp
+	if (!HasAuthority() || GetNetMode()==NM_Client || IsCarriedForDrinking() || !UsesPlasticPressure() || IsEmpty() || !PropManagerReference || !RocketComp
 		|| (!bTemporarySealFailure && (GetBottlePressure()<=GetBottlePressureTolerance() || GetCapSealed()<1))
 		|| (bTemporarySealFailure && LocalUniqueData.ContinuousData.SealedPressure<=FMath::Max(0.f,SafeResidualPressure))
 		|| (RocketComp->GetSimulationState()!=ERocketSimulationState::Idle && RocketComp->GetSimulationState()!=ERocketSimulationState::AtRest)
@@ -116,7 +117,7 @@ void AColaPropActor::UpdateOriginalRocketDischarge(float DeltaSeconds)
 
 void AColaPropActor::UpdatePlasticPressure(float DeltaSeconds)
 {
-	if (!HasAuthority() || GetNetMode()==NM_Client || !PropManagerReference
+	if (!HasAuthority() || GetNetMode()==NM_Client || IsCarriedForDrinking() || !PropManagerReference
 		|| (!UsesPlasticPressure() && !LocalUniqueData.EventData.bManualFillPressure && !HasTemporaryManufacturingSeal())
 		|| !FMath::IsFinite(DeltaSeconds) || DeltaSeconds<=0) return;
 	if (!IsManufacturingFailureActive()) bManufacturingFailureDispatched=false;
@@ -199,7 +200,7 @@ void AColaPropActor::UpdatePlasticPressure(float DeltaSeconds)
 
 void AColaPropActor::UpdateMotionPressure(float DeltaSeconds)
 {
-	if (!HasAuthority() || !FMath::IsFinite(DeltaSeconds) || DeltaSeconds <= 0 || IsEmpty() || IsSeatedInFiller()
+	if (!HasAuthority() || IsCarriedForDrinking() || !FMath::IsFinite(DeltaSeconds) || DeltaSeconds <= 0 || IsEmpty() || IsSeatedInFiller()
 		|| (RocketComp && RocketComp->IsPoweredFlight()) || LinearVelocity.ContainsNaN() || AngularVelocity.ContainsNaN())
 	{
 		bHasAgitationHistory = false;

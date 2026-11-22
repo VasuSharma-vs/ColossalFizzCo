@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/TimerHandle.h"
 #include "Interfaces/WorldInteractionHitInterface.h"
 #include "GameFramework/Actor.h"
 #include "NPCEnumsAndTypes.h"
@@ -442,6 +443,7 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "ASM Lifecycle")
 	virtual bool CanDemoteToISM() const;
+	virtual bool AllowsPlayerGrab() const { return true; }
 	/** Authoritative spatial policy, independent of held and rocket motion. */
 	UFUNCTION(BlueprintPure, Category="ASM State")
 	bool IsKeptActiveByVolume() const;
@@ -449,12 +451,21 @@ public:
 	bool IsSeatedInFiller() const { return ISID > 0 && FillerSeatISID == ISID; }
 	void SetSeatedInFiller(bool bSeated);
 
+	UFUNCTION(BlueprintPure, Category = "Consumable")
+	bool IsCarriedForDrinking() const { return ISID > 0 && DrinkingCarryISID == ISID; }
+	void SetDrinkingCarry(bool bEnabled, float DurationSeconds = 0.f);
+	float GetDrinkingCarryTimeRemaining() const;
+
 private:
 	// Compare identities so a stale seat update cannot pin a reused pool actor.
 	UPROPERTY(ReplicatedUsing=OnRep_FillerSeat) int32 FillerSeatISID = 0;
 	bool bStoredSupplyCollisionDisabled = false;
 	uint8 StoredSupplyCollisionMode = 0;
 	UFUNCTION() void OnRep_FillerSeat();
+	UPROPERTY(Transient, ReplicatedUsing = OnRep_DrinkingCarry)
+	int32 DrinkingCarryISID = 0;
+	FTimerHandle DrinkingCarryTimer;
+	UFUNCTION() void OnRep_DrinkingCarry();
 public:
 
 	/**
@@ -827,9 +838,17 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Unique Data|Category2")
 	int32 GetRemainingPortions() const;
 
-	/** Returns the current structural strength from LocalUniqueData.EventData */
+	/** Returns current structural strength after temporary heat weakening. */
 	UFUNCTION(BlueprintPure, Category = "Unique Data|Category2")
 	float GetStrength() const;
+
+	/** Returns structural strength after permanent damage and before the heat penalty. */
+	UFUNCTION(BlueprintPure, Category = "Unique Data|Category2")
+	float GetBaseStrength() const;
+
+	/** Returns the temporary strength penalty at the current temperature. */
+	UFUNCTION(BlueprintPure, Category = "Unique Data|Category2")
+	float GetTemperatureStrengthDebuff() const;
 
 	/** Returns the structural strength ratio [0..1] (Strength / MaxStrength) */
 	UFUNCTION(BlueprintPure, Category = "Unique Data|Category2")

@@ -636,7 +636,8 @@ void UStaticMeshPhysicsSimulationComponent::ApplyState(EPhysicsSimulationState N
 	const bool bRocketMoving = Rocket && (Rocket->IsPoweredFlight() || Rocket->GetSimulationState() == ERocketSimulationState::SpentFalling);
 	const bool bRocketPhysicsOwnsTransform = bRocketMoving && (Rocket->GetReplicatedFlightState().bPhysicsSimulating || Rocket->GetReplicatedFlightState().bPressurePhysicsFlight);
 	const bool bProjectileControlsTransform = bRocketMoving && !bRocketPhysicsOwnsTransform;
-	const bool bAllowPhysicsOnOwner = (!ActivePropOwner || ActivePropOwner->bIsActive) && !bProjectileControlsTransform;
+	const bool bAllowPhysicsOnOwner = (!ActivePropOwner || (ActivePropOwner->bIsActive && !ActivePropOwner->IsCarriedForDrinking()))
+		&& !bProjectileControlsTransform;
 	const bool bReplicateMovementWhenFree = (ActivePropOwner == nullptr) || bRocketPhysicsOwnsTransform;
 
 	switch (NewState)

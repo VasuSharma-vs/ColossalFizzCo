@@ -6,12 +6,14 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
+#include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/RocketProjectileComponent.h"
 #include "Components/HoseTransferComponent.h"
 #include "Components/ResourceTransferEndpointComponent.h"
 #include "Resources/HoseCableActor.h"
 #include "Props/ColaPropActor.h"
+#include "Props/InteractablePropDataAsset.h"
 #include "Props/InteractablePropManager.h"
 #include "Shop/BottleFillingComponent.h"
 #include "Shop/ManualColaFillingMachine.h"
@@ -110,6 +112,7 @@ bool FColaSealReleaseTest::RunTest(const FString& Parameters)
 	const auto* Save=Cast<UPropDatabaseSaveGame>(UGameplayStatics::LoadGameFromSlot(Slot,0));
 	const auto* Saved=Save ? Save->WorldSaveData.SavedInstances.FindByPredicate([&](const auto& Item){return Item.ISID==Bottle->ISID;}) : nullptr;
 	TestTrue(TEXT("Save snapshot retains the armed seal without an expiry deadline"),Saved && Saved->UniqueData.EventData.bTemporarySealArmed && Saved->UniqueData.EventData.TemporarySealUntil==0);
+	if (Saved) TestEqual(TEXT("Save snapshot retains the chosen seal lifetime"), Saved->UniqueData.EventData.TemporarySealDurationSeconds, Bottle->TemporarySealDuration);
 	UGameplayStatics::DeleteGameInSlot(Slot,0);
 	TestFalse(TEXT("Armed seal does not trigger pressure failure"),Bottle->RocketComp->IsPoweredFlight());
 	Bottle->NotifyManufacturingLeverReleased();
@@ -303,16 +306,68 @@ bool FColaArmedSealDeltaTest::RunTest(const FString& Parameters)
 	auto* Bottle=F.Bottle(); if (!Bottle) return false;
 	FPropEventSyncDelta Original; Original.ISID=Bottle->ISID; Original.ExtendedDirtyMask=EPropExtendedEventMask::TemporarySeal;
 	Original.bTemporarySealUsed=true; Original.bTemporarySealArmed=true; Original.bManualFillPressure=true;
+	Original.TemporarySealDurationSeconds = 3.65f;
 	TArray<uint8> Bytes; FMemoryWriter Writer(Bytes); bool Success=false; Original.NetSerialize(Writer,nullptr,Success);
 	TestTrue(TEXT("Armed seal serializes in reliable event packet"),Success);
 	FMemoryReader Reader(Bytes); FPropEventSyncDelta Decoded; Decoded.NetSerialize(Reader,nullptr,Success);
 	TestTrue(TEXT("Armed seal deserializes without archive errors"),Success && !Reader.IsError());
 	TestTrue(TEXT("Wire format preserves all manufacturing flags"),Decoded.bTemporarySealArmed && Decoded.bTemporarySealUsed && Decoded.bManualFillPressure);
+	TestEqual(TEXT("Wire format preserves the seal lifetime"), Decoded.TemporarySealDurationSeconds, Original.TemporarySealDurationSeconds);
 	TestTrue(TEXT("Decoded state commits to canonical manager data"),F.Manager->SubmitInstanceEventUpdate(Bottle->ISID,Decoded));
 	TestTrue(TEXT("Canonical and active bottle caches both retain armed state"),F.Manager->FindUniqueData(Bottle->ISID)->EventData.bTemporarySealArmed && Bottle->LocalUniqueData.EventData.bTemporarySealArmed);
 	Decoded.bTemporarySealArmed=false; Decoded.TemporarySealUntil=F.Manager->WorldElapsedSeconds+4;
 	TestTrue(TEXT("Release transition commits deadline"),F.Manager->SubmitInstanceEventUpdate(Bottle->ISID,Decoded));
 	TestTrue(TEXT("Release clears armed state without losing used marker"),!Bottle->LocalUniqueData.EventData.bTemporarySealArmed && Bottle->LocalUniqueData.EventData.bTemporarySealUsed && Bottle->LocalUniqueData.EventData.TemporarySealUntil==Decoded.TemporarySealUntil);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPhysicalSealDurationTest, "ColossalFizzCo.Props.Manufacturing.PhysicalSealDuration", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FPhysicalSealDurationTest::RunTest(const FString& Parameters)
+{
+	ColaManufacturingTests::FFixture F;
+	if (!F.World) return false;
+	auto* SealAsset = LoadObject<UInteractablePropDataAsset>(nullptr, TEXT("/Game/NormalColaPrototype/DA_TemporaryPressureSeal.DA_TemporaryPressureSeal"));
+	auto* MachineAsset = LoadObject<UInteractablePropDataAsset>(nullptr, TEXT("/Game/NormalColaPrototype/DA_ManualFillingMachine.DA_ManualFillingMachine"));
+	if (!TestNotNull(TEXT("Authored seal data asset"), SealAsset) || !TestNotNull(TEXT("Authored filling machine"), MachineAsset)) return false;
+	constexpr int32 BaseSeconds = 9;
+	TGuardValue<int32> SealPortions(SealAsset->NumOfPortions, BaseSeconds);
+	TGuardValue<bool> SealKind(SealAsset->bIsTemporaryPressureSeal, true);
+	const int32 SealPID = F.Manager->RegisterProductFromDataAsset(SealAsset);
+	const auto SealDefinition = FPropProductDefinition::FromDataAsset(SealAsset, SealPID, SealPID);
+	TestEqual(TEXT("Maximum Portions on a seal leaves zero consumable capacity"), SealDefinition.ConsumableProfile.NumOfPortions, 0);
+	if (!TestTrue(TEXT("The seal product registers"), F.Manager->RegisterProductDefinition(SealDefinition))) return false;
+	const int32 MachineID = F.Manager->GenerateProductInstance(F.Manager->RegisterProductFromDataAsset(MachineAsset), FTransform(FVector(0,0,1000)));
+	AActivePropActor* Active = nullptr;
+	if (!F.Manager->PromoteInstanceToASM(MachineID, EPropActivationReason::Interaction, false, Active)) return false;
+	auto* Machine = Cast<AManualColaFillingMachine>(Active);
+	if (!TestNotNull(TEXT("Active filling machine"), Machine)) return false;
+	auto* Station = Machine->Production.Get();
+	TSet<float> Durations;
+	for (int32 Trial = 0; Trial < 4; ++Trial)
+	{
+		auto* Bottle = F.Bottle(FVector(1600, Trial * 400, 1000));
+		if (!Bottle) return false;
+		const bool bPrepared = Trial == 0;
+		if (bPrepared) Bottle->RemoveBottleContent();
+		F.Manager->GenerateProductInstance(SealPID, FTransform(Station->SealInput->GetComponentLocation()));
+		Station->RefreshSupplyTrays();
+		if (!TestTrue(TEXT("A stocked physical seal is used"), Station->UseTemporarySeal(Bottle->ISID))) return false;
+		const float Rolled = Bottle->LocalUniqueData.EventData.TemporarySealDurationSeconds;
+		TestTrue(TEXT("Seal duration is within one second of the authored maximum"), Rolled >= BaseSeconds - 1 && Rolled <= BaseSeconds + 1);
+		Durations.Add(Rolled);
+		if (bPrepared)
+		{
+			TestEqual(TEXT("Prepared seal stays armed without a deadline"), Bottle->LocalUniqueData.EventData.TemporarySealUntil, 0.0);
+			F.Manager->WorldElapsedSeconds += 20.0;
+			TestEqual(TEXT("The armed seal retains its rolled time"), Bottle->GetManufacturingSealSecondsRemaining(), Rolled);
+			TGuardValue<int32> ChangedSealPortions(SealAsset->NumOfPortions, 20);
+			Bottle->NotifyManufacturingLeverReleased();
+		}
+		TestEqual(TEXT("The deadline uses the original roll"), Bottle->LocalUniqueData.EventData.TemporarySealUntil, F.Manager->WorldElapsedSeconds + Rolled);
+		F.Manager->WorldElapsedSeconds += Rolled * 0.5;
+		TestEqual(TEXT("The HUD fraction uses the rolled duration"), Bottle->GetManufacturingSealIntegrity(), 0.5f);
+	}
+	TestTrue(TEXT("Separate seals get separate duration rolls"), Durations.Num() > 1);
 	return true;
 }
 #endif

@@ -9,6 +9,13 @@
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/DynamicBlueprintBinding.h"
 #include "Components/PropGrabInputComponent.h"
+#include "Components/CollisionCableComponent.h"
+#include "Components/CableMovementConstraintComponent.h"
+#include "Components/HoseTransferComponent.h"
+#include "Components/ResourceTransferEndpointComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Shop/ShopPlayerInteractionComponent.h"
+#include "Resources/HoseCableActor.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/BoxComponent.h"
 #include "Props/InteractableProp.h"
@@ -124,7 +131,7 @@ namespace PropGrabTests
 		Prop->ProcessEvent(Function, Params.GetStructMemory());
 		return Prop->GetActorLocation().Equals(Location, .01);
 	}
-	bool FireGrabPhase(ACharacter* Player, const FString& Phase)
+	bool FireActionPhase(ACharacter* Player, const FString& ActionName, const FString& Phase)
 	{
 		// Dispatch the exact compiled callback Enhanced Input binds, without desktop input or a viewport.
 		UClass* BindingClass = LoadClass<UDynamicBlueprintBinding>(nullptr, TEXT("/Script/EnhancedInput.EnhancedInputActionDelegateBinding"));
@@ -143,7 +150,7 @@ namespace PropGrabTests
 			void* Data = Array.GetRawPtr(Index);
 			UObject* Action = ActionField->GetObjectPropertyValue_InContainer(Data);
 			const int64 Value = PhaseField->GetUnderlyingProperty()->GetSignedIntPropertyValue(PhaseField->ContainerPtrToValuePtr<void>(Data));
-			if (!Action || Action->GetName() != TEXT("IA_Grab") || PhaseField->GetEnum()->GetNameStringByValue(Value) != Phase) continue;
+			if (!Action || Action->GetName() != ActionName || PhaseField->GetEnum()->GetNameStringByValue(Value) != Phase) continue;
 			UFunction* Function = Player->FindFunction(FunctionField->GetPropertyValue_InContainer(Data));
 			if (!Function) return false;
 			FStructOnScope Params(Function);
@@ -152,6 +159,10 @@ namespace PropGrabTests
 			return true;
 		}
 		return false;
+	}
+	bool FireGrabPhase(ACharacter* Player, const FString& Phase)
+	{
+		return FireActionPhase(Player,TEXT("IA_Grab"),Phase);
 	}
 	bool InvokeCarryRPC(ACharacter* Player, const FString& Name, AActor* Target)
 	{
@@ -165,25 +176,6 @@ namespace PropGrabTests
 			Parameter->SetObjectPropertyValue_InContainer(Params.GetStructMemory(), Target);
 			Player->ProcessEvent(*It, Params.GetStructMemory());
 			return true;
-		}
-		return false;
-	}
-	bool GetPlacementLocation(ACharacter* Player, FVector& Location)
-	{
-		for (TFieldIterator<UFunction> It(Player->GetClass()); It; ++It)
-		{
-			if (!It->GetName().Replace(TEXT(" "), TEXT("")).Equals(TEXT("getcameratracesafelocation"), ESearchCase::IgnoreCase)) continue;
-			FStructOnScope Params(*It);
-			if (auto* Radius = FindFProperty<FFloatProperty>(*It, TEXT("Radius"))) Radius->SetPropertyValue_InContainer(Params.GetStructMemory(), 50.f);
-			else if (auto* RadiusDouble = FindFProperty<FDoubleProperty>(*It, TEXT("Radius"))) RadiusDouble->SetPropertyValue_InContainer(Params.GetStructMemory(), 50.);
-			else return false;
-			Player->ProcessEvent(*It, Params.GetStructMemory());
-			for (TFieldIterator<FStructProperty> Value(*It); Value; ++Value)
-				if (Value->HasAnyPropertyFlags(CPF_OutParm) && Value->Struct == TBaseStructure<FVector>::Get())
-				{
-					Location = *Value->ContainerPtrToValuePtr<FVector>(Params.GetStructMemory());
-					return true;
-				}
 		}
 		return false;
 	}
@@ -311,6 +303,12 @@ bool FGrabBlueprintInputTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Screen-center direction is normalized and nonzero"), RayDirection.IsNormalized());
 	auto* Input = Player->FindComponentByClass<UPropGrabInputComponent>();
 	if (!TestNotNull(TEXT("Saved player Blueprint contains native grab component"), Input)) return false;
+	// The fixture skips the character's HUD BeginPlay. Register the native carry tick as the actor would.
+	if (!Input->HasBegunPlay())
+	{
+		Input->RegisterAllComponentTickFunctions(true);
+		Input->BeginPlay();
+	}
 	auto* Product = LoadObject<UInteractablePropDataAsset>(nullptr, TEXT("/Game/Assest/DataAssets/DA_BasicCola.DA_BasicCola"));
 	if (!Product) return false;
 	const int32 PID = Manager->RegisterProductFromDataAsset(Product);
@@ -357,18 +355,24 @@ bool FGrabBlueprintInputTest::RunTest(const FString& Parameters)
 	HoldingActor->SetObjectPropertyValue_InContainer(Player, Bottle); HoldingState->SetPropertyValue_InContainer(Player, 1);
 	TestTrue(TEXT("Hold placement reaches actual input Started callback"), PropGrabTests::FireGrabPhase(Player, TEXT("Started")));
 	World->Tick(LEVELTICK_All, .45f);
-	FVector ExpectedLocation;
-	if (!TestTrue(TEXT("Production camera trace returns a placement location"), PropGrabTests::GetPlacementLocation(Player, ExpectedLocation))) return false;
-	TestFalse(TEXT("Trace placement is not a default zero vector"), ExpectedLocation.IsNearlyZero());
-	AddInfo(FString::Printf(TEXT("Production placement trace: ray origin %s direction %s; destination %s"), *RayOrigin.ToString(), *RayDirection.ToString(), *ExpectedLocation.ToString()));
+	FVector AimOrigin;
+	FRotator AimRotation;
+	Controller->GetPlayerViewPoint(AimOrigin, AimRotation);
+	const FVector ExpectedLocation = AimOrigin + AimRotation.Vector() * 250;
+	const FVector HandStart = Bottle->GetActorLocation();
 	TestTrue(TEXT("Hold placement reaches actual input Ongoing callback"), PropGrabTests::FireGrabPhase(Player, TEXT("Ongoing")));
-	TestEqual(TEXT("Compiled Blueprint reads native hold placement intent"), Input->LastIntent, EPropGrabIntent::Place);
-	TestTrue(TEXT("Actual G hold places bottle at camera trace location"), Bottle->GetActorLocation().Equals(ExpectedLocation, .01));
-	TestFalse(TEXT("Actual G hold releases the placed bottle"), Bottle->bIsHeld);
-	TestTrue(TEXT("Actual G hold restores placed bottle physics"), Bottle->PropMesh->IsSimulatingPhysics());
-	TestNull(TEXT("Actual G hold clears carry reference"), HoldingActor->GetObjectPropertyValue_InContainer(Player));
+	TestEqual(TEXT("Native placement consumes the input before Blueprint's immediate drop"), Input->LastIntent, EPropGrabIntent::None);
+	TestTrue(TEXT("Placement starts from the hand without teleporting"), Bottle->GetActorLocation().Equals(HandStart, .01)
+		&& Bottle->bIsHeld && !Bottle->GetAttachParentActor());
+	Input->TickComponent(.10f, LEVELTICK_All, nullptr);
+	const FVector PlacementInFlight = Bottle->GetActorLocation();
+	TestTrue(TEXT("The held bottle moves toward the camera point while G stays down"), !PlacementInFlight.Equals(HandStart, .01)
+		&& FVector::DistSquared(PlacementInFlight, ExpectedLocation) < FVector::DistSquared(HandStart, ExpectedLocation));
 	TestTrue(TEXT("Hold release reaches actual Triggered callback"), PropGrabTests::FireGrabPhase(Player, TEXT("Triggered")));
 	TestTrue(TEXT("Hold completion reaches actual Completed callback"), PropGrabTests::FireGrabPhase(Player, TEXT("Completed")));
+	TestTrue(TEXT("Early placement release drops from its current position"), Bottle->GetActorLocation().Equals(PlacementInFlight, .01)
+		&& !Bottle->bIsHeld && Bottle->PropMesh->IsSimulatingPhysics());
+	TestNull(TEXT("Placement clears the held actor"), HoldingActor->GetObjectPropertyValue_InContainer(Player));
 	TestEqual(TEXT("Hold release emits no second interaction"), Input->LastIntent, EPropGrabIntent::None);
 	if (!TestTrue(TEXT("Pickup ray has valid projection data"), Controller->DeprojectScreenPositionToWorld(400,300,RayOrigin,RayDirection))) return false;
 	Bottle->PropMesh->SetSimulatePhysics(false);
@@ -388,13 +392,315 @@ bool FGrabBlueprintInputTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Pickup reaches actual G Started callback"), PropGrabTests::FireGrabPhase(Player, TEXT("Started")));
 	World->Tick(LEVELTICK_All, .45f);
 	*TickHit->ContainerPtrToValuePtr<FHitResult>(Player) = PickupHit;
+	const FVector PickupStart = Bottle->GetActorLocation();
 	TestTrue(TEXT("Pickup reaches actual G Ongoing callback"), PropGrabTests::FireGrabPhase(Player, TEXT("Ongoing")));
-	TestEqual(TEXT("Compiled Blueprint reads native hold pickup intent"), Input->LastIntent, EPropGrabIntent::Grab);
-	TestTrue(TEXT("Actual G hold picks up the traced production bottle"), HoldingActor->GetObjectPropertyValue_InContainer(Player) == Bottle && Bottle->bIsHeld);
-	TestTrue(TEXT("Actual pickup assigns native ownership"), Manager->FindISIDData(ID)->RuntimeData.InteractionOwner.Get() == Player);
+	TestEqual(TEXT("Native pickup consumes the input before Blueprint's immediate attach"), Input->LastIntent, EPropGrabIntent::None);
+	TestTrue(TEXT("Pickup claims the bottle without immediately attaching"), Bottle->GetActorLocation().Equals(PickupStart,.01)
+		&& Bottle->bIsHeld && !Bottle->GetAttachParentActor() && !HoldingActor->GetObjectPropertyValue_InContainer(Player));
+	TestFalse(TEXT("Another player cannot grab the moving bottle"), Manager->ValidateGrab(ID, OtherPlayer));
+	// Manually step carry motion because these gestures run inside one engine frame.
+	Input->TickComponent(.05f, LEVELTICK_All, nullptr);
+	const FVector PickupInFlight = Bottle->GetActorLocation();
+	const FName Grip(TEXT("Holding object"));
+	const FVector Hand = Player->GetMesh()->GetSocketLocation(Grip);
+	TestTrue(TEXT("Bottle moves partway to the hand while G is held"), !PickupInFlight.Equals(PickupStart,.01)
+		&& FVector::DistSquared(PickupInFlight,Hand) < FVector::DistSquared(PickupStart,Hand) && !Bottle->GetAttachParentActor());
+	TestTrue(TEXT("Cancel releases the actual G pull"), PropGrabTests::FireGrabPhase(Player, TEXT("Canceled")));
+	TestTrue(TEXT("Release before reaching the hand drops from mid-travel"), Bottle->GetActorLocation().Equals(PickupInFlight,.01)
+		&& !Bottle->bIsHeld && Bottle->PropMesh->IsSimulatingPhysics());
+	TestNull(TEXT("Canceled pickup leaves the hand empty"), HoldingActor->GetObjectPropertyValue_InContainer(Player));
+
+	Bottle->PropMesh->SetSimulatePhysics(false);
+	Bottle->SetActorLocation(PickupStart, false, nullptr, ETeleportType::TeleportPhysics);
+	Manager->FindISIDData(ID)->ActiveTransform = Bottle->GetActorTransform();
+	Manager->FindISIDData(ID)->RuntimeData.LastInteractionTime = -100;
+	*TickHit->ContainerPtrToValuePtr<FHitResult>(Player) = PickupHit;
+	PropGrabTests::FireGrabPhase(Player, TEXT("Started"));
+	World->Tick(LEVELTICK_All, .45f);
+	PropGrabTests::FireGrabPhase(Player, TEXT("Ongoing"));
+	Player->AddActorWorldOffset(FVector(0, 15, 0));
+	for (int32 Step = 0; Step < 16; ++Step) Input->TickComponent(.05f, LEVELTICK_All, nullptr);
+	TestTrue(TEXT("The moving pickup attaches to the player's updated hand socket once it arrives"),
+		HoldingActor->GetObjectPropertyValue_InContainer(Player) == Bottle && Bottle->bIsHeld
+		&& Bottle->GetAttachParentActor() == Player && Bottle->GetActorLocation().Equals(Player->GetMesh()->GetSocketLocation(Grip),1));
+	TestTrue(TEXT("Completed pickup retains native ownership"), Manager->FindISIDData(ID)->RuntimeData.InteractionOwner.Get() == Player);
 	TestTrue(TEXT("Pickup release reaches actual Triggered callback"), PropGrabTests::FireGrabPhase(Player, TEXT("Triggered")));
 	TestTrue(TEXT("Pickup completion reaches actual Completed callback"), PropGrabTests::FireGrabPhase(Player, TEXT("Completed")));
 	TestTrue(TEXT("Same press cannot place its newly picked up bottle"), Bottle->bIsHeld);
+
+	PropGrabTests::FireGrabPhase(Player, TEXT("Started"));
+	World->Tick(LEVELTICK_All, .45f);
+	PropGrabTests::FireGrabPhase(Player, TEXT("Ongoing"));
+	Controller->SetControlRotation(FRotator(0, 40, 0));
+	Controller->UpdateCameraManager(0);
+	Controller->GetPlayerViewPoint(AimOrigin, AimRotation);
+	const FVector SteeredLocation = AimOrigin + AimRotation.Vector() * 250;
+	for (int32 Step = 0; Step < 24; ++Step) Input->TickComponent(.05f, LEVELTICK_All, nullptr);
+	TestTrue(TEXT("An item moved to the new aim point waits there until G release"), Bottle->bIsHeld
+		&& Bottle->GetActorLocation().Equals(SteeredLocation,2));
+	PropGrabTests::FireGrabPhase(Player, TEXT("Completed"));
+	TestTrue(TEXT("Release after reaching the aim point drops the item there"), !Bottle->bIsHeld
+		&& Bottle->PropMesh->IsSimulatingPhysics() && Bottle->GetActorLocation().Equals(SteeredLocation,2));
 	return true;
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHoseAuthoredGrabInputTest,"ColossalFizzCo.Hose.Interaction.AuthoredGKeyRouting",EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FHoseAuthoredGrabInputTest::RunTest(const FString& Parameters)
+{
+    auto* GameInstance=NewObject<UGameInstance>(GEngine);GameInstance->InitializeStandalone();
+    UWorld* World=GameInstance->GetWorld();if(!World)return false;
+    auto WorldScope=MakeShared<PropGrabTests::FWorldOwner>(World,GameInstance);
+    auto* ViewportClient=NewObject<UGameViewportClient>(GEngine);auto& Context=*GameInstance->GetWorldContext();
+    Context.GameViewport=ViewportClient;ViewportClient->Init(Context,GameInstance,false);
+    auto Viewport=FSceneViewport::Create(TStrongPtrVariant<FViewportClient>(ViewportClient),TSharedPtr<SViewport>());
+    Viewport->SetInitialSize(FIntPoint(800,600));ViewportClient->Viewport=&Viewport.Get();
+    ON_SCOPE_EXIT{ViewportClient->Viewport=nullptr;Context.GameViewport=nullptr;};
+    World->InitializeActorsForPlay(FURL());World->GetWorldSettings()->NotifyBeginPlay();
+    auto* Manager=World->SpawnActor<APropManager>();Manager->bEnableAutosave=false;Manager->InitializePropManager();
+    UClass* PlayerClass=LoadClass<ACharacter>(nullptr,TEXT("/Game/FirstPerson/Blueprints/BP_FirstPersonCharacter.BP_FirstPersonCharacter_C"));
+    UClass* HoseClass=LoadClass<AHoseCableActor>(nullptr,TEXT("/Game/Assest/Blueprints/Cola_Container/BP_ColaHose.BP_ColaHose_C"));
+    if(!TestNotNull(TEXT("Saved production player"),PlayerClass)||!TestNotNull(TEXT("Saved requested hose"),HoseClass))return false;
+    World->SetBegunPlay(false);auto* Player=World->SpawnActor<ACharacter>(PlayerClass,FVector(0,0,100),FRotator::ZeroRotator);World->SetBegunPlay(true);
+    Player->GetCharacterMovement()->DisableMovement();Player->SetActorEnableCollision(false);
+    auto* PC=World->SpawnActor<APlayerController>();PC->Possess(Player);
+    auto* LocalPlayer=NewObject<ULocalPlayer>(GEngine);GameInstance->AddLocalPlayer(LocalPlayer,FPlatformUserId::CreateFromInternalId(0));
+    LocalPlayer->ViewportClient=ViewportClient;LocalPlayer->PlayerController=PC;PC->Player=LocalPlayer;LocalPlayer->Size=FVector2D(1,1);
+    PC->SetViewTarget(Player);PC->UpdateCameraManager(0);
+    auto* Actions=Player->FindComponentByClass<UShopPlayerInteractionComponent>();
+    auto* Input=Player->FindComponentByClass<UPropGrabInputComponent>();
+    if(!TestNotNull(TEXT("Saved player has owned cable actions"),Actions)||!TestNotNull(TEXT("Saved player has G adapter"),Input))return false;
+    FVector Eye;FRotator View;PC->GetPlayerViewPoint(Eye,View);const FVector Center=Eye+View.Vector()*120;
+    auto* Hose=World->SpawnActor<AHoseCableActor>(HoseClass,Center-FVector(0,0,100),FRotator::ZeroRotator);
+    auto* Cable=Hose->Cable.Get();Cable->bEnableCollision=false;Cable->bEnableSleeping=false;Cable->CableGravityScale=0;
+    Cable->CableLength=200;Cable->EndLocation=FVector(0,0,200);Cable->bAttachStart=Cable->bAttachEnd=false;Cable->ResetCable();Hose->Tick(0);
+    TestTrue(TEXT("Actual G Started callback executes"),PropGrabTests::FireGrabPhase(Player,TEXT("Started")));
+    World->Tick(LEVELTICK_All,.45f);
+    TestTrue(TEXT("Actual G Ongoing callback executes"),PropGrabTests::FireGrabPhase(Player,TEXT("Ongoing")));
+    TestTrue(TEXT("Holding G grabs the saved hose through native cable selection"),Actions->IsCableGrabActive());
+    if(!Actions->IsCableGrabActive())return false;
+    TestTrue(TEXT("The authoritative grab belongs to the real saved player"),Cable->GetActiveGrabs().Num()==1&&Cable->GetActiveGrabs()[0].Participant==Player);
+    auto* Holding=FindFProperty<FObjectPropertyBase>(PlayerClass,TEXT("Holding Actor"));
+    TestTrue(TEXT("Cable pickup never becomes a legacy actor attachment"),Holding&&!Holding->GetObjectPropertyValue_InContainer(Player));
+    TestEqual(TEXT("Cable input consumes the legacy prop intent"),Input->LastIntent,EPropGrabIntent::None);
+    PropGrabTests::FireGrabPhase(Player,TEXT("Triggered"));PropGrabTests::FireGrabPhase(Player,TEXT("Completed"));
+    TestTrue(TEXT("Pickup release does not immediately release the new cable"),Actions->IsCableGrabActive());
+    for(int32 Tap=0;Tap<2;++Tap)
+    {
+        PropGrabTests::FireGrabPhase(Player,TEXT("Started"));World->Tick(LEVELTICK_All,.05f);
+        PropGrabTests::FireGrabPhase(Player,TEXT("Canceled"));World->Tick(LEVELTICK_All,.05f);
+    }
+    TestFalse(TEXT("Double-tap G releases the hose through the owned action path"),Actions->IsCableGrabActive());
+    TestEqual(TEXT("Release removes the authoritative contributor"),Cable->GetActiveGrabs().Num(),0);
+
+    auto* WorldInteraction = LoadClass<UInterface>(nullptr, TEXT("/Game/WorldInteractionSystem/BPI_World_Intractions_System.BPI_World_Intractions_System_C"));
+    if (!TestTrue(TEXT("The saved cola hose implements the world interaction Blueprint interface"), WorldInteraction && HoseClass->ImplementsInterface(WorldInteraction))) return false;
+    static const FName GripSocket(TEXT("HandGrip_L"));
+    auto* HandMesh = Player->GetMesh();
+    if (!TestTrue(TEXT("The saved player has the legacy left hand socket"), HandMesh->DoesSocketExist(GripSocket))) return false;
+
+    auto StepPickup = [&](AHoseCableActor& PickedHose)
+    {
+        constexpr float Dt = 1.f / 60.f;
+        PickedHose.Cable->TickComponent(Dt, LEVELTICK_All, nullptr);
+        Actions->TickComponent(Dt, LEVELTICK_All, nullptr);
+        PickedHose.Tick(Dt);
+    };
+    UResourceTransferEndpointComponent* SupplyPort = nullptr;
+    auto GrabConnector = [&](bool bStart, bool bReleaseEarly = false)
+    {
+        PC->UpdateCameraManager(0);
+        PC->GetPlayerViewPoint(Eye, View);
+        const FVector AimedPoint = Eye + View.Vector() * 120;
+        const FVector FarPoint = AimedPoint + FVector(0, SupplyPort ? 110 : 200, 0);
+        TArray<FVector> Line;
+        for (int32 Index = 0; Index <= Cable->NumSegments; ++Index)
+        {
+            const double Alpha = double(Index) / Cable->NumSegments;
+            FVector Position = bStart ? FMath::Lerp(AimedPoint, FarPoint, Alpha) : FMath::Lerp(FarPoint, AimedPoint, Alpha);
+            if (SupplyPort) Position.Z -= 70. * FMath::Sin(UE_DOUBLE_PI * Alpha);
+            Line.Add(Position);
+        }
+        Cable->SetCableParticleLocations(Line);
+        if (SupplyPort)
+        {
+            SupplyPort->GetOwner()->SetActorLocation(FarPoint);
+            if (!Hose->StartPort && !TestTrue(TEXT("Tank end plugs in before pickup"), Hose->ConnectStart(SupplyPort))) return false;
+        }
+        Hose->Tick(0);
+        const auto* Selected = bStart ? Hose->StartEndpointMesh.Get() : Hose->EndEndpointMesh.Get();
+        const auto* Free = bStart ? Hose->EndEndpointMesh.Get() : Hose->StartEndpointMesh.Get();
+        const FVector OriginalScale = Selected->GetComponentScale();
+        const FTransform CableFrame = Cable->GetComponentTransform();
+        PropGrabTests::FireGrabPhase(Player, TEXT("Started"));
+        if (!Actions->IsCableGrabActive())
+        {
+            World->Tick(LEVELTICK_All, .45f);
+            PropGrabTests::FireGrabPhase(Player, TEXT("Ongoing"));
+        }
+        if (!TestTrue(TEXT("G begins pulling the traced connector"), Actions->IsCableGrabActive())) return false;
+        const int32 ExpectedPoint = bStart ? 0 : Cable->NumSegments;
+        const FVector GripPositionAtStart = HandMesh->GetSocketLocation(GripSocket);
+        TArray<FVector> ApproachPoints;
+        Cable->GetCableParticleLocations(ApproachPoints);
+        const double InitialDistance = FVector::Distance(ApproachPoints[ExpectedPoint], GripPositionAtStart);
+        for (int32 Frame = 0; Frame < 4; ++Frame) StepPickup(*Hose);
+        Cable->GetCableParticleLocations(ApproachPoints);
+        const double RemainingDistance = FVector::Distance(ApproachPoints[ExpectedPoint], GripPositionAtStart);
+        TestTrue(TEXT("The simulated cable end travels partway toward the hand before attaching"), Selected->GetAttachParent() == Hose->SceneRoot
+            && RemainingDistance > 4. && RemainingDistance < InitialDistance);
+        if (bReleaseEarly)
+        {
+            PropGrabTests::FireGrabPhase(Player, TEXT("Canceled"));
+            TestFalse(TEXT("Early G release ends the approach"), Actions->IsCableGrabActive());
+            TestEqual(TEXT("The released connector is free to fall"), Cable->GetActiveGrabs().Num(), 0);
+            TestEqual(TEXT("Canceling leaves the far end plugged in"), Hose->StartPort.Get(), SupplyPort);
+            return true;
+        }
+        for (int32 Frame = 0; Frame < 180 && Hose->FindHandHeldConnector(Player) == INDEX_NONE; ++Frame) StepPickup(*Hose);
+        Cable->GetCableParticleLocations(ApproachPoints);
+        TestTrue(TEXT("The approaching cable end reaches the hand"), ApproachPoints[ExpectedPoint].Equals(GripPositionAtStart, 4.1));
+        PropGrabTests::FireGrabPhase(Player, TEXT("Completed"));
+        if (!TestTrue(TEXT("G selects the cylinder through the saved attach request"), Actions->IsCableGrabActive())) return false;
+        TestTrue(TEXT("The selected cylinder is attached to the live hand socket"),
+            Selected->GetAttachParent() == HandMesh && Selected->GetAttachSocketName() == GripSocket);
+        TestTrue(TEXT("Only the selected cylinder attaches"), Free->GetAttachParent() == Hose->SceneRoot);
+        if (SupplyPort) TestTrue(TEXT("The tank end remains anchored after pickup"), Hose->StartPort == SupplyPort
+            && Cable->GetStartAttachmentComponent() == SupplyPort);
+        TestTrue(TEXT("Both grips preserve the cable's independent render frame"),
+            Cable->GetAttachParent()==Hose->SceneRoot && Cable->GetComponentTransform().Equals(CableFrame));
+        TestTrue(TEXT("Cylinder keeps its authored size"), Selected->GetComponentScale().Equals(OriginalScale, .01));
+        TestEqual(TEXT("The authoritative hold records the correct end"), Hose->FindHandHeldConnector(Player), bStart ? 0 : Cable->NumSegments);
+        TArray<FCableMovementAttachment> Attachments;
+        Cable->GetMovementAttachments(Attachments);
+        const int32 HeldIndex = bStart ? 0 : Cable->NumSegments;
+        TestTrue(TEXT("The held point still belongs to the player for movement and pulling"), Attachments.ContainsByPredicate([&](const auto& Attachment)
+        {
+            return Attachment.PointIndex==HeldIndex && Attachment.Driver==Player && !Attachment.bFixed;
+        }));
+        Player->AddActorWorldOffset(FVector(10, 0, 0));
+        Player->AddActorWorldRotation(FRotator(0, 55, 0));
+        World->Tick(LEVELTICK_All, .016f);
+        // This fixture advances several input phases inside one editor frame.
+        // Step the solver explicitly, as in the other native cable tests.
+        Cable->TickComponent(.016f, LEVELTICK_All, nullptr);
+        TArray<FVector> Points;
+        Cable->GetCableParticleLocations(Points);
+        const FVector GripPosition = HandMesh->GetSocketLocation(GripSocket);
+        const FVector EndPosition = bStart ? Points[0] : Points.Last();
+        AddInfo(FString::Printf(TEXT("Hand grip %s: cable %s, socket %s, delta %.3f cm, simulation %.3f ms"),
+            bStart ? TEXT("start") : TEXT("end"), *EndPosition.ToString(), *GripPosition.ToString(),
+            FVector::Distance(EndPosition, GripPosition), Cable->LastSimulationTimeMs));
+        TestTrue(TEXT("The pinned simulation end catches up to the moving hand"),
+            EndPosition.Equals(GripPosition, .2));
+        TestTrue(TEXT("The cylinder follows the hand while held"), Selected->GetComponentLocation().Equals(GripPosition, .2));
+        TestTrue(TEXT("Walking and turning leave cable render placement stable"), Cable->GetComponentTransform().Equals(CableFrame));
+        return true;
+    };
+
+    if (!GrabConnector(true)) return false;
+    for (int32 Tap = 0; Tap < 2; ++Tap)
+    {
+        PropGrabTests::FireGrabPhase(Player, TEXT("Started"));
+        World->Tick(LEVELTICK_All, .05f);
+        PropGrabTests::FireGrabPhase(Player, TEXT("Canceled"));
+        World->Tick(LEVELTICK_All, .05f);
+    }
+    TestFalse(TEXT("Double-tap G releases the hand grip"), Actions->IsCableGrabActive());
+    TestTrue(TEXT("Released start cylinder returns to the hose root"), Hose->StartEndpointMesh->GetAttachParent() == Hose->SceneRoot);
+    TestFalse(TEXT("Released start point is free again"), Cable->bAttachStart);
+
+    auto* SupplyActor = World->SpawnActor<AActor>();
+    SupplyPort = NewObject<UResourceTransferEndpointComponent>(SupplyActor);
+    SupplyActor->SetRootComponent(SupplyPort);
+    SupplyActor->AddInstanceComponent(SupplyPort);
+    SupplyPort->Category = Hose->Transfer->Category;
+    SupplyPort->ResourceID = Hose->Transfer->ResourceID;
+    SupplyPort->CapacityUnits = 10;
+    SupplyPort->bCanSupply = true;
+    SupplyPort->RegisterComponent();
+    if (!GrabConnector(false, true) || !GrabConnector(false)) return false;
+    Hose->DisconnectStart();
+    PC->UpdateCameraManager(0);
+    PC->GetPlayerViewPoint(Eye, View);
+    auto* Receiver = World->SpawnActor<AActor>();
+    auto* Box = NewObject<UBoxComponent>(Receiver);
+    Receiver->SetRootComponent(Box);
+    Receiver->AddInstanceComponent(Box);
+    Box->SetBoxExtent(FVector(5));
+    Box->SetCollisionProfileName(TEXT("BlockAll"));
+    Box->RegisterComponent();
+    Receiver->SetActorLocation(Eye + View.Vector() * 170);
+    auto* Port = NewObject<UResourceTransferEndpointComponent>(Receiver);
+    Receiver->AddInstanceComponent(Port);
+    Port->SetupAttachment(Box);
+    Port->Category = Hose->Transfer->Category;
+    Port->ResourceID = Hose->Transfer->ResourceID;
+    Port->CapacityUnits = 10;
+    Port->bCanReceive = true;
+    Port->RegisterComponent();
+    TestTrue(TEXT("E connects the hand-held receiving end"), Actions->TryOpenTerminalFromView());
+    TestTrue(TEXT("The port becomes the cable end attachment"), Hose->EndPort == Port && Cable->GetAttachedComponent() == Port);
+    TestEqual(TEXT("Connecting consumes the hand hold"), Hose->FindHandHeldConnector(Player), INDEX_NONE);
+    TestTrue(TEXT("The connected cylinder is again driven by the cable"), Hose->EndEndpointMesh->GetAttachParent() == Hose->SceneRoot);
+    TestFalse(TEXT("Successful connection clears local holding state"), Actions->IsCableGrabActive());
+
+    Hose->Destroy();
+    Receiver->Destroy();
+    auto* Floor = World->SpawnActor<AActor>();
+    auto* FloorBox = NewObject<UBoxComponent>(Floor);
+    Floor->SetRootComponent(FloorBox);
+    Floor->AddInstanceComponent(FloorBox);
+    FloorBox->SetBoxExtent(FVector(750,750,20));
+    FloorBox->SetCollisionProfileName(TEXT("BlockAll"));
+    FloorBox->RegisterComponent();
+    Floor->SetActorLocation(FVector(0,0,-20));
+
+    for (const TCHAR* Name : {TEXT("BP_HoseCable"), TEXT("BP_ContentHose"), TEXT("BP_FuelHose"), TEXT("BP_ElectricityHose")})
+    {
+        const FString Path = FString::Printf(TEXT("/Game/Resources/Hoses/%s.%s_C"),Name,Name);
+        auto* PresetClass = LoadClass<AHoseCableActor>(nullptr,*Path);
+        if (!TestNotNull(FString::Printf(TEXT("Saved hose preset %s"),Name),PresetClass)) return false;
+        Player->SetActorLocation(FVector(0,0,100));
+        auto* Preset = World->SpawnActor<AHoseCableActor>(PresetClass,FVector(140,-65,6),FRotator::ZeroRotator);
+        if (!TestTrue(FString::Printf(TEXT("%s uses connector pickup"),Name),Preset && Preset->bCarryConnectorOnPickup)) return false;
+        auto* PresetCable = Preset->Cable.Get();
+        TArray<FVector> FloorPoints;
+        for (int32 Index = 0; Index<=PresetCable->NumSegments; ++Index)
+            FloorPoints.Add(FVector(140,-65+200.0*Index/PresetCable->NumSegments,6));
+        PresetCable->SetCableParticleLocations(FloorPoints);
+        Preset->Tick(0);
+        Player->GetActorEyesViewPoint(Eye,View);
+        PC->SetControlRotation((FVector(140,0,6)-Eye).Rotation());
+        PC->UpdateCameraManager(0);
+
+        PropGrabTests::FireGrabPhase(Player,TEXT("Started"));
+        World->Tick(LEVELTICK_All,.45f);
+        PropGrabTests::FireGrabPhase(Player,TEXT("Ongoing"));
+        for (int32 Frame = 0; Frame < 180 && Preset->FindHandHeldConnector(Player) == INDEX_NONE; ++Frame) StepPickup(*Preset);
+        PropGrabTests::FireGrabPhase(Player,TEXT("Completed"));
+        if (!TestTrue(FString::Printf(TEXT("G on %s body lifts the reachable connector off the floor"),Name),
+                Actions->IsCableGrabActive() && Preset->FindHandHeldConnector(Player)==0
+                && Preset->StartEndpointMesh->GetAttachParent()==HandMesh && PresetCable->GetAttachParent()==Preset->SceneRoot)) return false;
+        const FVector BeforeWalk = Player->GetActorLocation();
+        const FVector AfterWalk = BeforeWalk + FVector(0,180,0);
+        PresetCable->TickComponent(.016f,LEVELTICK_All,nullptr);
+        if (auto* Constraint=Player->FindComponentByClass<UCableMovementConstraintComponent>())
+        {
+            TestTrue(FString::Printf(TEXT("A loose %s lets the player walk at the requested position"),Name),
+                Constraint->ConstrainRequestedLocation(BeforeWalk,AfterWalk).Equals(AfterWalk,.01)
+                && Constraint->TryPullConnectedChain(BeforeWalk,AfterWalk,.016f,1000).AllowedLocation.Equals(AfterWalk,.01));
+        }
+        else AddError(FString::Printf(TEXT("%s did not register its hand attachment with player movement"),Name));
+        Player->SetActorLocation(AfterWalk);
+        World->Tick(LEVELTICK_All,.016f);
+        PresetCable->TickComponent(.016f,LEVELTICK_All,nullptr);
+        PresetCable->GetCableParticleLocations(FloorPoints);
+        TestTrue(FString::Printf(TEXT("%s cable and connector follow the moved hand"),Name),FloorPoints.Num()>1
+            && FloorPoints[0].Equals(HandMesh->GetSocketLocation(GripSocket),.2)
+            && Preset->StartEndpointMesh->GetComponentLocation().Equals(HandMesh->GetSocketLocation(GripSocket),.2));
+        Actions->RequestCableRelease();
+        TestEqual(FString::Printf(TEXT("%s releases its connector"),Name),Preset->FindHandHeldConnector(Player),INDEX_NONE);
+        Preset->Destroy();
+    }
+    return true;
 }
 #endif

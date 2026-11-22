@@ -4,6 +4,17 @@
 #include "Props/InteractableProp.h"
 #include "Props/ColaPropActor.h"
 
+namespace
+{
+	bool HasTemperatureStrengthChanged(const FPropProductDefinition& Product, float PreviousTemperature, float Temperature)
+	{
+		// Replicate each percentage point of recovery, including zero, during slow cooling.
+		const float PreviousDebuff = Product.GetTemperatureStrengthDebuff(PreviousTemperature);
+		const float Debuff = Product.GetTemperatureStrengthDebuff(Temperature);
+		return FMath::CeilToInt(PreviousDebuff * 100.0f) != FMath::CeilToInt(Debuff * 100.0f);
+	}
+}
+
 UPropBatchUpdateComponent::UPropBatchUpdateComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -101,7 +112,8 @@ void UPropBatchUpdateComponent::ProcessBatchUpdate(float DeltaSeconds)
 			const double DeltaTSeconds = FMath::Max(0.0, BatchBaseWorldSeconds - UniqueData->ContinuousData.LastUpdatedTime);
 			const float PrevTemp = UniqueData->ContinuousData.Temperature;
 			float NewTemp = PrevTemp;
-			bool bThermalStrengthChanged = false;
+			bool bPermanentStrengthChanged = false;
+			const bool bUsesTemperatureStrengthDebuff = ProductDef->UsesTemperatureStrengthDebuff();
 
 			AActivePropActor* ActiveASM = (Record->Representation == EPropRepresentation::ASM) ? Record->ActiveActor.Get() : nullptr;
 			const bool bASMHandlesOwnThermal = (ActiveASM && ActiveASM->HasActiveThermalSources());
@@ -131,12 +143,12 @@ void UPropBatchUpdateComponent::ProcessBatchUpdate(float DeltaSeconds)
 				NewTemp = UniqueData->ContinuousData.Temperature;
 			}
 
-			// Thermal damage accumulation outside safe operating bounds
+			// Apply permanent damage for thermal hazards that are outside the reversible heat model.
 			if (!bASMHandlesOwnThermal && ProductDef->BottleMaterialType != EBottleMaterialType::Diamond && DeltaTSeconds > 0.0 && ProductDef->ThermalDamageRate > 0.0f)
 			{
 				float ExcessDegrees = 0.0f;
 				float ThermalBand = 1.0f;
-				if (NewTemp > ProductDef->HighTempDamageThreshold)
+				if (!bUsesTemperatureStrengthDebuff && NewTemp > ProductDef->HighTempDamageThreshold)
 				{
 					ExcessDegrees = NewTemp - ProductDef->HighTempDamageThreshold;
 					ThermalBand = FMath::Max(1.0f, ProductDef->MaxTemperatureThreshold - ProductDef->HighTempDamageThreshold);
@@ -155,7 +167,7 @@ void UPropBatchUpdateComponent::ProcessBatchUpdate(float DeltaSeconds)
 					UniqueData->EventData.Strength = FMath::Max(0.0f, OldStrength - DamageAmount);
 					if (!FMath::IsNearlyEqual(OldStrength, UniqueData->EventData.Strength, 0.01f))
 					{
-						bThermalStrengthChanged = true;
+						bPermanentStrengthChanged = true;
 					}
 				}
 			}
@@ -176,18 +188,19 @@ void UPropBatchUpdateComponent::ProcessBatchUpdate(float DeltaSeconds)
 			}
 			else if (ActiveASM && !bASMHandlesOwnThermal)
 			{
-				ActiveASM->OnApplyContinuousData(UniqueData->ContinuousData, UniqueData->EventData.Strength, bThermalStrengthChanged);
+				ActiveASM->OnApplyContinuousData(UniqueData->ContinuousData, UniqueData->EventData.Strength, bPermanentStrengthChanged);
 			}
 
 			// Emit compact Channel A network packet if temperature or strength changed noticeably
-			if (!bASMHandlesOwnThermal && (FMath::Abs(NewTemp - PrevTemp) >= TemperatureNetSyncEpsilon || bThermalStrengthChanged))
+			if (!bASMHandlesOwnThermal && (FMath::Abs(NewTemp - PrevTemp) >= TemperatureNetSyncEpsilon || bPermanentStrengthChanged
+				|| (bUsesTemperatureStrengthDebuff && HasTemperatureStrengthChanged(*ProductDef, PrevTemp, NewTemp))))
 			{
 				FPropContinuousSyncItem SyncItem;
 				SyncItem.ISID = CheckISID;
 				SyncItem.Temperature = NewTemp;
-					SyncItem.SealedPressure = UniqueData->ContinuousData.SealedPressure;
+				SyncItem.SealedPressure = UniqueData->ContinuousData.SealedPressure;
 				SyncItem.RelativeTimeOffset = static_cast<float>(UniqueData->ContinuousData.LastUpdatedTime - BatchBaseWorldSeconds);
-				SyncItem.bHasThermalStrengthUpdate = bThermalStrengthChanged;
+				SyncItem.bHasThermalStrengthUpdate = bPermanentStrengthChanged;
 				SyncItem.ThermalStrength = UniqueData->EventData.Strength;
 				ContinuousSyncItems.Add(SyncItem);
 			}
@@ -195,7 +208,9 @@ void UPropBatchUpdateComponent::ProcessBatchUpdate(float DeltaSeconds)
 			// Check extreme thermal / structural failure thresholds (deferred until after loop)
 			const bool bIndestructible = ProductDef->BottleMaterialType == EBottleMaterialType::Diamond;
 			const bool bBrittle = ProductDef->BottleMaterialType == EBottleMaterialType::Glass || ProductDef->BottleMaterialType == EBottleMaterialType::Concrete;
-			const bool bOverMaxTemp = !bIndestructible && (NewTemp >= ProductDef->MaxTemperatureThreshold);
+			// A heat-softened bottle can recover unless the product defines a melted state.
+			const bool bOverMaxTemp = !bIndestructible && NewTemp >= ProductDef->MaxTemperatureThreshold
+				&& (!bUsesTemperatureStrengthDebuff || ProductDef->MeltedProductID > 0);
 			const bool bUnderMinTemp = !bIndestructible && (NewTemp <= ProductDef->MinTemperatureThreshold);
 			const bool bStrengthZero = bBrittle && (UniqueData->EventData.Strength <= 0);
 			if (bOverMaxTemp || bUnderMinTemp || bStrengthZero)
@@ -384,7 +399,8 @@ bool UPropBatchUpdateComponent::SetInstanceTemperature(int32 InISID, float NewTe
 	const float CurrentTemp = Unique ? Unique->ContinuousData.Temperature : Record->PackedRuntimeData.Temperature;
 	if (FMath::IsNearlyEqual(CurrentTemp, NewTemperature, TemperatureNetSyncEpsilon))
 	{
-		return false;
+		const FPropProductDefinition* Product = Manager->FindProductDefinition(Record->ProductID);
+		if (!Product || !HasTemperatureStrengthChanged(*Product, CurrentTemp, NewTemperature)) return false;
 	}
 
 	const int32 CurrentMinutes = Manager->GetCurrentWorldMinutes();

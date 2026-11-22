@@ -1,5 +1,7 @@
 #include "Components/PropGrabInputComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/CollisionCableComponent.h"
+#include "Shop/ShopPlayerInteractionComponent.h"
 #include "Props/InteractableProp.h"
 #include "Props/InteractablePropManager.h"
 #include "GameFramework/WorldSettings.h"
@@ -41,7 +43,12 @@ EPropGrabIntent FPropGrabGesture::Process(EPropGrabInputPhase Phase, double Now,
 	return Intent;
 }
 
-UPropGrabInputComponent::UPropGrabInputComponent() { PrimaryComponentTick.bCanEverTick = false; }
+UPropGrabInputComponent::UPropGrabInputComponent()
+{
+	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
+	SetIsReplicatedByDefault(true);
+}
 
 void UPropGrabInputComponent::BeginPlay()
 {
@@ -70,6 +77,9 @@ void UPropGrabInputComponent::BeginPlay()
 
 void UPropGrabInputComponent::ProcessGrabInput(EPropGrabInputPhase Phase, AActor* HeldActor, UPrimitiveComponent* HeldComponent)
 {
+	auto* CableActions=GetOwner()?GetOwner()->FindComponentByClass<UShopPlayerInteractionComponent>():nullptr;
+	const bool bHoldingProp=IsValid(HeldComponent)||IsValid(HeldActor);
+	const bool bHoldingCable=!bHoldingProp && CableActions && CableActions->IsCableGrabActive();
 	uint64 Token = 0;
 	if (IsValid(HeldComponent)) Token = (uint64(HeldComponent->GetUniqueID()) << 32) | 1;
 	else if (IsValid(HeldActor))
@@ -77,7 +87,54 @@ void UPropGrabInputComponent::ProcessGrabInput(EPropGrabInputPhase Phase, AActor
 		const auto* Prop = Cast<AActivePropActor>(HeldActor);
 		Token = (uint64(HeldActor->GetUniqueID()) << 32) | uint32(Prop ? Prop->ISID : 1);
 	}
+	else if(bHoldingCable) Token=(uint64(CableActions->GetGrabbedCable()->GetUniqueID())<<32)|2;
 	LastIntent = GetWorld() ? Gesture.Process(Phase, GetWorld()->GetTimeSeconds(), Token, HoldSeconds, DoubleTapSeconds) : EPropGrabIntent::None;
+	const bool bEnding = Phase != EPropGrabInputPhase::Ongoing && Phase != EPropGrabInputPhase::Started;
+	if (bTravelKeyHeld)
+	{
+		if (bEnding)
+		{
+			bTravelKeyHeld = false;
+			Server_EndActorTravel(LocalTravelSequence);
+		}
+		LastIntent = EPropGrabIntent::None;
+		return;
+	}
+	if (CableActions && bEnding && CableActions->FinishHosePickupPress())
+	{
+		LastIntent = EPropGrabIntent::None;
+		return;
+	}
+	if (CableActions && Phase==EPropGrabInputPhase::Started && !bHoldingProp && !bHoldingCable
+		&& CableActions->TryGrabLooseHoseFromView(true)) return;
+	if (CableActions && (LastIntent==EPropGrabIntent::Grab || LastIntent==EPropGrabIntent::Place)
+		&& CableActions->TryGrabSocketHoseFromView(LastIntent==EPropGrabIntent::Grab, true))
+	{
+		if (bEnding) CableActions->FinishHosePickupPress();
+		LastIntent=EPropGrabIntent::None;
+		return;
+	}
+	if(bHoldingCable)
+	{
+		if (LastIntent==EPropGrabIntent::Drop) CableActions->RequestCableDrop();
+		else if (LastIntent==EPropGrabIntent::Place) CableActions->RequestCableRelease();
+		// Cable grabs never become legacy actor/component attachments or placement.
+		LastIntent=EPropGrabIntent::None;
+	}
+	else if(!bHoldingProp && LastIntent==EPropGrabIntent::Grab && CableActions && CableActions->TryGrabCableOnHoldFromView())
+	{
+		if (bEnding) CableActions->FinishHosePickupPress();
+		LastIntent = EPropGrabIntent::None;
+	}
+	else if ((LastIntent == EPropGrabIntent::Grab || LastIntent == EPropGrabIntent::Place) && !IsValid(HeldComponent)
+		&& TryBeginActorTravel(Phase, HeldActor)) LastIntent = EPropGrabIntent::None;
+}
+
+bool UPropGrabInputComponent::CanGrabHitComponent(const UPrimitiveComponent* HittingComponent) const
+{
+	if (!IsValid(HittingComponent) || HittingComponent->GetWorld()!=GetWorld() || !IsValid(HittingComponent->GetOwner())) return false;
+	const auto* Prop=Cast<AActivePropActor>(HittingComponent->GetOwner());
+	return !Prop || Prop->AllowsPlayerGrab();
 }
 
 bool UPropGrabInputComponent::CanGrabTarget(AActor* Target) const
@@ -88,7 +145,7 @@ bool UPropGrabInputComponent::CanGrabTarget(AActor* Target) const
 		const auto* Manager = APropManager::Get(this);
 		return Manager && Prop->ISID > 0 && Manager->GetActiveActorFromISID(Prop->ISID) == Prop && Manager->ValidateGrab(Prop->ISID, GetOwner());
 	}
-	return true; // Other actor types keep their established interface validation.
+	return !IsActorInAnotherPlayerHand(Target); // Other actor types still use their interface validation.
 }
 
 bool UPropGrabInputComponent::OwnsHeldTarget(AActor* Target) const

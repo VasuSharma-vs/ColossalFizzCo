@@ -4,9 +4,13 @@
 #include "Components/StaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/World.h"
 #include "Components/RocketProjectileComponent.h"
 #include "Components/StaticMeshPhysicsSimulationComponent.h"
 #include "Components/ResourceTransferEndpointComponent.h"
+#include "GameFramework/Pawn.h"
+#include "TimerManager.h"
+#include "../Shop/WorldInteractionCarry.h"
 
 const FPropProductDefinition* AActivePropActor::ResolveProductDefinition() const
 {
@@ -129,6 +133,7 @@ void AActivePropActor::EmitPropEventUpdate(uint8 DirtyMask, uint8 ExtendedDirtyM
 		Delta.ContentCreationTime = E.ContentCreationTime; Delta.bClean = E.bClean;
 		Delta.AttachedCapISID = E.AttachedCapISID; Delta.AttachedBottleISID = E.AttachedBottleISID;
 		Delta.TemporarySealUntil=E.TemporarySealUntil; Delta.bTemporarySealUsed=E.bTemporarySealUsed; Delta.bTemporarySealArmed=E.bTemporarySealArmed; Delta.bManualFillPressure=E.bManualFillPressure; Delta.LinkedSupplyISID=E.LinkedSupplyISID;
+		Delta.TemporarySealDurationSeconds = E.TemporarySealDurationSeconds;
 		Delta.ConnectedSupplyISIDs=E.ConnectedSupplyISIDs; Delta.SelectedSupplyPort=E.SelectedSupplyPort; Delta.TemporarySealCharges=E.TemporarySealCharges;
 		Delta.LoadedCapISIDs=E.LoadedCapISIDs; Delta.LoadedSealISIDs=E.LoadedSealISIDs; Delta.StoredInMachineISID=E.StoredInMachineISID;
 		PropManagerReference->SubmitInstanceEventUpdate(ISID, Delta);
@@ -140,6 +145,7 @@ bool AActivePropActor::IsKeptActiveByVolume() const
 {
 	return HasAuthority() && bIsActive && PropManagerReference && PropManagerReference->IsInstanceKeptActive(ISID);
 }
+
 void AActivePropActor::SetSeatedInFiller(bool bSeated)
 {
 	if (!HasAuthority() || ISID <= 0) return;
@@ -160,10 +166,46 @@ void AActivePropActor::OnRep_FillerSeat()
 		if (PropManagerReference) PropManagerReference->UnregisterSettlingComponent(PhysicsSimComponent);
 	}
 	if (PropMesh && PropMesh->IsSimulatingPhysics()) PropMesh->SetSimulatePhysics(false);
+	if (GetNetMode() == NM_Client && Cast<APawn>(GetAttachParentActor()))
+		DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
 	const auto* Definition=ResolveProductDefinition();
 	if (PropMesh && LocalUniqueData.EventData.StoredInMachineISID>0 && Definition && Definition->ConsumableProfile.NumOfPortions<=0)
 		PropMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	WorldInteractionCarry::ClearLocalMountedItem(*this);
 }
+
+void AActivePropActor::SetDrinkingCarry(bool bEnabled, float DurationSeconds)
+{
+	if (!HasAuthority() || (bEnabled && (!bIsHeld || ISID <= 0))) return;
+	if (UWorld* World = GetWorld())
+	{
+		FTimerManager& Timers = World->GetTimerManager();
+		Timers.ClearTimer(DrinkingCarryTimer);
+		if (bEnabled && DurationSeconds > 0.f)
+		{
+			Timers.SetTimer(DrinkingCarryTimer,
+				FTimerDelegate::CreateUObject(this, &AActivePropActor::SetDrinkingCarry, false, 0.f), DurationSeconds, false);
+		}
+	}
+
+	const int32 NewID = bEnabled ? ISID : 0;
+	if (DrinkingCarryISID == NewID) return;
+	DrinkingCarryISID = NewID;
+	OnRep_DrinkingCarry();
+	ForceNetUpdate();
+}
+
+float AActivePropActor::GetDrinkingCarryTimeRemaining() const
+{
+	const UWorld* World = GetWorld();
+	return World ? World->GetTimerManager().GetTimerRemaining(DrinkingCarryTimer) : -1.f;
+}
+
+void AActivePropActor::OnRep_DrinkingCarry()
+{
+	SetActorEnableCollision(bIsActive && ISID > 0 && !IsCarriedForDrinking());
+}
+
 bool AActivePropActor::CanDemoteToISM() const
 {
 	if (IsSeatedInFiller() || bIsHeld || bIsInMotion || bIsInterpolatingToRest || HasActiveThermalSources() || IsKeptActiveByVolume()) return false;
@@ -185,7 +227,7 @@ void AActivePropActor::ApplyInitialImpactFromPromotion(FVector Location, const F
 	const FPropProductDefinition* Def = ResolveProductDefinition();
 	if (!Def || !Def->InteractionProfile.bCanDamage || !bHasValidUniqueData) return;
 	const float Damage = FMath::Max(0.0f, Def->StrengthDamageRate) * Impulse.Size() / 2500.0f;
-	LocalUniqueData.EventData.Strength = FMath::Clamp(GetStrength() - Damage, 0.0f, 1.0f);
+	LocalUniqueData.EventData.Strength = FMath::Clamp(GetBaseStrength() - Damage, 0.0f, 1.0f);
 	EmitPropEventUpdate(EPropEventDirtyMask::Strength);
 }
 void AActivePropActor::ReceiveWorldHit_Implementation(const FWorldInteractionHit& Data)
@@ -206,6 +248,8 @@ void AActivePropActor::ResetTransientPoolState()
 	{
 		TInlineComponentArray<UResourceTransferEndpointComponent*> ResourcePorts(this);
 		for (auto* Port:ResourcePorts) if (Port) Port->ClearManagedContentBinding();
+		DrinkingCarryISID = 0;
+		if (UWorld* World = GetWorld()) World->GetTimerManager().ClearTimer(DrinkingCarryTimer);
 	}
 	ReceivedWorldHitEvents.Reset();
 	if (HasAuthority()) FillerSeatISID = 0;
@@ -222,7 +266,17 @@ bool AActivePropActor::ChangeProductWithMode(int32 NewProductID, EPropProductRes
 
 float AActivePropActor::GetContentLevel() const { return bHasValidUniqueData ? LocalUniqueData.EventData.ContentLevel : QuantityLevel; }
 int32 AActivePropActor::GetRemainingPortions() const { return FMath::FloorToInt(GetContentLevel() * GetNumPortions()); }
-float AActivePropActor::GetStrength() const { return bHasValidUniqueData ? LocalUniqueData.EventData.Strength : 1.0f; }
+float AActivePropActor::GetBaseStrength() const { return bHasValidUniqueData ? LocalUniqueData.EventData.Strength : 1.0f; }
+float AActivePropActor::GetStrength() const
+{
+	const FPropProductDefinition* Def = bHasValidUniqueData ? ResolveProductDefinition() : nullptr;
+	return Def ? Def->GetEffectiveStrength(LocalUniqueData) : GetBaseStrength();
+}
+float AActivePropActor::GetTemperatureStrengthDebuff() const
+{
+	const FPropProductDefinition* Def = bHasValidUniqueData ? ResolveProductDefinition() : nullptr;
+	return Def ? Def->GetTemperatureStrengthDebuff(GetCurrentTemperature()) : 0.0f;
+}
 float AActivePropActor::GetStrengthRatio() const { return FMath::Clamp(GetStrength(), 0.0f, 1.0f); }
 float AActivePropActor::GetCapSealed() const { return bHasValidUniqueData ? LocalUniqueData.EventData.CapSealed : 0.0f; }
 uint8 AActivePropActor::GetCapType() const { return LocalUniqueData.EventData.CapType; }

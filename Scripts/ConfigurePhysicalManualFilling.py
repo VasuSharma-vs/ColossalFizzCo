@@ -66,11 +66,12 @@ if not isinstance(cap_product, unreal.InteractablePropDataAsset):
     cap_product = unreal.load_asset(str(cap_product))
 for name, value in {
     "item_display_name": unreal.Text("Temporary pressure seal"),
-    "static_mesh": cap_product.get_editor_property("static_mesh"),
-    "custom_active_actor_class": unreal.load_class(None, "/Game/Props/BP_ASM_Actor.BP_ASM_Actor_C"),
+    "static_mesh": seal.get_editor_property("static_mesh") or cap_product.get_editor_property("static_mesh"),
+    "custom_active_actor_class": seal.get_editor_property("custom_active_actor_class") or unreal.load_class(None, "/Game/Props/BP_ASM_Actor.BP_ASM_Actor_C"),
     "material_overrides": [seal_material], "bEnableInstanceUniqueData": True,
     "bCanGrab": True, "bCanConsume": False, "bIsBottleCap": False,
-    "num_of_portions": 0, "default_content_id": 0, "default_content_level": 0.0,
+    "bIsTemporaryPressureSeal": True, "num_of_portions": seal.get_editor_property("num_of_portions") or 4,
+    "default_content_id": 0, "default_content_level": 0.0,
     "default_cap_sealed": 0.0, "bHasExpiry": False, "gameplay_mass_kg": 0.01,
 }.items():
     seal.set_editor_property(name, value)

@@ -43,18 +43,25 @@ void UResourceTransferEndpointComponent::GetLifetimeReplicatedProps(TArray<FLife
 	DOREPLIFETIME(UResourceTransferEndpointComponent,bSupplyEnabled);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,bRequestsFlow);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,MaxSupplyUnitsPerSecond);
+	DOREPLIFETIME(UResourceTransferEndpointComponent,MaxReceiveUnitsPerSecond);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,TotalSuppliedUnits);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,bAllowManagedContentBridge);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,MaximumManagedContentLevel);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,ContentTemperature);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,ContentCreationTime);
+	DOREPLIFETIME(UResourceTransferEndpointComponent,ContentProductID);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,bEnableIntakeOverload);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,MaxIntakePressure);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,MaxIntakeUnitsPerSecond);
+	DOREPLIFETIME(UResourceTransferEndpointComponent,bEnableOuttakeOverload);
+	DOREPLIFETIME(UResourceTransferEndpointComponent,MaxOuttakePressure);
+	DOREPLIFETIME(UResourceTransferEndpointComponent,MaxOuttakeUnitsPerSecond);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,LastIncomingPressure);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,LastIncomingUnitsPerSecond);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,PushPressure);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,PullPressure);
+	DOREPLIFETIME(UResourceTransferEndpointComponent,bUseSignedPressure);
+	DOREPLIFETIME(UResourceTransferEndpointComponent,OperatingPressure);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,bMotorRunning);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,MotorPressureBoost);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,ConnectedMotor);
@@ -75,6 +82,7 @@ bool UResourceTransferEndpointComponent::SetSupplyEnabled(bool bEnabled)
 bool UResourceTransferEndpointComponent::CanAcceptHose(const UHoseTransferComponent* Hose) const
 {
 	if (!IsValid(Hose) || Hose->GetWorld()!=GetWorld()) return false;
+	if (CompatibleHoseClass && (!IsValid(Hose->GetOwner()) || !Hose->GetOwner()->IsA(CompatibleHoseClass))) return false;
 	if (MaxConnectedHoses<=0) return true;
 	TSet<const UHoseTransferComponent*> Connections;
 	for (const auto& Existing:ConnectedHoses) if (Existing.IsValid())
@@ -102,14 +110,26 @@ bool UResourceTransferEndpointComponent::SetFlowRequested(bool bRequested)
 bool UResourceTransferEndpointComponent::IsSupplyRequested() const
 {
 	for (const auto& Hose:ConnectedHoses)
-		if (Hose.IsValid() && Hose->SourceEndpoint==this && Hose->IsRequestingContent()) return true;
+		if (Hose.IsValid() && Hose->IsRequestingContentFrom(this)) return true;
 	return false;
+}
+
+bool UResourceTransferEndpointComponent::HasConnectedSupplyHose() const
+{
+	return ConnectedHoses.ContainsByPredicate([this](const auto& Hose)
+	{
+		return Hose.IsValid() && (Hose->SourceEndpoint==this || (Category==EResourceTransportCategory::Content && Hose->TargetEndpoint==this))
+			&& (Hose->HasValidConnection() || Hose->bBurst);
+	});
 }
 
 UHoseTransferComponent* UResourceTransferEndpointComponent::GetReceivingHose() const
 {
+	if (!bCanReceive) return nullptr;
 	for (const auto& Hose:ConnectedHoses)
-		if (Hose.IsValid() && Hose->TargetEndpoint==this && Hose->HasValidConnection()) return Hose.Get();
+		if (Hose.IsValid() && (Hose->TargetEndpoint==this
+			|| (Category==EResourceTransportCategory::Content && Hose->SourceEndpoint==this))
+			&& Hose->HasValidConnection()) return Hose.Get();
 	return nullptr;
 }
 
@@ -120,17 +140,47 @@ bool UResourceTransferEndpointComponent::IsIntakeOverloaded(float Pressure,float
 		|| Pressure>MaxIntakePressure || UnitsPerSecond>MaxIntakeUnitsPerSecond);
 }
 
+float UResourceTransferEndpointComponent::GetConnectorOverload(float Pressure,float UnitsPerSecond,bool bOuttake) const
+{
+	if (!(bOuttake ? bEnableOuttakeOverload : bEnableIntakeOverload)) return 0.f;
+	const float PressureLimit=bOuttake ? MaxOuttakePressure : MaxIntakePressure;
+	const float FlowLimit=bOuttake ? MaxOuttakeUnitsPerSecond : MaxIntakeUnitsPerSecond;
+	if (!FMath::IsFinite(PressureLimit) || PressureLimit<0 || !FMath::IsFinite(FlowLimit) || FlowLimit<0) return MAX_flt;
+	const float PressureOver=Pressure>PressureLimit+UE_KINDA_SMALL_NUMBER ? Pressure/FMath::Max(PressureLimit,UE_KINDA_SMALL_NUMBER) : 0.f;
+	const float FlowOver=UnitsPerSecond>FlowLimit+UE_KINDA_SMALL_NUMBER ? UnitsPerSecond/FMath::Max(FlowLimit,UE_KINDA_SMALL_NUMBER) : 0.f;
+	return FMath::Max(PressureOver,FlowOver);
+}
+
 void UResourceTransferEndpointComponent::NotifyIntakeOverload(UHoseTransferComponent* Hose,float Pressure,float UnitsPerSecond)
 {
 	if (!GetOwner() || !GetOwner()->HasAuthority() || GetNetMode()==NM_Client) return;
 	LastIncomingPressure=Pressure; LastIncomingUnitsPerSecond=UnitsPerSecond; bRequestsFlow=false;
-	// The transfer unbinds first, so callbacks cannot resume flow through this popped socket.
-	if (IsValid(Hose)) if (auto* HoseActor=Cast<AHoseCableActor>(Hose->GetOwner()))
-	{
-		if (HoseActor->StartPort==this) HoseActor->DisconnectStart();
-		if (HoseActor->EndPort==this) HoseActor->DisconnectEnd();
-	}
+	EjectOverloadedHose(Hose,Pressure);
 	GetOwner()->ForceNetUpdate(); OnSocketOverloaded.Broadcast(this,Hose,Pressure,UnitsPerSecond);
+}
+
+void UResourceTransferEndpointComponent::NotifyOuttakeOverload(UHoseTransferComponent* Hose,float Pressure,float UnitsPerSecond)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority() || GetNetMode()==NM_Client) return;
+	EjectOverloadedHose(Hose,Pressure);
+	GetOwner()->ForceNetUpdate(); OnSocketOverloaded.Broadcast(this,Hose,Pressure,UnitsPerSecond);
+}
+
+void UResourceTransferEndpointComponent::EjectOverloadedHose(UHoseTransferComponent* Hose,float Pressure)
+{
+	if (!IsValid(Hose)) return;
+	auto* HoseActor=Cast<AHoseCableActor>(Hose->GetOwner());
+	if (Hose->Category==EResourceTransportCategory::Content && !Hose->bBurst)
+	{
+		const bool SourceSlot=Hose->SourceEndpoint==this || (HoseActor && HoseActor->StartPort==this);
+		const bool StartConnector=HoseActor ? (SourceSlot ? HoseActor->GetSupplyConnectorIndex()==0 : HoseActor->GetReceivingConnectorIndex()==0) : SourceSlot;
+		Hose->FailureMode=StartConnector ? EHoseFailureMode::StartConnectorPopped : EHoseFailureMode::EndConnectorPopped;
+		Hose->BackPressure=Hose->OverpressureSeconds=0.f;
+		Hose->PendingBodyFailure=EHoseFailureMode::None;
+	}
+	// Break inside the current delivery step, before a Blueprint callback can repair the socket.
+	if (Hose->SourceEndpoint==this || Hose->TargetEndpoint==this) Hose->UnbindEndpoints();
+	if (HoseActor) HoseActor->EjectConnectorFrom(this,Pressure);
 }
 
 void UResourceTransferEndpointComponent::NotifyResourceReceived(UHoseTransferComponent* Hose,float Units,float Pressure,float UnitsPerSecond)
@@ -155,6 +205,26 @@ float UResourceTransferEndpointComponent::GetEffectivePullPressure() const
 {
 	return PullPressure+(bMotorRunning ? MotorPressureBoost : 0.f)
 		+(IsValid(ConnectedMotor) && ConnectedMotor->GetWorld()==GetWorld() && ConnectedMotor->bRunning ? ConnectedMotor->PullPressure : 0.f);
+}
+
+bool UResourceTransferEndpointComponent::SetOperatingPressure(float Pressure)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority() || GetNetMode()==NM_Client || !FMath::IsFinite(Pressure)) return false;
+	if (!bUseSignedPressure || OperatingPressure!=Pressure)
+	{
+		bUseSignedPressure=true;
+		OperatingPressure=Pressure;
+		GetOwner()->ForceNetUpdate();
+	}
+	return true;
+}
+
+float UResourceTransferEndpointComponent::GetOperatingPressure() const
+{
+	const float LegacyMotorBias=bMotorRunning ? (bCanSupply ? MotorPressureBoost : -MotorPressureBoost) : 0.f;
+	const float Pressure=bUseSignedPressure ? OperatingPressure : GetEffectivePushPressure()-GetEffectivePullPressure()+LegacyMotorBias;
+	if ((Pressure>0.f && !bSupplyEnabled) || (Pressure<0.f && !bRequestsFlow)) return 0.f;
+	return Pressure;
 }
 
 bool UResourceTransferEndpointComponent::HasValidStore() const
@@ -206,7 +276,7 @@ float UResourceTransferEndpointComponent::GetFreeCapacityUnits() const
 	const auto* Unique=ContentManager->FindUniqueData(ContentISID);
 	const auto* Def=ContentManager->FindProductDefinition(Record->ProductID);
 	const bool Deforms=Def->BottleMaterialType==EBottleMaterialType::Plastic || Def->BottleMaterialType==EBottleMaterialType::HeavyMetal;
-	float Capacity=Def->MaxOverfillLevel*(Deforms ? FMath::Clamp(Unique->EventData.Strength,0.f,1.f) : 1.f);
+	float Capacity=Def->MaxOverfillLevel*(Deforms ? FMath::Clamp(Def->GetEffectiveStrength(*Unique),0.f,1.f) : 1.f);
 	if (bManagedReceivingProxy)
 	{
 		if (!FMath::IsFinite(MaximumManagedContentLevel) || MaximumManagedContentLevel<0) return 0;

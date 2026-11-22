@@ -61,7 +61,8 @@ enum class EPropActivationReason : uint8
 	Interaction    UMETA(DisplayName = "Complex Interaction"),
 	Movement       UMETA(DisplayName = "Movement / Rotation"),
 	Animation      UMETA(DisplayName = "Animation"),
-	LoadRestore    UMETA(DisplayName = "Save/Load Restore")
+	LoadRestore    UMETA(DisplayName = "Save/Load Restore"),
+	LevelPlacement UMETA(DisplayName = "Level Placement")
 };
 
 /**
@@ -712,6 +713,8 @@ struct COLOSSALFIZZCO_API FPropEventUpdateData
 
 	/** Persistent equipment connection and one-use temporary seal on the manager clock. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") double TemporarySealUntil = 0;
+	/** Chosen lifetime of the installed seal, including while it is armed. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category="Unique Data|Manufacturing") float TemporarySealDurationSeconds = 0.0f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") bool bTemporarySealUsed = false;
 	/** Installed seal retains full life until the filling lever is first released. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") bool bTemporarySealArmed = false;
@@ -733,7 +736,7 @@ struct COLOSSALFIZZCO_API FPropEventUpdateData
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Unique Data|Event")
 	int32 ContentID = 0;
 
-	/** Unified structural integrity (0.0..MaxStrength); replaces PermanentDeformation, CrackProgression, ThermalDamageLevel */
+	/** Stored structural integrity, including permanent damage. Temporary heat weakening is derived from temperature. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Unique Data|Event", meta = (ClampMin = "0.0"))
 	float Strength = 1.0f;
 
@@ -1041,6 +1044,7 @@ struct COLOSSALFIZZCO_API FPropEventSyncDelta
 	UPROPERTY() int32 AttachedBottleISID = 0;
 	UPROPERTY() bool bClean = true;
 	UPROPERTY() double TemporarySealUntil = 0;
+	UPROPERTY() float TemporarySealDurationSeconds = 0.0f;
 	UPROPERTY() bool bTemporarySealUsed = false;
 	UPROPERTY() bool bTemporarySealArmed = false;
 	UPROPERTY() bool bManualFillPressure = false;
@@ -1488,7 +1492,7 @@ struct COLOSSALFIZZCO_API FPropProductDefinition
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Unique Data")
 	bool bEnableInstanceUniqueData = false;
 
-	/** Enables UPropBatchUpdateComponent continuous ticks (Temperature, thermal Strength drain, GPU Slots 1..3) */
+	/** Enables UPropBatchUpdateComponent continuous ticks for temperature, strength and GPU slots 1..3. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Unique Data", meta = (EditCondition = "bEnableInstanceUniqueData"))
 	bool bEnableContinuousUpdateData = false;
 
@@ -1663,6 +1667,10 @@ struct COLOSSALFIZZCO_API FPropProductDefinition
 
 	/** Populates a product definition from a UInteractablePropDataAsset */
 	static FPropProductDefinition FromDataAsset(const UInteractablePropDataAsset* InAsset, int32 InProductID, int32 InStaticMeshID = 0);
+
+	bool UsesTemperatureStrengthDebuff() const;
+	float GetTemperatureStrengthDebuff(float Temperature) const;
+	float GetEffectiveStrength(const FPropInstanceUniqueData& Data) const;
 
 	/** Returns true if this product definition has valid ID and mesh configuration */
 	bool IsValidDefinition() const { return ProductID > 0; }

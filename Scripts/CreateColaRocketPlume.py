@@ -1,6 +1,7 @@
 """Author the bottle exhaust in UE 5.8 with -EnablePlugins=CascadeToNiagaraConverter.
 
 Pass -ColaShared for the system used by the world subsystem, or -ColaBoth for both assets.
+Pass -ColaOutlet for the valve-controlled tank jet.
 Pass -ColaRebuild to replace the emitters in an existing system at its original path.
 Use -ColaPatchColor to update only the spawn color in existing hand-tuned emitters.
 The converter provides editor graph authoring functions. The saved Niagara asset
@@ -87,7 +88,7 @@ def mouth_scale(shared):
                    input_type.FLOAT, {"Vector": axes})
 
 
-def nozzle_face_position(shared):
+def nozzle_face_position(shared, lip_radius=10.3):
     center = nozzle_value("position") if shared else fx.create_script_input_linked_parameter(
         "Engine.Owner.Position", input_type.POSITION)
     normal = nozzle_value("direction") if shared else fx.create_script_input_linked_parameter(
@@ -99,12 +100,11 @@ def nozzle_face_position(shared):
                       {"Vector A": normal, "Vector B": direction})
     unit_tangent = dynamic("/Niagara/DynamicInputs/Helpers/SafeNormalizeVector.SafeNormalizeVector", input_type.VEC3,
                            {"Vector To Normalize": tangent, "Fallback Vector": fx.create_script_input_vector(ue.Vector(0, 0, 0))})
-    # sqrt(U) makes equal areas of the opening equally likely. 10.3 cm is the
-    # measured inner lip radius on the production plastic bottle at native scale.
+    # sqrt(U) makes equal areas of the opening equally likely.
     distance_fraction = dynamic("/Niagara/DynamicInputs/Power/Power.Power", input_type.FLOAT,
                                 {"a": random_range(0.0, 1.0), "b": fx.create_script_input_float(0.5)})
     scale = dynamic("/Niagara/DynamicInputs/Multiply/Multiply_Float.Multiply_Float", input_type.FLOAT,
-                    {"A": fx.create_script_input_float(10.3), "B": mouth_scale(shared)})
+                    {"A": fx.create_script_input_float(lip_radius), "B": mouth_scale(shared)})
     radius = dynamic("/Niagara/DynamicInputs/Multiply/Multiply_Float.Multiply_Float", input_type.FLOAT,
                      {"A": scale, "B": distance_fraction})
     offset = dynamic("/Niagara/DynamicInputs/Multiply/Multiply_VectorByFloat.Multiply_VectorByFloat",
@@ -123,14 +123,26 @@ def set_liquid_color(init, shared):
     set_input(init, "Color", color)
 
 
+def outlet_scaled_value(value, parameter, square_root=False):
+    amount = fx.create_script_input_linked_parameter(parameter, input_type.FLOAT)
+    if square_root:
+        amount = dynamic("/Niagara/DynamicInputs/Power/Power.Power", input_type.FLOAT,
+                         {"a": amount, "b": fx.create_script_input_float(0.5)})
+    return dynamic("/Niagara/DynamicInputs/Multiply/Multiply_Float.Multiply_Float", input_type.FLOAT,
+                   {"A": value, "B": amount})
+
+
 def build_emitter(context, shared, name, material, rate, burst, lifetime, speed, cone_degrees,
-                  drag, vertical_accel, size_range, streak=False, spawn_on_face=False):
+                  drag, vertical_accel, size_range, streak=False, spawn_on_face=False, outlet=False):
     emitter = context.add_empty_emitter(name)
     emitter.set_local_space(False)
     module(emitter, "EmitterState", "/Niagara/Modules/Emitter/EmitterState.EmitterState",
            stage.EMITTER_UPDATE)
     spawn = module(emitter, "SpawnRate", paths.script_spawnrate, stage.EMITTER_UPDATE)
-    set_input(spawn, "SpawnRate", shared_spawn_rate(rate) if shared else fx.create_script_input_float(rate))
+    spawn_rate = shared_spawn_rate(rate) if shared else fx.create_script_input_float(rate)
+    if outlet:
+        spawn_rate = outlet_scaled_value(spawn_rate, "User.OutletFlow")
+    set_input(spawn, "SpawnRate", spawn_rate)
     if burst and not shared:
         initial = module(emitter, "OpeningBurst", paths.script_spawnburst, stage.EMITTER_UPDATE)
         set_input(initial, "Spawn Count", fx.create_script_input_int(burst))
@@ -140,7 +152,7 @@ def build_emitter(context, shared, name, material, rate, burst, lifetime, speed,
     set_input(init, "Lifetime", random_range(*lifetime))
     if shared or spawn_on_face:
         set_input(init, "Position Mode", fx.create_script_input_enum(paths.enum_niagara_position_initialization_mode, "Direct Set"))
-        position = nozzle_face_position(shared) if spawn_on_face else nozzle_value("position")
+        position = nozzle_face_position(shared, 4.0 if outlet else 10.3) if spawn_on_face else nozzle_value("position")
         set_input(init, "Position", position)
     if spawn_on_face:
         set_liquid_color(init, shared)
@@ -163,7 +175,10 @@ def build_emitter(context, shared, name, material, rate, burst, lifetime, speed,
     set_input(velocity, "Cone Axis", axis)
     coord_space = "World" if shared else "Local"
     set_input(velocity, "Rotation Coordinate Space", fx.create_script_input_enum(paths.enum_niagara_coordinate_space, coord_space))
-    set_input(velocity, "Velocity Speed", random_range(*speed))
+    velocity_speed = random_range(*speed)
+    if outlet:
+        velocity_speed = outlet_scaled_value(velocity_speed, "User.OutletPressure", square_root=True)
+    set_input(velocity, "Velocity Speed", velocity_speed)
 
     module(emitter, "ParticleState", paths.script_particle_state, stage.PARTICLE_UPDATE)
     resistance = module(emitter, "Drag", paths.script_drag, stage.PARTICLE_UPDATE)
@@ -180,13 +195,14 @@ def build_emitter(context, shared, name, material, rate, burst, lifetime, speed,
     emitter.add_renderer("SpriteRenderer", renderer)
 
 
-def create(shared):
-    system_name = "NS_ColaRocketThrustShared" if shared else "NS_ColaRocketThrust"
+def create(shared=False, outlet=False):
+    system_name = "NS_ColaOutletJet" if outlet else "NS_ColaRocketThrustShared" if shared else "NS_ColaRocketThrust"
+    asset_folder = "/Game/Niagara/ColaOutlet" if outlet else folder
     materials = [ue.load_asset(f"{folder}/M_Cola{part}") for part in ("Jet", "Foam", "Bubble")]
     if not all(materials):
         raise RuntimeError("Create the three cola sprite materials before building the plume.")
-    if ue.EditorAssetLibrary.does_asset_exist(f"{folder}/{system_name}"):
-        system = ue.load_asset(f"{folder}/{system_name}")
+    if ue.EditorAssetLibrary.does_asset_exist(f"{asset_folder}/{system_name}"):
+        system = ue.load_asset(f"{asset_folder}/{system_name}")
         if "-colapatchcolor" not in flags:
             if "-colarebuild" not in flags:
                 raise RuntimeError("The system already exists. Use -ColaRebuild to replace its emitters.")
@@ -195,10 +211,12 @@ def create(shared):
         if "-colapatchcolor" in flags:
             raise RuntimeError(f"Missing existing system {system_name} for the color patch")
         system = ue.AssetToolsHelpers.get_asset_tools().create_asset(
-            system_name, folder, ue.NiagaraSystem, ue.NiagaraSystemFactoryNew())
+            system_name, asset_folder, ue.NiagaraSystem, ue.NiagaraSystemFactoryNew())
     if shared and not ue.ColaRocketPlumeEditorLibrary.add_nozzle_parameters(system):
         raise RuntimeError("Could not create the Niagara nozzle inputs")
-    if not shared and not ue.ColaRocketPlumeEditorLibrary.add_standalone_color_parameter(system):
+    if outlet and not ue.ColaRocketPlumeEditorLibrary.add_outlet_parameters(system):
+        raise RuntimeError("Could not create the outlet pressure and flow inputs")
+    if not shared and not outlet and not ue.ColaRocketPlumeEditorLibrary.add_standalone_color_parameter(system):
         raise RuntimeError("Could not create the standalone spray color")
     if "-colapatchcolor" in flags:
         init = fx.create_script_context(ue.CreateScriptContextArgs(fx.create_asset_data(paths.script_initialize_particle)))
@@ -211,16 +229,24 @@ def create(shared):
         return
     context = fx.create_system_conversion_context(system)
     try:
-        build_emitter(context, shared, "ColaJet", materials[0], 480, 24, (0.16, 0.34), (700.0, 1020.0),
-                      3.0, 0.85, -540, ((3.0, 14.0), (5.2, 25.0)), streak=True, spawn_on_face=True)
-        build_emitter(context, shared, "ColaFan", materials[0], 52, 8, (0.24, 0.56), (360.0, 740.0),
-                      29.0, 1.7, -630, ((1.8, 4.5), (4.5, 12.0)), streak=True, spawn_on_face=True)
-        build_emitter(context, shared, "FoamSpray", materials[1], 68, 14, (0.40, 0.95), (220.0, 580.0),
-                      16.0, 2.2, -420, (1.3, 4.8))
-        build_emitter(context, shared, "FizzBubbles", materials[2], 90, 18, (2.0, 4.0), (520.0, 900.0),
-                      27.0, 4.8, 82, (2.0, 6.0))
-        build_emitter(context, shared, "LingeringBubbles", materials[2], 10, 2, (6.0, 8.0), (490.0, 840.0),
-                      35.0, 5.3, 90, (3.0, 7.4))
+        if outlet:
+            build_emitter(context, False, "ColaJet", materials[0], 58, 0, (0.20, 0.36), (230., 310.),
+                          5., .7, -710, ((2.4, 11.), (4.3, 23.)), streak=True, spawn_on_face=True, outlet=True)
+            build_emitter(context, False, "ColaFan", materials[0], 12, 0, (0.29, 0.57), (115., 240.),
+                          19., 1.3, -840, ((1.5, 4.), (3.4, 11.)), streak=True, spawn_on_face=True, outlet=True)
+            build_emitter(context, False, "FoamSpray", materials[1], 5, 0, (0.18, 0.4), (125., 230.),
+                          17., 1.9, -660, (1.2, 3.3), outlet=True)
+        else:
+            build_emitter(context, shared, "ColaJet", materials[0], 480, 24, (0.16, 0.34), (700.0, 1020.0),
+                          3.0, 0.85, -540, ((3.0, 14.0), (5.2, 25.0)), streak=True, spawn_on_face=True)
+            build_emitter(context, shared, "ColaFan", materials[0], 52, 8, (0.24, 0.56), (360.0, 740.0),
+                          29.0, 1.7, -630, ((1.8, 4.5), (4.5, 12.0)), streak=True, spawn_on_face=True)
+            build_emitter(context, shared, "FoamSpray", materials[1], 68, 14, (0.40, 0.95), (220.0, 580.0),
+                          16.0, 2.2, -420, (1.3, 4.8))
+            build_emitter(context, shared, "FizzBubbles", materials[2], 90, 18, (2.0, 4.0), (520.0, 900.0),
+                          27.0, 4.8, 82, (2.0, 6.0))
+            build_emitter(context, shared, "LingeringBubbles", materials[2], 10, 2, (6.0, 8.0), (490.0, 840.0),
+                          35.0, 5.3, 90, (3.0, 7.4))
         context.finalize()
         if not ue.EditorAssetLibrary.save_loaded_asset(system, False):
             raise RuntimeError("Failed to save the Niagara plume")
@@ -229,7 +255,9 @@ def create(shared):
         context.cleanup()
 
 
-if "-colaboth" in flags:
+if "-colaoutlet" in flags:
+    create(outlet=True)
+elif "-colaboth" in flags:
     create(shared=True)
     create(shared=False)
 else:

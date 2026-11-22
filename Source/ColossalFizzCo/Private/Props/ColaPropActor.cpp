@@ -318,12 +318,24 @@ bool AColaPropActor::OnPlayerGrab_Implementation(USceneComponent* AttachToParent
 	AngularVelocity = FVector::ZeroVector;
 	PrevGForce = 0.0f;
 	bWasHeldLastFrame = (State == EPropState::Held || bIsHeld);
-	return Super::OnPlayerGrab_Implementation(AttachToParent, SocketName);
+	if (!Super::OnPlayerGrab_Implementation(AttachToParent, SocketName)) return false;
+	if (auto* Station=ManualFillingStation.Get(); HasAuthority() && Station && Station->View.SeatedBottleISID==ISID)
+	{
+		if (Station->View.bLeverHeld) Station->EndManualLever();
+		Station->ReleaseSeatedBottle();
+	}
+	return true;
 }
 
 void AColaPropActor::UpdateFoamPressure(float DeltaSeconds)
 {
 	if (!HasAuthority()) return;
+	if (IsCarriedForDrinking())
+	{
+		PrevVelocity = LinearVelocity;
+		PrevGForce = 0.f;
+		return;
+	}
 	if (DeltaSeconds <= 0.0001f)
 	{
 		return;
@@ -409,7 +421,7 @@ void AColaPropActor::FillBottle(float FillStrength)
 
 void AColaPropActor::LaunchBottle()
 {
-	if (!HasAuthority()) return;
+	if (!HasAuthority() || IsCarriedForDrinking()) return;
 	if (UsesPlasticPressure()) { StartPlasticPressureRelease(); return; }
 	if (!RocketComp)
 	{
@@ -435,7 +447,7 @@ void AColaPropActor::LaunchBottle()
 
 bool AColaPropActor::LaunchOriginalBottleRocket(bool bHighAccuracy)
 {
-	if (!HasAuthority() || GetNetMode()==NM_Client || !RocketComp || !PropMesh || GetRootComponent()!=PropMesh
+	if (!HasAuthority() || GetNetMode()==NM_Client || IsCarriedForDrinking() || !RocketComp || !PropMesh || GetRootComponent()!=PropMesh
 		|| (RocketComp->GetSimulationState()!=ERocketSimulationState::Idle && RocketComp->GetSimulationState()!=ERocketSimulationState::AtRest)) return false;
 	// Move the canonical ASM root; a visual child alone would leave collision and the ISID pose behind.
 	RocketComp->TargetPrimitive=PropMesh;

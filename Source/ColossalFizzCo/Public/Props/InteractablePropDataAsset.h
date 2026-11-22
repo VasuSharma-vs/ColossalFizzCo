@@ -112,9 +112,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Visual|Contents")
 	TObjectPtr<UMaterialInterface> LiquidMaterial;
 
-	/** Shared maximum for the bottle/container type. Mutable contents belong to its instance, never the content asset. */
+	/** Maximum container portions, or the base duration in seconds for a temporary pressure seal. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Quantity", meta = (DisplayName = "Maximum Portions", ClampMin = "0"))
 	int32 NumOfPortions = 4;
+
+	/** Treats Maximum Portions as the lifetime of a standalone seal pickup. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Manufacturing|Seal")
+	bool bIsTemporaryPressureSeal = false;
+
+	int32 GetConsumablePortions() const { return bIsTemporaryPressureSeal ? 0 : NumOfPortions; }
 
 	// -------------------------------------------------------------
 	// Temperature Configuration

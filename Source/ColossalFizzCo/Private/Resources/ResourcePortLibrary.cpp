@@ -1,5 +1,6 @@
 #include "Resources/ResourcePortLibrary.h"
 #include "Components/ResourceTransferEndpointComponent.h"
+#include "Components/HoseSocketComponent.h"
 #include "Interfaces/ResourceEndpointProvider.h"
 #include "Props/InteractableProp.h"
 #include "Props/InteractablePropManager.h"
@@ -15,6 +16,7 @@ UResourceTransferEndpointComponent* UResourcePortLibrary::ResolveResourcePort(AA
     const auto Matches=[&](const UResourceTransferEndpointComponent* Candidate)
     {
         return IsValid(Candidate) && Candidate->GetOwner()==Actor
+            && !Candidate->IsA<UHoseSocketComponent>()
             && Candidate->SupportsResource(Category,ResourceID) && (bAsSource ? Candidate->bCanSupply : Candidate->bCanReceive);
     };
     if (Matches(Port) && !Port->ComponentHasTag(TEXT("ManagedHosePort"))) return Port;

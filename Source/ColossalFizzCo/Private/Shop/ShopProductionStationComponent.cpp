@@ -3,6 +3,7 @@
 #include "Shop/ShopProcurementComponent.h"
 #include "Shop/SharedTeamWalletComponent.h"
 #include "Shop/ShopInstanceVolumeQuery.h"
+#include "Shop/ManualColaFillingMachine.h"
 #include "Props/InteractablePropManager.h"
 #include "Props/InteractableProp.h"
 #include "Props/ColaPropActor.h"
@@ -63,15 +64,19 @@ void UShopProductionStationComponent::RefreshInputs()
 	{
 		TArray<FShopProductionItem> Items;
 		TArray<int32> IDs=ShopInstanceVolumeQuery::Query(Box).Array();
+		if (bManualLeverMode && Kind==EShopSupplyKind::EmptyBottle && IsBottleAligned(View.SeatedBottleISID))
+			IDs.AddUnique(View.SeatedBottleISID);
 		if (bManualLeverMode && Kind==EShopSupplyKind::Cap)
 			if (const auto* Machine=Cast<AActivePropActor>(GetOwner())) if (const auto* Equipment=Manager->FindUniqueData(Machine->ISID)) IDs=Equipment->EventData.LoadedCapISIDs;
 		if (bManualLeverMode && Kind==EShopSupplyKind::ColaCylinder && Filler)
 		{
 			IDs.Reset();
+			const auto* Machine = Cast<AManualColaFillingMachine>(GetOwner());
+			const FVector Origin = Machine ? Machine->GetSupplyConnectionOrigin() : GetOwner()->GetActorLocation();
 			for (const auto& Pair:Manager->ISIDData) if (Manager->ShopSupplies && Manager->ShopSupplies->IsCylinderProduct(Pair.Value.ProductID)
-				&& FVector::DistSquared(Manager->GetTransform(Pair.Key).GetLocation(),GetOwner()->GetActorLocation())<=FMath::Square(Filler->MaxConnectionDistance)) IDs.Add(Pair.Key);
+				&& FVector::DistSquared(Manager->GetTransform(Pair.Key).GetLocation(),Origin)<=FMath::Square(Filler->MaxConnectionDistance)) IDs.Add(Pair.Key);
 		}
-		IDs.Sort();
+		if (!bManualLeverMode || Kind!=EShopSupplyKind::Cap) IDs.Sort();
 		for (int32 ID:IDs)
 		{
 			const auto* Record=Manager->FindISIDData(ID); const auto* Unique=Manager->FindUniqueData(ID);
@@ -101,7 +106,7 @@ void UShopProductionStationComponent::RefreshInputs()
 		&& (!View.Bottles.ContainsByPredicate([&](const auto& Item){return Item.ISID==Filler->TargetISID;})
 			|| !View.Cylinders.ContainsByPredicate([&](const auto& Item){return Item.ISID==Filler->SourceISID;}))) Filler->StopFilling();
 	if (bManualLeverMode) UpdateManualEquipment();
-	View.bFilling=Filler && Filler->bIsFilling;
+	else View.bFilling=Filler && Filler->bIsFilling;
 }
 EShopCheckoutResult UShopProductionStationComponent::Purchase(FGuid Session, FGuid ID, FName Offer, int32 Quantity)
 {
@@ -138,7 +143,8 @@ EShopCheckoutResult UShopProductionStationComponent::ExecuteForPlayer(FGuid Sess
 		if (bManualLeverMode) return ManualEquipmentAction(EShopProductionAction::StopFilling,0,0,Player);
 		Filler->StopFilling(); RefreshInputs(); return EShopCheckoutResult::Success;
 	}
-	if (!ShopInstanceVolumeQuery::Query(BottleInput).Contains(BottleID)) return EShopCheckoutResult::Unavailable;
+	if (!(bManualLeverMode && View.SeatedBottleISID==BottleID && IsBottleAligned(BottleID))
+		&& !ShopInstanceVolumeQuery::Query(BottleInput).Contains(BottleID)) return EShopCheckoutResult::Unavailable;
 	bool Success=false;
 	switch (Action)
 	{

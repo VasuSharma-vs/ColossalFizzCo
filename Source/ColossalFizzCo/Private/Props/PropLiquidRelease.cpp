@@ -56,7 +56,7 @@ bool APropManager::ValidateReleasedLiquids(const TArray<FReleasedLiquid>& Liquid
 	TSet<FGuid> IDs;
 	for (const auto& Liquid : Liquids)
 	{
-		if (!Liquid.ReleaseID.IsValid() || IDs.Contains(Liquid.ReleaseID) || Liquid.SourceISID <= 0 || Liquid.SourceProductID <= 0 || Liquid.ContentID <= 0
+		if (!Liquid.ReleaseID.IsValid() || IDs.Contains(Liquid.ReleaseID) || Liquid.SourceISID < 0 || Liquid.SourceProductID <= 0 || Liquid.ContentID <= 0
 			|| !FMath::IsFinite(Liquid.Portions) || Liquid.Portions <= 0 || !FMath::IsFinite(Liquid.Temperature)
 			|| !FMath::IsFinite(Liquid.ContentCreationTime) || Liquid.ContentCreationTime < 0 || Liquid.ContentCreationTime > Liquid.ReleaseTime
 			|| !FMath::IsFinite(Liquid.ReleaseTime) || Liquid.ReleaseTime > WorldTime || Liquid.ReleaseTime < 0 || Liquid.Transform.ContainsNaN()) return false;

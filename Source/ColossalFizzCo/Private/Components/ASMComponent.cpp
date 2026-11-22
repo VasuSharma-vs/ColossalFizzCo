@@ -970,6 +970,8 @@ bool UASMComponent::PromoteRecordToASM(
 	{
 		switch (Reason)
 		{
+		case EPropActivationReason::LevelPlacement:
+			break;
 		case EPropActivationReason::Grab:
 			InitialASMState = EPropState::Held;
 			break;
@@ -1110,6 +1112,8 @@ bool UASMComponent::SwapActiveActorClass(FISIDRuntimeIndex& Record, const FPropP
 	const FTransform CapturedTransform = ExistingASM ? ExistingASM->GetActorTransform() : Record.ActiveTransform;
 	const EPropState SavedState = ExistingASM ? ExistingASM->State : Record.State;
 	const bool bWasHeld = ExistingASM ? ExistingASM->bIsHeld : (SavedState == EPropState::Held);
+	const bool bWasCarriedForDrinking = ExistingASM && ExistingASM->IsCarriedForDrinking();
+	const float DrinkingTimeRemaining = bWasCarriedForDrinking ? ExistingASM->GetDrinkingCarryTimeRemaining() : -1.f;
 	const bool bWasReplicated = ExistingASM ? ExistingASM->GetIsReplicated() : true;
 
 	USceneComponent* AttachParentComp = (ExistingASM && ExistingASM->GetRootComponent()) ? ExistingASM->GetRootComponent()->GetAttachParent() : nullptr;
@@ -1162,7 +1166,11 @@ bool UASMComponent::SwapActiveActorClass(FISIDRuntimeIndex& Record, const FPropP
 
 	if (bWasHeld && AttachParentComp)
 	{
-		NewASM->OnPlayerGrab(AttachParentComp, AttachSocketName);
+		if (NewASM->OnPlayerGrab(AttachParentComp, AttachSocketName) && bWasCarriedForDrinking)
+		{
+			const float Duration = DrinkingTimeRemaining < 0.f ? 0.f : FMath::Max(UE_KINDA_SMALL_NUMBER, DrinkingTimeRemaining);
+			NewASM->SetDrinkingCarry(true, Duration);
+		}
 	}
 	else if (bHadPhysicsVel && NewASM->PropMesh && NewASM->PropMesh->IsSimulatingPhysics())
 	{

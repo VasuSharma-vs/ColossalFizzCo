@@ -58,7 +58,9 @@ EShopCheckoutResult UShopProductionStationComponent::ManualCapAction(EShopProduc
 		if (Active->CapHoldingStation.IsValid() && Active->CapHoldingStation.Get()!=this) return EShopCheckoutResult::OperationConflict;
 	auto* Bottle=Manager ? Cast<AColaPropActor>(Manager->GetActiveActorFromISID(BottleID)) : nullptr;
 	if (!Unique || !Def || !Bottle || !Unique->EventData.AttachedCapISID
-		|| Unique->EventData.CapSealed>=1 || !ShopInstanceVolumeQuery::Query(BottleInput).Contains(BottleID)
+		|| Unique->EventData.CapSealed>=1
+		|| !(bManualLeverMode && View.SeatedBottleISID==BottleID && IsBottleAligned(BottleID))
+			&& !ShopInstanceVolumeQuery::Query(BottleInput).Contains(BottleID)
 		|| (View.ManualBottleISID && View.ManualBottleISID!=BottleID)) return EShopCheckoutResult::Unavailable;
 	const auto* CapRecord=Manager->FindISIDData(Unique->EventData.AttachedCapISID);
 	if(!CapRecord || !Manager->IsAssemblyCompatible(Record->ProductID,Unique->EventData.ContentID,CapRecord->ProductID))return EShopCheckoutResult::CapNotSupported;
@@ -112,7 +114,8 @@ void UShopProductionStationComponent::UpdateManualCapping(float DeltaSeconds)
 	const bool Locked=Manager && Manager->ShopCheckout && Manager->ShopCheckout->GetStockEntry(View.ManualBottleISID,Stock)
 		&& !Manager->ShopCheckout->IsAvailableShopStock(View.ManualBottleISID);
 	if (Locked || !Unique || !Product || !Unique->EventData.AttachedCapISID || Unique->EventData.CapSealed>=1
-		|| !ShopInstanceVolumeQuery::Query(BottleInput).Contains(View.ManualBottleISID)) { ResetManualCapping(); return; }
+		|| (!(bManualLeverMode && View.SeatedBottleISID==View.ManualBottleISID && IsBottleAligned(View.ManualBottleISID))
+			&& !ShopInstanceVolumeQuery::Query(BottleInput).Contains(View.ManualBottleISID))) { ResetManualCapping(); return; }
 	if (!OperatorInRange(View.CapHolder)) { View.CapHolder=nullptr; View.HoldingForce=0; }
 	if (!OperatorInRange(View.CapRotator)) View.CapRotator=nullptr;
 	View.HoldingEfficiency=FMath::Max(0.f,View.HoldingEfficiency-FMath::Max(0.f,HoldingEfficiencyDecayPerSecond)*DeltaSeconds);

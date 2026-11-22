@@ -6,6 +6,8 @@
 #include "CableMovementConstraintComponent.generated.h"
 
 class UCollisionCableComponent;
+class UCharacterMovementComponent;
+class AHoseCableActor;
 
 /** Adapter on an existing holder/driver; does not replace its movement component. */
 UCLASS(NotBlueprintable, Transient)
@@ -31,6 +33,13 @@ private:
     FVector PreviousLocation = FVector::ZeroVector;
     bool bApplying = false;
     UFUNCTION() void OnCharacterMoved(float Dt, FVector OldLocation, FVector OldVelocity);
-    void ApplyRestriction(const FVector& OldLocation,float DeltaSeconds);
+    void ApplyRestriction(const FVector& OldLocation, const FVector& OldVelocity, float DeltaSeconds);
+    FVector LimitHeldCharacterMovement(UCharacterMovementComponent& Movement, const FVector& OldLocation,
+        const FVector& RequestedLocation, const FVector& OldVelocity, float DeltaSeconds) const;
+    double GetConnectedBrakingSpeed(const FVector& OldLocation, const FVector& PlanarRequest, float DeltaSeconds,
+        float AvailableForceNewtons, double Deceleration) const;
+    bool ConstrainHoseSwing(const AHoseCableActor& Hose, const FVector& OldLocation, const FVector& RequestedLocation,
+        FVector& AllowedLocation, FVector& Pivot) const;
+    FVector ConstrainToFixedReach(const FVector& OldLocation, const FVector& RequestedLocation, float DeltaSeconds) const;
     float GetAvailablePullForce() const;
 };

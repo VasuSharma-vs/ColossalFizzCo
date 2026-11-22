@@ -37,7 +37,7 @@ void UCollisionCableComponent::ConstrainRenderPath(TArray<FVector>& Locations)
     const int32 Subdivisions=bEnableVisualSubdivision?FMath::Clamp(VisualSubdivisions,1,8):1;
     if(Locations.Num()!=(Particles.Num()-1)*Subdivisions+1)return;
     const double Radius=FMath::Max(.05f,CableWidth*.5f)+.01;
-    auto SpanClear=[&](int32 First)
+    auto SpanClear=[&](int32 First, const FCollisionQueryParams& SpanParams)
     {
         for(int32 S=0;S<Subdivisions;++S)
         {
@@ -45,14 +45,16 @@ void UCollisionCableComponent::ConstrainRenderPath(TArray<FVector>& Locations)
             const FQuat Rotation=FQuat::FindBetweenNormals(FVector::UpVector,Delta.GetSafeNormal(UE_SMALL_NUMBER,FVector::UpVector));
             ++RenderCollisionQueryCount;
             if(GetWorld()->OverlapBlockingTestByChannel((A+B)*.5,Rotation,GetCollisionObjectType(),
-                FCollisionShape::MakeCapsule(float(Radius),float(Delta.Size()*.5+Radius)),QueryParams,ResponseParams))return false;
+                FCollisionShape::MakeCapsule(float(Radius),float(Delta.Size()*.5+Radius)),SpanParams,ResponseParams))return false;
         }
         return true;
     };
     for(int32 I=0;I+1<Particles.Num();++I)
     {
         const int32 First=I*Subdivisions;
-        if(SpanClear(First))continue;
+        TOptional<FCollisionQueryParams> LocalParams;
+        const FCollisionQueryParams& SpanParams=GetSpanCollisionParams(I, LocalParams);
+        if(SpanClear(First, SpanParams))continue;
         TArray<FVector> Curved;for(int32 S=0;S<=Subdivisions;++S)Curved.Add(Locations[First+S]);
         // Keep all simulation knots fixed. Reduce only a blocked visual span's
         // bow, eventually falling back to its physically simulated chord.
@@ -61,10 +63,10 @@ void UCollisionCableComponent::ConstrainRenderPath(TArray<FVector>& Locations)
             const double Blend=Attempt==7?0.:FMath::Pow(.5,Attempt);
             for(int32 S=1;S<Subdivisions;++S)
             {
-                const FVector Chord=FMath::Lerp(Particles[I].Position,Particles[I+1].Position,double(S)/Subdivisions);
+                const FVector Chord=FMath::Lerp(Locations[First],Locations[First+Subdivisions],double(S)/Subdivisions);
                 Locations[First+S]=FMath::Lerp(Chord,Curved[S],Blend);
             }
-            if(SpanClear(First))break;
+            if(SpanClear(First, SpanParams))break;
         }
     }
 }

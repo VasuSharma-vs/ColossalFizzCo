@@ -420,6 +420,59 @@ bool FCableTubeWindingTest::RunTest(const FString& Parameters)
         const FVector Center=(A+B+C)/3,Radial=Center-FVector(Center.X,0,0);
         TestTrue(TEXT("The actual mesh uses Unreal clockwise exterior face winding"),FVector::DotProduct(FVector::CrossProduct(B-A,C-A),Radial)<0);
     }
+    const TArray<FVector> HosePoints={FVector::ZeroVector,FVector(10,0,0),FVector(20,0,0),FVector(30,0,0),FVector(40,0,0)};
+    CollisionCableRendering::BuildMeshData(HosePoints,10,8,1,Vertices,Indices,true);
+    TestEqual(TEXT("A ruptured tube keeps both end rings and omits the torn span"),Indices.Num(),3*48);
+    TestTrue(TEXT("The rupture does not remove the mounted ends of the tube"),Indices.Contains(0) && Indices.Contains(44));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCableHeldRenderSpaceTest,"ColossalFizzCo.Cable.Rendering.RotatedAttachmentKeepsWorldPath",CableFeatureTests::Flags)
+bool FCableHeldRenderSpaceTest::RunTest(const FString& Parameters)
+{
+    CableFeatureTests::FFixture F;
+    auto* Cable = F.Cable(FVector(20,-50,120), FVector(190,30,70), 5);
+    if (!Cable) return false;
+    auto* Parent = Cable->GetOwner()->GetRootComponent();
+    Parent->SetWorldTransform(FTransform(FRotator(38,123,-19), FVector(-80,60,150), FVector(1.4, .7, 1.2)));
+    TArray<FVector> WorldPoints;
+    TArray<FVector> ProxyPoints;
+    Cable->GetCableRenderLocations(WorldPoints);
+    CollisionCableRendering::GetLocalRenderLocations(*Cable, ProxyPoints);
+    if (!TestEqual(TEXT("The render proxy has every world path point"),ProxyPoints.Num(),WorldPoints.Num())) return false;
+    for (int32 Index=0; Index<WorldPoints.Num(); ++Index)
+        TestTrue(TEXT("The proxy transform puts the cable back at the simulated world point"),
+            Cable->GetComponentTransform().TransformPosition(ProxyPoints[Index]).Equals(WorldPoints[Index],.001));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCableBoundsSpaceTest, "ColossalFizzCo.Cable.Rendering.BoundsSpace", CableFeatureTests::Flags)
+bool FCableBoundsSpaceTest::RunTest(const FString& Parameters)
+{
+    CableFeatureTests::FFixture Fixture;
+    const FVector Start(660,430,475);
+    auto* Cable = Fixture.Cable(Start, Start + FVector(400,0,0), 4);
+    Cable->SetWorldScale3D(FVector(1, 2, 2));
+    const TArray<FVector> Path = {Start, Start + FVector(100,0,-200), Start + FVector(200,0,-325),
+        Start + FVector(300,0,-200), Start + FVector(400,0,0)};
+    if (!TestTrue(TEXT("Set a translated, hanging cable path"), Cable->SetCableParticleLocations(Path))) return false;
+
+    TArray<FVector> LocalPath;
+    CollisionCableRendering::GetLocalRenderLocations(*Cable, LocalPath);
+    TArray<FDynamicMeshVertex> Vertices;
+    TArray<uint32> Indices;
+    CollisionCableRendering::BuildMeshData(LocalPath, Cable->GetRenderingDiameter(), Cable->NumSides, Cable->TileMaterial, Vertices, Indices);
+    const FBox LocalBounds = Cable->GetLocalBounds().GetBox();
+    const FBox WorldBounds = Cable->Bounds.GetBox();
+    bool bLocalContainsTube = true;
+    bool bWorldContainsTube = true;
+    for (const FDynamicMeshVertex& Vertex : Vertices)
+    {
+        bLocalContainsTube &= LocalBounds.IsInsideOrOn(FVector(Vertex.Position));
+        bWorldContainsTube &= WorldBounds.IsInsideOrOn(Cable->GetComponentTransform().TransformPosition(FVector(Vertex.Position)));
+    }
+    TestTrue(TEXT("Local bounds enclose the rendered tube in component space"), bLocalContainsTube);
+    TestTrue(TEXT("World bounds enclose the complete scaled tube"), bWorldContainsTube);
     return true;
 }
 

@@ -60,7 +60,12 @@ void UCollisionCableComponent::OnUpdateTransform(EUpdateTransformFlags UpdateTra
     // the world origin. Reset immediately even when editor realtime is disabled.
     // During play leave points in world space so the swept anchors still work.
     if (!GetWorld()->IsGameWorld() || !HasBegunPlay()) ResetCable();
-    else if(bEnableSleeping) OnObservedTransform(this,UpdateTransformFlags,Teleport);
+    else
+    {
+        // The simulated path stays in world space when a hand or mount rotates the component.
+        MarkRenderDynamicDataDirty();
+        if (bEnableSleeping) OnObservedTransform(this,UpdateTransformFlags,Teleport);
+    }
 }
 
 #if WITH_EDITOR
@@ -79,11 +84,66 @@ void UCollisionCableComponent::PostEditChangeProperty(FPropertyChangedEvent& Pro
 
 void UCollisionCableComponent::GetEndPositions(FVector& Start, FVector& End) const
 {
-    Start = GetComponentLocation();
+    Start = GetStartAttachmentLocation();
     const USceneComponent* EndComponent = GetAttachedComponent();
     if (!EndComponent) EndComponent = this;
     End = (AttachEndToSocketName.IsNone() ? EndComponent->GetComponentTransform() :
         EndComponent->GetSocketTransform(AttachEndToSocketName)).TransformPosition(EndLocation);
+}
+
+void UCollisionCableComponent::SetStartAttachmentOverride(USceneComponent* Component, FName SocketName)
+{
+    if (StartAttachmentOverride.Get()==Component && StartOverrideSocket==SocketName) return;
+    StartAttachmentOverride = Component;
+    StartOverrideSocket = SocketName;
+    WakeCable();
+    RefreshMovementBindings();
+    RefreshWakeSources();
+}
+
+USceneComponent* UCollisionCableComponent::GetStartAttachmentComponent() const
+{
+    return StartAttachmentOverride.Get();
+}
+
+USceneComponent* UCollisionCableComponent::GetStartAttachmentSource() const
+{
+    if (auto* Source = StartAttachmentOverride.Get()) return Source;
+    return const_cast<UCollisionCableComponent*>(this);
+}
+
+FVector UCollisionCableComponent::GetStartAttachmentLocation() const
+{
+    const auto* Source = StartAttachmentOverride.Get();
+    return Source ? Source->GetSocketLocation(StartOverrideSocket) : GetComponentLocation();
+}
+
+void UCollisionCableComponent::SetSocketMountedEndpoints(bool bStartMounted, bool bEndMounted)
+{
+    bStartSocketMounted = bStartMounted;
+    bEndSocketMounted = bEndMounted;
+}
+
+const AActor* UCollisionCableComponent::GetSocketMountOwner(int32 PointIndex) const
+{
+    const USceneComponent* Socket = nullptr;
+    if (PointIndex==0 && bAttachStart && bStartSocketMounted) Socket = GetStartAttachmentComponent();
+    else if (PointIndex==Particles.Num()-1 && bAttachEnd && bEndSocketMounted) Socket = GetAttachedComponent();
+    return IsValid(Socket) ? Socket->GetOwner() : nullptr;
+}
+
+const FCollisionQueryParams& UCollisionCableComponent::GetSpanCollisionParams(int32 SpanIndex, TOptional<FCollisionQueryParams>& LocalParams) const
+{
+    const AActor* FirstMount = GetSocketMountOwner(SpanIndex);
+    const AActor* LastMount = GetSocketMountOwner(SpanIndex+1);
+    if (!FirstMount && !LastMount) return QueryParams;
+
+    // A connected plug is allowed to occupy its fitting. Only its neighboring
+    // span may pass through that housing. Other spans still collide with it.
+    LocalParams.Emplace(QueryParams);
+    if (FirstMount) LocalParams->AddIgnoredActor(FirstMount);
+    if (LastMount && LastMount!=FirstMount) LocalParams->AddIgnoredActor(LastMount);
+    return LocalParams.GetValue();
 }
 
 void UCollisionCableComponent::SetAttachEndToComponent(USceneComponent* Component, FName SocketName)
@@ -178,7 +238,10 @@ void UCollisionCableComponent::RefreshCollisionParams()
     QueryParams.AddIgnoredComponent(this);
     if (bIgnoreOwner && GetOwner()) QueryParams.AddIgnoredActor(GetOwner());
     if (bIgnoreAttachedComponent)
-        if (const auto* Mount = Cast<UPrimitiveComponent>(GetAttachedComponent())) QueryParams.AddIgnoredComponent(Mount);
+    {
+        if (const auto* Start = Cast<UPrimitiveComponent>(StartAttachmentOverride.Get())) QueryParams.AddIgnoredComponent(Start);
+        if (const auto* End = Cast<UPrimitiveComponent>(GetAttachedComponent())) QueryParams.AddIgnoredComponent(End);
+    }
     ResponseParams = FCollisionResponseParams(GetCollisionResponseToChannels());
     if (bIgnorePlayerCollision)
     {
@@ -303,6 +366,38 @@ void UCollisionCableComponent::ResetCable()
     for(const auto& Binding:MovementBindings)if(Binding.IsValid())Binding->ResetMovementHistory();
 }
 
+void UCollisionCableComponent::SnapAttachedEndpoint(bool bStart)
+{
+    if (!(bStart ? bAttachStart : bAttachEnd)) return;
+    if (Particles.Num()!=FMath::Clamp(NumSegments, 1, 256)+1)
+    {
+        ResetCable();
+        return;
+    }
+
+    FVector Start, End;
+    GetEndPositions(Start, End);
+    const FVector& Anchor = bStart ? Start : End;
+    if (Anchor.ContainsNaN()) return;
+    const int32 PointIndex = bStart ? 0 : Particles.Num()-1;
+    const int32 SpanIndex = bStart ? 0 : PointIndex-1;
+    bSocketSnapPending |= !Particles[PointIndex].Position.Equals(Anchor,.001);
+    Particles[PointIndex] = FParticle();
+    Particles[PointIndex].Position = Anchor;
+
+    // Drop contact history only where the mount replaces the old endpoint.
+    if (PointLineContacts.IsValidIndex(PointIndex)) PointLineContacts[PointIndex] = FLineContact();
+    if (SegmentLineContacts.IsValidIndex(SpanIndex)) SegmentLineContacts[SpanIndex] = FLineContact();
+    if (LastPointTracePositions.IsValidIndex(PointIndex)) LastPointTracePositions[PointIndex] = Anchor;
+    if (LastSegmentTracePositions.IsValidIndex(SpanIndex))
+        LastSegmentTracePositions[SpanIndex] = (Particles[SpanIndex].Position + Particles[SpanIndex+1].Position)*.5;
+
+    RefreshCollisionParams();
+    WakePoint(PointIndex);
+    PublishSimulation();
+    PublishNetworkSnapshot(0, true);
+}
+
 bool UCollisionCableComponent::SetCableParticleLocations(const TArray<FVector>& Locations)
 {
     if (Locations.Num() != FMath::Clamp(NumSegments, 1, 256) + 1) return false;
@@ -343,9 +438,10 @@ void UCollisionCableComponent::ResetCollisionHistory()
     NextLineTracePoint = 0;
 }
 
-bool UCollisionCableComponent::QueryPointMotion(const FVector& From, const FVector& To, FHitResult& Hit)
+bool UCollisionCableComponent::QueryPointMotion(const FVector& From, const FVector& To, FHitResult& Hit, const FCollisionQueryParams* ParamsOverride)
 {
     if (!HasCollision()) return false;
+    const FCollisionQueryParams& Params = ParamsOverride ? *ParamsOverride : QueryParams;
     if (!bUseFullCollisionQueries && CollisionMethod == ECableCollisionMethod::LineTraces)
     {
         // A short stationary probe also detects a line starting inside a solid.
@@ -354,14 +450,14 @@ bool UCollisionCableComponent::QueryPointMotion(const FVector& From, const FVect
         // Extend the centreline by the visible radius to catch approaching floors
         // before the particle centre has already crossed them.
         return GetWorld()->LineTraceSingleByChannel(Hit, From, To + Direction * CollisionRadius(),
-            GetCollisionObjectType(), QueryParams, ResponseParams);
+            GetCollisionObjectType(), Params, ResponseParams);
     }
     ++CollisionQueryCount;
     return GetWorld()->SweepSingleByChannel(Hit, From, To, FQuat::Identity, GetCollisionObjectType(),
-        FCollisionShape::MakeSphere(CollisionRadius()), QueryParams, ResponseParams);
+        FCollisionShape::MakeSphere(CollisionRadius()), Params, ResponseParams);
 }
 
-bool UCollisionCableComponent::RefreshLineContact(const FVector& Position, FLineContact& Contact)
+bool UCollisionCableComponent::RefreshLineContact(const FVector& Position, FLineContact& Contact, const FCollisionQueryParams* ParamsOverride)
 {
     if (Contact.Normal.IsNearlyZero() || !Contact.Component.IsValid()) return false;
     const double Distance = FVector::DotProduct(Position - Contact.Point, Contact.Normal);
@@ -370,7 +466,7 @@ bool UCollisionCableComponent::RefreshLineContact(const FVector& Position, FLine
     // Validate the cached surface itself even after the rope lifts away. A
     // short probe around the particle would discard a still-valid floor plane
     // and allow a fall through it before this point's next budgeted turn.
-    if (QueryPointMotion(Position + Contact.Normal * Reach, Position - Contact.Normal * (Distance + CollisionRadius()), Hit) &&
+    if (QueryPointMotion(Position + Contact.Normal * Reach, Position - Contact.Normal * (Distance + CollisionRadius()), Hit, ParamsOverride) &&
         !Hit.bStartPenetrating && !Hit.ImpactNormal.IsNearlyZero())
     {
         Contact.Point = Hit.ImpactPoint; Contact.Normal = Hit.ImpactNormal; Contact.Component = Hit.GetComponent();
@@ -482,7 +578,8 @@ void UCollisionCableComponent::UpdateKnownCollisionStatus()
 
 void UCollisionCableComponent::ProjectLinePoint(int32 Index, const FLineContact& Contact)
 {
-    if (Contact.Normal.IsNearlyZero() || !Contact.Component.IsValid() || (IsPinned(Index) && !bSweepAttachedEndpoints && !bUseFullCollisionQueries)) return;
+    if (Contact.Normal.IsNearlyZero() || !Contact.Component.IsValid() || GetSocketMountOwner(Index)
+        || (IsPinned(Index) && !bSweepAttachedEndpoints && !bUseFullCollisionQueries)) return;
     const double Penetration = CollisionRadius() - FVector::DotProduct(Particles[Index].Position - Contact.Point, Contact.Normal);
     if (Penetration > 0)
     {
@@ -494,6 +591,8 @@ void UCollisionCableComponent::ProjectLinePoint(int32 Index, const FLineContact&
 void UCollisionCableComponent::ProjectLineSegment(int32 Index, const FLineContact& Contact)
 {
     if (Contact.Normal.IsNearlyZero() || !Contact.Component.IsValid()) return;
+    if (const AActor* Surface = Contact.Component->GetOwner(); Surface &&
+        (Surface==GetSocketMountOwner(Index) || Surface==GetSocketMountOwner(Index+1))) return;
     const double T = FMath::Clamp(Contact.Alpha, 0., 1.);
     const FVector Position = FMath::Lerp(Particles[Index].Position, Particles[Index + 1].Position, T);
     const double Penetration = CollisionRadius() - FVector::DotProduct(Position - Contact.Point, Contact.Normal);
@@ -530,8 +629,9 @@ void UCollisionCableComponent::CheckCollisionPointBatch(const FVector& StartTarg
             ((I==0||Particles[I-1].bSleeping)&&(I+1==Particles.Num()||Particles[I+1].bSleeping))))continue;
         LastCollisionPointIndices.AddUnique(I);
         FLineContact& Contact = PointLineContacts[I];
-        if (RefreshLineContact(Particles[I].Position, Contact)) ProjectLinePoint(I, Contact);
-        if (!IsPinned(I) || bSweepAttachedEndpoints || bUseFullCollisionQueries)
+        const bool bSocketMounted = GetSocketMountOwner(I)!=nullptr;
+        if (!bSocketMounted && RefreshLineContact(Particles[I].Position, Contact)) ProjectLinePoint(I, Contact);
+        if (!bSocketMounted && (!IsPinned(I) || bSweepAttachedEndpoints || bUseFullCollisionQueries))
         {
             FHitResult Hit;
             const FVector From = LastPointTracePositions[I];
@@ -563,12 +663,14 @@ void UCollisionCableComponent::CheckCollisionPointBatch(const FVector& StartTarg
         const int32 Edge = FMath::Min(I, Particles.Num() - 2);
         if (Edge < 0 || CheckedSegments.Contains(Edge)) continue;
         CheckedSegments.Add(Edge);
+        TOptional<FCollisionQueryParams> LocalParams;
+        const FCollisionQueryParams& SpanParams = GetSpanCollisionParams(Edge, LocalParams);
         FLineContact& SegmentContact = SegmentLineContacts[Edge];
         FVector Midpoint = (Particles[Edge].Position + Particles[Edge + 1].Position) * .5;
-        if (RefreshLineContact(FMath::Lerp(Particles[Edge].Position, Particles[Edge + 1].Position, SegmentContact.Alpha), SegmentContact))
+        if (RefreshLineContact(FMath::Lerp(Particles[Edge].Position, Particles[Edge + 1].Position, SegmentContact.Alpha), SegmentContact, &SpanParams))
             ProjectLineSegment(Edge, SegmentContact);
         FHitResult MidHit;
-        if (QueryPointMotion(LastSegmentTracePositions[Edge], Midpoint, MidHit))
+        if (QueryPointMotion(LastSegmentTracePositions[Edge], Midpoint, MidHit, &SpanParams))
         {
             const bool Valid = !MidHit.bStartPenetrating || (bSmoothCollisionRecovery && MakePenetrationContact(LastSegmentTracePositions[Edge], Midpoint, MidHit, SegmentContact));
             if (!MidHit.bStartPenetrating) StoreHit(SegmentContact, MidHit);
@@ -579,7 +681,7 @@ void UCollisionCableComponent::CheckCollisionPointBatch(const FVector& StartTarg
             FHitResult Hit;
             ++CollisionQueryCount;
             if (GetWorld()->LineTraceSingleByChannel(Hit, Particles[Edge].Position, Particles[Edge + 1].Position,
-                GetCollisionObjectType(), QueryParams, ResponseParams))
+                GetCollisionObjectType(), SpanParams, ResponseParams))
             {
                 if (Hit.bStartPenetrating)
                 {
@@ -607,7 +709,7 @@ void UCollisionCableComponent::CheckCollisionPointBatch(const FVector& StartTarg
                 const FVector Center = (A + B) * .5;
                 TArray<FHitResult> Hits;
                 ++CollisionQueryCount;
-                GetWorld()->SweepMultiByChannel(Hits, Center, Center, Rotation, GetCollisionObjectType(), Shape, QueryParams, ResponseParams);
+                GetWorld()->SweepMultiByChannel(Hits, Center, Center, Rotation, GetCollisionObjectType(), Shape, SpanParams, ResponseParams);
                 bool Recovered = false;
                 for (const FHitResult& Hit : Hits)
                 {
@@ -672,7 +774,8 @@ bool UCollisionCableComponent::RecoverContacts()
             const FVector Center = (Particles[I].Position + Particles[I + 1].Position) * .5;
             TArray<FHitResult> Hits;
             ++CollisionQueryCount;
-            GetWorld()->SweepMultiByChannel(Hits, Center, Center, Rotation, GetCollisionObjectType(), Shape, QueryParams, ResponseParams);
+            TOptional<FCollisionQueryParams> LocalParams;
+            GetWorld()->SweepMultiByChannel(Hits, Center, Center, Rotation, GetCollisionObjectType(), Shape, GetSpanCollisionParams(I, LocalParams), ResponseParams);
             for (const FHitResult& Hit : Hits)
             {
                 if (!Hit.bBlockingHit || !Hit.bStartPenetrating || Hit.PenetrationDepth <= .0001f) continue;
@@ -712,8 +815,9 @@ bool UCollisionCableComponent::PathIsClear(const TArray<FVector>& Positions) con
     {
         FQuat Rotation;
         const FCollisionShape Shape = CollisionCable::SegmentShape(Positions[I], Positions[I + 1], CollisionRadius() - .005f, Rotation);
+        TOptional<FCollisionQueryParams> LocalParams;
         if (GetWorld()->OverlapBlockingTestByChannel((Positions[I] + Positions[I + 1]) * .5, Rotation, GetCollisionObjectType(),
-            Shape, QueryParams, ResponseParams)) return false;
+            Shape, GetSpanCollisionParams(I, LocalParams), ResponseParams)) return false;
     }
     return true;
 }
@@ -783,7 +887,8 @@ void UCollisionCableComponent::Simulate(float Dt, const FVector& StartTarget, co
     {
         if (!((Index==0 && bAttachStart)||(Index==Particles.Num()-1 && bAttachEnd))) return;
         if(!Particles[Index].Position.Equals(Target,FMath::Max(.01f,WakeDisplacementThreshold)))WakePoint(Index);
-        Particles[Index].Position += (bSweepAttachedEndpoints || bUseFullCollisionQueries) ? ConstrainFullCollisionMotion(Index, Target - Particles[Index].Position) : Target - Particles[Index].Position;
+        const bool bSweep = !GetSocketMountOwner(Index) && (bSweepAttachedEndpoints || bUseFullCollisionQueries);
+        Particles[Index].Position += bSweep ? ConstrainFullCollisionMotion(Index, Target - Particles[Index].Position) : Target - Particles[Index].Position;
         Particles[Index].Velocity = FVector::ZeroVector;
     };
     MoveAnchor(0, StartTarget); MoveAnchor(Particles.Num() - 1, EndTarget);
@@ -832,7 +937,8 @@ void UCollisionCableComponent::Simulate(float Dt, const FVector& StartTarget, co
         FParticle& Particle = Particles[I];
         const FVector IntegratedVelocity = Particle.Velocity;
         const FVector RecoveryMove = (bSmoothCollisionRecovery ? Particle.ContactCorrectionThisStep : FVector::ZeroVector) + Particle.SelfContactCorrectionThisStep;
-        Particle.Velocity = (Particle.Position - Before[I] - RecoveryMove) / Dt;
+        // Resolve the new shape without sending the position correction down the hose as a velocity spike.
+        Particle.Velocity = bSocketSnapPending ? IntegratedVelocity : (Particle.Position - Before[I] - RecoveryMove) / Dt;
         const FVector Normal = Particle.ContactNormal.GetSafeNormal();
         if (!Normal.IsNearlyZero())
         {
@@ -893,6 +999,7 @@ void UCollisionCableComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
         const double Alpha = double(Step + 1) / Steps;
         Simulate(SimTime / Steps, FMath::Lerp(PreviousStart, Start, Alpha), FMath::Lerp(PreviousEnd, End, Alpha));
     }
+    bSocketSnapPending = false;
     // Budgeted mode issues one rotating batch per component tick. Full mode
     // checks all awake points/spans inside substeps and solver passes instead.
     if(!bUseFullCollisionQueries)CheckCollisionPointBatch(Start, End);
@@ -927,6 +1034,17 @@ void UCollisionCableComponent::PublishSimulation()
 
 FPrimitiveSceneProxy* UCollisionCableComponent::CreateSceneProxy() { return CollisionCableRendering::CreateProxy(this); }
 
+void UCollisionCableComponent::SetHoseVisualState(float DiameterScale,bool bCenterRuptured)
+{
+    if (!FMath::IsFinite(DiameterScale)) return;
+    DiameterScale=FMath::Clamp(DiameterScale,.1f,3.f);
+    if (FMath::IsNearlyEqual(VisualDiameterScale,DiameterScale,.005f) && bVisualCenterRuptured==bCenterRuptured) return;
+    VisualDiameterScale=DiameterScale;
+    bVisualCenterRuptured=bCenterRuptured;
+    ++RenderGeometryRevision;
+    UpdateBounds(); MarkRenderTransformDirty(); MarkRenderDynamicDataDirty();
+}
+
 void UCollisionCableComponent::CreateRenderState_Concurrent(FRegisterComponentContext* Context)
 {
     Super::CreateRenderState_Concurrent(Context); SendRenderDynamicData_Concurrent();
@@ -936,21 +1054,31 @@ void UCollisionCableComponent::SendRenderDynamicData_Concurrent()
 {
     Super::SendRenderDynamicData_Concurrent();
     if (!SceneProxy) return;
-    TArray<FVector> Points; GetCableRenderLocations(Points);
-    for (FVector& Point : Points) Point -= GetComponentLocation();
+    TArray<FVector> Points;
+    CollisionCableRendering::GetLocalRenderLocations(*this, Points);
     auto* Proxy = SceneProxy;
-    const float Width = FMath::Max(CableWidth, .1f), Tiling = TileMaterial;
-    ENQUEUE_RENDER_COMMAND(UpdateCollisionCable)([Proxy, Points = MoveTemp(Points), Width, Tiling](FRHICommandListImmediate& Commands) mutable
-    { CollisionCableRendering::UpdateProxy(Commands,Proxy,MoveTemp(Points),Width,Tiling); });
+    const float Width = GetRenderingDiameter(), Tiling = TileMaterial;
+    const bool CenterRuptured = bVisualCenterRuptured;
+    ENQUEUE_RENDER_COMMAND(UpdateCollisionCable)([Proxy, Points = MoveTemp(Points), Width, Tiling, CenterRuptured](FRHICommandListImmediate& Commands) mutable
+    { CollisionCableRendering::UpdateProxy(Commands,Proxy,MoveTemp(Points),Width,Tiling,CenterRuptured); });
 }
 
 FBoxSphereBounds UCollisionCableComponent::CalcBounds(const FTransform& LocalToWorld) const
 {
-    FBox Box(ForceInit);
-    for (const FParticle& Particle : Particles) Box += Particle.Position;
-    for (const FVector& Point : PublishedPoints) Box += Point;
-    if (!Box.IsValid) Box += LocalToWorld.GetLocation();
-    return FBoxSphereBounds(Box.ExpandBy(CollisionRadius()));
+    const FTransform& CableToWorld = GetComponentTransform();
+    FBox WorldBox(ForceInit);
+    for (const FParticle& Particle : Particles) WorldBox += Particle.Position;
+    for (const FVector& Point : PublishedPoints) WorldBox += Point;
+    if (!WorldBox.IsValid) WorldBox += CableToWorld.GetLocation();
+
+    const double TubeRadius = 0.5 * GetRenderingDiameter() * CableToWorld.GetScale3D().GetAbsMax();
+    WorldBox = WorldBox.ExpandBy(FMath::Max<double>(CollisionRadius(), TubeRadius));
+    if (LocalToWorld.Equals(CableToWorld)) return FBoxSphereBounds(WorldBox);
+
+    // The simulation stores world positions. The renderer also requests bounds with
+    // the identity transform, which must return a box in the cable's local space.
+    const FBox LocalBox = WorldBox.InverseTransformBy(CableToWorld);
+    return FBoxSphereBounds(LocalBox.TransformBy(LocalToWorld));
 }
 
 void UCollisionCableComponent::ApplyWorldOffset(const FVector& InOffset, bool bWorldShift)
