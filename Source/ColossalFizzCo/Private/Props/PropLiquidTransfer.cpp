@@ -1,6 +1,9 @@
 #include "Props/InteractablePropManager.h"
 #include "Props/ColaPricingLibrary.h"
+#include "Props/ColaPropActor.h"
 #include "Props/InteractableProp.h"
+#include "Components/PropGrabInputComponent.h"
+#include "Shop/FillingMachineUpgradeTypes.h"
 #include "Shop/ShopCheckoutComponent.h"
 #include "Curves/CurveFloat.h"
 
@@ -14,7 +17,7 @@ namespace
 
 FGuid APropManager::BeginLiquidTransfer(int32 SourceID, int32 TargetID)
 {
-	if (!HasAuthority() || SourceID == TargetID) return FGuid();
+	if (!HasAuthority() || SourceID == TargetID || !UPropGrabInputComponent::CanFillHeldBottle(*this, TargetID)) return FGuid();
 	const FISIDRuntimeIndex* SourceRecord = FindISIDData(SourceID);
 	const FISIDRuntimeIndex* TargetRecord = FindISIDData(TargetID);
 	const FPropInstanceUniqueData* Source = FindUniqueData(SourceID);
@@ -54,6 +57,11 @@ float APropManager::TransferLiquid(FGuid SessionID, float RequestedPortions)
 	const FFillSession* Found = FillSessions.Find(SessionID);
 	if (!Found) return 0;
 	const FFillSession Session = *Found;
+	if (!UPropGrabInputComponent::CanFillHeldBottle(*this, Session.TargetISID))
+	{
+		EndLiquidTransfer(SessionID);
+		return 0;
+	}
 	FISIDRuntimeIndex* SourceRecord = FindISIDData(Session.SourceISID);
 	FISIDRuntimeIndex* TargetRecord = FindISIDData(Session.TargetISID);
 	const FPropInstanceUniqueData* Source = FindUniqueData(Session.SourceISID);
@@ -104,8 +112,10 @@ float APropManager::TransferLiquid(FGuid SessionID, float RequestedPortions)
 	TargetDelta.ContentID = Session.ContentID;
 	if (StartsContent) { TargetDelta.ExtendedDirtyMask = EPropExtendedEventMask::ContentCreationTime; TargetDelta.ContentCreationTime = WorldElapsedSeconds; }
 	const double ExistingPortions = double(Target->EventData.ContentLevel) * TargetPortions;
+	const auto* Bottle = Cast<AColaPropActor>(GetActiveActorFromISID(Session.TargetISID));
+	const float Cooling = Bottle ? Bottle->GetActiveFillingUpgradeValue(EFillingMachineUpgradeType::TemperatureRegulator) : 0.f;
 	const float MixedTemperature = float((ExistingPortions * Target->ContinuousData.Temperature
-		+ Accepted * Source->ContinuousData.Temperature) / (ExistingPortions + Accepted));
+		+ Accepted * (Source->ContinuousData.Temperature - Cooling)) / (ExistingPortions + Accepted));
 	if (!SubmitAtomicInstanceEventUpdates({SourceDelta, TargetDelta})) return 0;
 	// Use the existing canonical temperature path so active mass/visuals and resting
 	// instance data remain derived from the same state. An empty bottle takes the

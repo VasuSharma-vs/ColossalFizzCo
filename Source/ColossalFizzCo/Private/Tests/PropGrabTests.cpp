@@ -15,6 +15,7 @@
 #include "Components/ResourceTransferEndpointComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Shop/ShopPlayerInteractionComponent.h"
+#include "Shop/PlayerUpgradesComponent.h"
 #include "Resources/HoseCableActor.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/BoxComponent.h"
@@ -25,6 +26,8 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/WorldSettings.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerState.h"
+#include "../Shop/WorldInteractionCarry.h"
 #include "UObject/StructOnScope.h"
 #include "UObject/UnrealType.h"
 #include <limits>
@@ -443,6 +446,90 @@ bool FGrabBlueprintInputTest::RunTest(const FString& Parameters)
 		&& Bottle->PropMesh->IsSimulatingPhysics() && Bottle->GetActorLocation().Equals(SteeredLocation,2));
 	return true;
 }
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlayerCarryBatchTest, "ColossalFizzCo.PlayerUpgrades.CarryBatch",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FPlayerCarryBatchTest::RunTest(const FString&)
+{
+	const auto Init = UWorld::InitializationValues().AllowAudioPlayback(false).CreatePhysicsScene(true).CreateNavigation(false).CreateAISystem(false);
+	auto* World = UWorld::CreateWorld(EWorldType::Game, false, NAME_None, nullptr, true, ERHIFeatureLevel::Num, &Init);
+	if (!World) return false;
+	GEngine->CreateNewWorldContext(EWorldType::Game).SetCurrentWorld(World);
+	const PropGrabTests::FWorldOwner WorldScope(World);
+	World->InitializeActorsForPlay(FURL());
+	World->GetWorldSettings()->NotifyBeginPlay();
+
+	auto* Manager = World->SpawnActor<APropManager>();
+	if (!Manager) return false;
+	Manager->bEnableAutosave = false;
+	Manager->InitializePropManager();
+	auto* PlayerClass = LoadClass<ACharacter>(nullptr, TEXT("/Game/FirstPerson/Blueprints/BP_FirstPersonCharacter.BP_FirstPersonCharacter_C"));
+	if (!PlayerClass) return false;
+	World->SetBegunPlay(false);
+	auto* Player = World->SpawnActor<ACharacter>(PlayerClass, FVector(0, 0, 100), FRotator::ZeroRotator);
+	World->SetBegunPlay(true);
+	auto* Input = Player ? Player->FindComponentByClass<UPropGrabInputComponent>() : nullptr;
+	if (!Input || !Player->GetMesh()) return false;
+	auto* Profile = World->SpawnActor<APlayerState>();
+	if (!Profile) return false;
+	Player->SetPlayerState(Profile);
+	auto* Upgrades = NewObject<UPlayerUpgradesComponent>(Profile);
+	Profile->AddInstanceComponent(Upgrades);
+	Upgrades->RegisterComponent();
+	const auto* Ranks = FindFProperty<FStructProperty>(Upgrades->GetClass(), TEXT("UpgradeState"));
+	if (!Ranks || Ranks->Struct != FPlayerUpgradeState::StaticStruct()) return false;
+
+	const auto* BottleAsset = LoadObject<UInteractablePropDataAsset>(nullptr, TEXT("/Game/Assest/DataAssets/DA_BasicCola.DA_BasicCola"));
+	if (!BottleAsset) return false;
+	const int32 PID = Manager->RegisterProductFromDataAsset(BottleAsset);
+	const auto MakeBottle = [&](float Y, float Level)
+	{
+		const int32 ID = Manager->GenerateProductInstance(PID, FTransform(FRotator::ZeroRotator, FVector(100, Y, 100), FVector(.15)));
+		FPropEventSyncDelta Content;
+		Content.ISID = ID;
+		Content.SetFlag(EPropEventDirtyMask::ContentLevel);
+		Content.ContentLevel = Level;
+		auto* Record = Manager->FindISIDData(ID);
+		if (!Record || !Manager->SubmitInstanceEventUpdate(ID, Content)) return 0;
+		Manager->FindISIDData(ID)->RuntimeData.LastInteractionTime = -100.0;
+		return ID;
+	};
+	const int32 First = MakeBottle(0, 0), Second = MakeBottle(30, 0), Third = MakeBottle(60, 0);
+	const int32 Extra = MakeBottle(90, 0), Partial = MakeBottle(120, .3f);
+	if (!First || !Second || !Third || !Extra || !Partial) return false;
+	const auto Take = [&](int32 ID)
+	{
+		if (!Input->CanCarryProduct(*Manager, ID)) return false;
+		auto* Bottle = Manager->ReserveGrabForTravel(ID, Player);
+		if (!Bottle) return false;
+		Input->Travel.Actor = Bottle;
+		Input->Travel.ISID = ID;
+		Input->Travel.Sequence = 1;
+		Input->CompleteTravelPickup(*Player, *Bottle);
+		return Bottle->GetAttachParentActor() == Player;
+	};
+	const auto Primary = [&]() { return WorldInteractionCarry::GetCarryReference(*Player, TEXT("Holding Actor")); };
+
+	if (!TestTrue(TEXT("Default rank uses the normal single hand"), Take(First))) return false;
+	TestFalse(TEXT("Default rank rejects an extra empty bottle"), Input->CanCarryProduct(*Manager, Second));
+	auto* State = Ranks->ContainerPtrToValuePtr<FPlayerUpgradeState>(Upgrades);
+	State->EmptyBottleCarryRank = 2;
+	if (!TestTrue(TEXT("The new rank immediately accepts two additional empty bottles"), Take(Second) && Take(Third))) return false;
+	TestFalse(TEXT("A fourth empty bottle remains in the world"), Input->CanCarryProduct(*Manager, Extra));
+	TestFalse(TEXT("A partially filled bottle cannot join the empty batch"), Input->CanCarryProduct(*Manager, Partial));
+	TestFalse(TEXT("Liquid cannot be added to a bottle within a held batch"), UPropGrabInputComponent::CanFillHeldBottle(*Manager, First));
+
+	Input->Server_DropBatchedActor(Manager->GetActiveActorFromISID(First));
+	TestEqual(TEXT("Dropping one bottle advances the next bottle to the hand slot"), Primary(), static_cast<UObject*>(Manager->GetActiveActorFromISID(Second)));
+	TestTrue(TEXT("The next bottle remains held after the first is placed"), Manager->FindISIDData(Third)->RuntimeData.InteractionOwner.Get() == Player);
+	Manager->ReleaseGrab(Second, Player);
+	TestTrue(TEXT("The sole remaining bottle can be filled"), UPropGrabInputComponent::CanFillHeldBottle(*Manager, Third));
+	Input->Server_DropBatchedActor(Manager->GetActiveActorFromISID(Third));
+	TestNull(TEXT("Dropping the last bottle clears the hand slot"), Primary());
+	if (!TestTrue(TEXT("A partially filled bottle can be carried alone"), Take(Partial))) return false;
+	TestFalse(TEXT("A loaded bottle still occupies the whole hand at maximum rank"), Input->CanCarryProduct(*Manager, Extra));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHoseAuthoredGrabInputTest,"ColossalFizzCo.Hose.Interaction.AuthoredGKeyRouting",EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
 bool FHoseAuthoredGrabInputTest::RunTest(const FString& Parameters)
 {

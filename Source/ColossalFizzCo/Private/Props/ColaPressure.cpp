@@ -1,6 +1,7 @@
 #include "Props/ColaPropActor.h"
 #include "Props/InteractablePropManager.h"
 #include "Components/StaticMeshComponent.h"
+#include "Shop/PlayerUpgradesComponent.h"
 #include "Shop/ShopProductionStationComponent.h"
 
 bool APropManager::SetBottleAgitationPressure(int32 InISID,float Pressure,bool bPublish)
@@ -198,6 +199,15 @@ void AColaPropActor::UpdatePlasticPressure(float DeltaSeconds)
 	if (!Jet && !Filling) EvaluateManufacturingPressureFailure();
 }
 
+float AColaPropActor::GetHeldMovementShakeMultiplier() const
+{
+	const AActor* AttachedTo = GetAttachParentActor();
+	// A grab reserves the held state before the bottle reaches the hand.
+	if ((!bIsHeld && State != EPropState::Held) || !IsValid(AttachedTo)) return 1.f;
+	const AActor* Holder = IsValid(InteractionOwner.Get()) ? InteractionOwner.Get() : AttachedTo;
+	return UPlayerUpgradesComponent::GetCarryShakeMultiplierFor(Holder);
+}
+
 void AColaPropActor::UpdateMotionPressure(float DeltaSeconds)
 {
 	if (!HasAuthority() || IsCarriedForDrinking() || !FMath::IsFinite(DeltaSeconds) || DeltaSeconds <= 0 || IsEmpty() || IsSeatedInFiller()
@@ -219,5 +229,7 @@ void AColaPropActor::UpdateMotionPressure(float DeltaSeconds)
 	const float LinearRate = FMath::Max(0.f,float(FilteredAgitationAcceleration.Size())-AccelerationAgitationThreshold)/980.f * FMath::Max(0.f,AccelerationPressureGain);
 	const float RotationRate = FMath::Max(0.f,float(AngularVelocity.Size())-AngularAgitationThreshold)/FMath::Max(1.f,AngularAgitationThreshold)*FMath::Max(0.f,AngularPressureRate);
 	const float RunningRate = bIsHeld ? FMath::Max(0.f,float(LinearVelocity.Size())-RunningSpeedThreshold)/FMath::Max(1.f,RunningSpeedThreshold)*FMath::Max(0.f,RunningPressureRate) : 0.f;
-	AddAgitationPressure(FMath::Min(8.f,LinearRate+RotationRate+RunningRate)*FMath::Min(DeltaSeconds,.1f));
+	const float MovementShakeRate = FMath::Min(8.f,LinearRate+RotationRate+RunningRate);
+	const float EffectiveShakeRate = MovementShakeRate * GetHeldMovementShakeMultiplier();
+	AddAgitationPressure(EffectiveShakeRate * FMath::Min(DeltaSeconds,.1f));
 }

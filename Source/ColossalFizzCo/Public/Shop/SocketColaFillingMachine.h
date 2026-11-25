@@ -19,6 +19,16 @@ struct FSocketMachineInputPlacement
 	TWeakObjectPtr<UBoxComponent> Socket;
 };
 
+USTRUCT()
+struct FSocketMachinePlacementItem
+{
+	GENERATED_BODY()
+
+	UPROPERTY() int32 ISID = 0;
+	UPROPERTY() bool bWasHidden = false;
+	UPROPERTY() bool bHadCollision = false;
+};
+
 /** Manual station with a bottle cradle, cap magazine and separate lever controller. */
 UCLASS()
 class COLOSSALFIZZCO_API ASocketColaFillingMachine : public AManualColaFillingMachine
@@ -59,6 +69,11 @@ public:
 	bool IsSocketInteractionComponent(const UPrimitiveComponent* Component, bool bIncludeLever = true) const;
 	bool CanReachControl(const APawn* Player, const UPrimitiveComponent* Control) const;
 	bool SupportsCapType(EBottleCapType Type) const { return SupportedCapTypes.Contains(Type); }
+	APawn* GetPlacementOperator() const { return PlacementOperator.Get(); }
+	bool IsMachinePlacementActive() const { return bMachinePlacementActive; }
+	bool BeginMachinePlacement(APawn& Player);
+	bool FinishMachinePlacement(APawn& Player, const FTransform& Pose);
+	void CancelMachinePlacement(APawn& Player);
 	UFUNCTION(BlueprintCallable, Category="Machine|World Interaction")
 	void BeginSocketInteraction(APawn* Player, UPrimitiveComponent* HittingComponent);
 	UFUNCTION(BlueprintCallable, Category="Machine|World Interaction")
@@ -67,6 +82,7 @@ public:
 protected:
 	virtual FTransform GetDefaultHosePortTransform(int32 Index) const override;
 	virtual void UpdateLeverVisual(float DeltaSeconds) override;
+	virtual void UpdateControlLayout() override;
 
 private:
 	friend class UShopProductionStationComponent;
@@ -76,6 +92,28 @@ private:
 	TWeakObjectPtr<APawn> WorldLeverOperator;
 	UPROPERTY(Replicated)
 	TArray<FSocketMachineInputPlacement> InputPlacements;
+	UPROPERTY(ReplicatedUsing=OnRep_PlacementOperator)
+	TObjectPtr<APawn> PlacementOperator;
+	UPROPERTY(ReplicatedUsing=OnRep_PlacementOperator)
+	bool bMachinePlacementActive = false;
+	UPROPERTY(ReplicatedUsing=OnRep_PlacementOperator)
+	bool bPlacementHadCollision = true;
+	UPROPERTY(ReplicatedUsing=OnRep_PlacementOperator)
+	TArray<FSocketMachinePlacementItem> PlacementItems;
+	bool bPlacementWasHidden = false;
+	int32 PlacementBottleISID = 0;
+	FTransform PlacementBottleRelativeTransform;
+	struct FAppliedPlacementItem
+	{
+		TWeakObjectPtr<AActivePropActor> Actor;
+		FSocketMachinePlacementItem State;
+	};
+	TArray<FAppliedPlacementItem> AppliedPlacementItems;
+	UFUNCTION() void OnRep_PlacementOperator();
+	void UpdateMachinePlacement();
+	void RestoreMachinePlacement();
+	void RestorePlacementItems();
+	void ApplyPlacementItems();
 	void ReleaseWorldLever();
 	void LoadHeldSupply(APawn* Player, UPrimitiveComponent* Socket);
 	bool BeginInputPlacement(APropManager& Manager, int32 ID, UBoxComponent& Socket);

@@ -9,6 +9,7 @@ class COLOSSALFIZZCO_API UManualFillingPressureGauge : public UWidget
 {
 	GENERATED_BODY()
 public:
+	void SetReading(float InPressure, float InSafePressure);
 	float Pressure=0;
 	float SafePressure=.1f;
 protected:

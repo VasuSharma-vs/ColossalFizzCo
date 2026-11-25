@@ -386,7 +386,8 @@ void AColaPropActor::UpdateFoamPressure(float DeltaSeconds)
 	const FVector CurVel = RawVel.GetClampedToMaxSize(600.0f);
 	const FVector CurAccel = ((CurVel - PrevVelocity) / DeltaSeconds).GetClampedToMaxSize(5000.0f); // max ~5G
 	const float CurGForce = CurAccel.Size() / 980.0f;
-	const float DeltaJerk = FMath::Clamp(FMath::Abs(CurGForce - PrevGForce), 0.0f, 10.0f);
+	const float RawCarryJerk = FMath::Clamp(FMath::Abs(CurGForce - PrevGForce), 0.0f, 10.0f);
+	const float DeltaJerk = RawCarryJerk * GetHeldMovementShakeMultiplier();
 
 	PrevVelocity = CurVel;
 	PrevGForce = CurGForce;

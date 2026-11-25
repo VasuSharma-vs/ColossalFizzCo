@@ -1,4 +1,5 @@
 #include "Shop/ShopProcurementComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Props/PropProductCatalog.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/SkeletalMesh.h"
@@ -11,6 +12,77 @@
 #include "Engine/World.h"
 #include "CollisionShape.h"
 #include "CollisionQueryParams.h"
+#include "Engine/OverlapResult.h"
+
+DEFINE_LOG_CATEGORY_STATIC(LogDispenserClearance, Log, All);
+
+namespace
+{
+	bool ResolveDispenserSpawn(const UWorld& World, const UStaticMesh& Mesh, FTransform& SpawnTransform, const AActor* Dispenser,
+		bool bLogBlocker = true)
+	{
+		const FBox LocalBounds = Mesh.GetBoundingBox();
+		const FBox WorldBounds = LocalBounds.TransformBy(SpawnTransform);
+		const FVector Center = SpawnTransform.TransformPosition(LocalBounds.GetCenter());
+		const FVector HalfSize = LocalBounds.GetExtent() * SpawnTransform.GetScale3D().GetAbs();
+		const double TraceDepth = WorldBounds.GetSize().Z + 100.0;
+		const FCollisionShape Footprint = FCollisionShape::MakeBox(HalfSize.ComponentMax(FVector(0.1)));
+		const FQuat Rotation = SpawnTransform.GetRotation();
+		const FCollisionQueryParams SpawnQuery(SCENE_QUERY_STAT(DispenserClearance), false);
+		double DropOffset = 0.0;
+		TArray<FOverlapResult> Overlaps;
+		World.OverlapMultiByChannel(Overlaps, Center, Rotation, ECC_PhysicsBody, Footprint, SpawnQuery);
+		for (const FOverlapResult& Overlap : Overlaps)
+		{
+			if (!Overlap.bBlockingHit) continue;
+			const UPrimitiveComponent* Component = Overlap.GetComponent();
+			if (!Dispenser || Overlap.GetActor() != Dispenser || !Component)
+			{
+				UE_CLOG(bLogBlocker, LogDispenserClearance, Verbose, TEXT("Dispenser spawn at %s overlaps %s"),
+					*SpawnTransform.GetLocation().ToString(), *GetPathNameSafe(Component));
+				return false;
+			}
+			// Some outlets sit inside their dispenser's head. Keep the horizontal alignment and clear its underside.
+			DropOffset = FMath::Max(DropOffset, WorldBounds.Max.Z - Component->Bounds.GetBox().Min.Z + 1.0);
+		}
+		if (DropOffset > TraceDepth) return false;
+		const FVector Offset(0.0, 0.0, -DropOffset);
+		if (DropOffset > 0.0 && World.OverlapBlockingTestByChannel(Center + Offset, Rotation, ECC_PhysicsBody, Footprint, SpawnQuery)) return false;
+
+		// Sweep from the arrow through the final drop path so a fallback cannot skip an outside obstacle.
+		FCollisionQueryParams DropQuery = SpawnQuery;
+		if (Dispenser) DropQuery.AddIgnoredActor(Dispenser);
+		const FVector End = Center + Offset - FVector(0.0, 0.0, TraceDepth);
+		FHitResult Hit;
+		if (World.SweepSingleByChannel(Hit, Center, End, Rotation, ECC_PhysicsBody, Footprint, DropQuery))
+		{
+			// A fixed floor or shelf can catch the falling item below the resolved spawn pose.
+			const auto* Surface = Hit.GetComponent();
+			const bool bLandingSurface = !Hit.bStartPenetrating && Hit.Distance >= DropOffset && Surface
+				&& Surface->GetCollisionObjectType() == ECC_WorldStatic && Hit.ImpactNormal.Z > 0.5;
+			if (!bLandingSurface)
+			{
+				UE_CLOG(bLogBlocker, LogDispenserClearance, Verbose, TEXT("Blocked dispenser drop at %s by %s"),
+					*SpawnTransform.GetLocation().ToString(), *GetPathNameSafe(Surface));
+				return false;
+			}
+		}
+		SpawnTransform.AddToTranslation(Offset);
+		return true;
+	}
+
+	EShopPurchaseResult ToShopPurchaseResult(EWalletOperationResult Result)
+	{
+		switch (Result)
+		{
+		case EWalletOperationResult::Applied: return EShopPurchaseResult::Success;
+		case EWalletOperationResult::AlreadyApplied: return EShopPurchaseResult::AlreadyPurchased;
+		case EWalletOperationResult::InsufficientFunds: return EShopPurchaseResult::InsufficientFunds;
+		case EWalletOperationResult::OperationConflict: return EShopPurchaseResult::OperationConflict;
+		default: return EShopPurchaseResult::DeliveryFailed;
+		}
+	}
+}
 
 UShopProcurementComponent::UShopProcurementComponent()
 {
@@ -271,21 +343,27 @@ bool UShopProcurementComponent::IsNormalContent(int32 ID) const
 
 bool UShopProcurementComponent::IsCylinderProduct(int32 PID) const
 {
-	const auto* Manager=Cast<APropManager>(GetOwner()); const auto* Data=Catalog.Get();
+	const auto* Manager=Cast<APropManager>(GetOwner());
 	const auto* Product=Manager ? Manager->FindProductDefinition(PID) : nullptr;
-	if (!Data || !Product || !Product->SourceDataAsset) return false;
+	if (!Product || !Product->SourceDataAsset) return false;
+	const auto* Data=Catalog.LoadSynchronous();
+	if (!Data) return false;
+	const FSoftObjectPath ProductPath(Product->SourceDataAsset.Get());
 	for (const auto& Offer:Data->Offers)
-		if (Offer.Kind==EShopSupplyKind::ColaCylinder && Offer.Product.Get()==Product->SourceDataAsset.Get()) return true;
+		if (Offer.Kind==EShopSupplyKind::ColaCylinder && Offer.Product.ToSoftObjectPath()==ProductPath) return true;
 	return false;
 }
 
 bool UShopProcurementComponent::IsTemporarySealProduct(int32 PID) const
 {
-	const auto* Manager=Cast<APropManager>(GetOwner()); const auto* Data=Catalog.Get();
+	const auto* Manager=Cast<APropManager>(GetOwner());
 	const auto* Product=Manager ? Manager->FindProductDefinition(PID) : nullptr;
-	if (!Data || !Product || !Product->SourceDataAsset) return false;
+	if (!Product || !Product->SourceDataAsset) return false;
+	const auto* Data=Catalog.LoadSynchronous();
+	if (!Data) return false;
+	const FSoftObjectPath ProductPath(Product->SourceDataAsset.Get());
 	for (const auto& Offer:Data->Offers)
-		if (Offer.Kind==EShopSupplyKind::TemporarySeal && Offer.Product.Get()==Product->SourceDataAsset.Get()) return true;
+		if (Offer.Kind==EShopSupplyKind::TemporarySeal && Offer.Product.ToSoftObjectPath()==ProductPath) return true;
 	return false;
 }
 
@@ -371,12 +449,96 @@ EShopPurchaseResult UShopProcurementComponent::Purchase(FGuid ID, FName OfferID,
 		}
 		return true;
 	});
-	switch (Result)
+	return ToShopPurchaseResult(Result);
+}
+
+EShopPurchaseResult UShopProcurementComponent::PurchaseDispensedBottle(const FTransform& SpawnTransform, int32& DeliveredISID, const AActor* Dispenser)
+{
+	return PurchaseDispensedSupply(TEXT("EmptyBottle"), EShopSupplyKind::EmptyBottle, TEXT("BottleDispenser"), SpawnTransform, DeliveredISID, Dispenser);
+}
+
+EShopPurchaseResult UShopProcurementComponent::PurchaseDispensedCap(const FTransform& SpawnTransform, int32& DeliveredISID, const AActor* Dispenser)
+{
+	return PurchaseDispensedSupply(TEXT("TwistCap"), EShopSupplyKind::Cap, TEXT("CapDispenser"), SpawnTransform, DeliveredISID, Dispenser);
+}
+
+EShopPurchaseResult UShopProcurementComponent::PurchaseDispensedSeal(const FTransform& SpawnTransform, int32& DeliveredISID, const AActor* Dispenser)
+{
+	return PurchaseDispensedSupply(TEXT("TemporarySeal"), EShopSupplyKind::TemporarySeal, TEXT("SealDispenser"), SpawnTransform, DeliveredISID, Dispenser);
+}
+
+bool UShopProcurementComponent::IsDispenserDropAreaBlocked(FName OfferID, FTransform SpawnTransform, const AActor* Dispenser) const
+{
+	const auto* World = GetWorld();
+	const auto* Manager = Cast<APropManager>(GetOwner());
+	const auto* Data = Catalog.Get();
+	const auto* Offer = Data ? Data->FindOffer(OfferID) : nullptr;
+	const auto* Product = Offer ? Offer->Product.Get() : nullptr;
+	if (!World || !Manager || !Product || !SpawnTransform.IsValid()) return false;
+	const auto* Definition = Manager->FindProductDefinition(Manager->FindProductIDByDataAsset(Product));
+	return Definition && Definition->StaticMesh
+		&& !ResolveDispenserSpawn(*World, *Definition->StaticMesh, SpawnTransform, Dispenser, false);
+}
+
+EShopPurchaseResult UShopProcurementComponent::PurchaseDispensedSupply(FName OfferID, EShopSupplyKind Kind, FName Reason,
+	const FTransform& SpawnTransform, int32& DeliveredISID, const AActor* Dispenser)
+{
+	DeliveredISID = 0;
+	auto* Manager = Cast<APropManager>(GetOwner());
+	if (!Manager || !Manager->HasAuthority() || GetNetMode() == NM_Client) return EShopPurchaseResult::NotAuthority;
+	if (!Manager->SharedWallet || !SpawnTransform.IsValid()) return EShopPurchaseResult::DeliveryFailed;
+
+	int64 PriceCents = 0;
+	if (!Quote(OfferID, 1, PriceCents)) return EShopPurchaseResult::InvalidOffer;
+	const auto* Data = Catalog.Get();
+	const auto* Offer = Data ? Data->FindOffer(OfferID) : nullptr;
+	if (!Offer || Offer->Kind != Kind || (!Data->FinishedBottleProducts.IsEmpty() && !InitializeCatalog()))
+		return EShopPurchaseResult::InvalidOffer;
+	const auto* Product = Offer->Product.LoadSynchronous();
+	const bool bCap = Kind == EShopSupplyKind::Cap;
+	const bool bSeal = Kind == EShopSupplyKind::TemporarySeal;
+	if (!Product || !Product->StaticMesh || Product->bIsBottleCap != bCap || Product->bIsTemporaryPressureSeal != bSeal)
+		return EShopPurchaseResult::InvalidOffer;
+	if ((bCap && Product->DefaultCapType != EBottleCapType::Twist)
+		|| (Kind == EShopSupplyKind::EmptyBottle && (!FMath::IsFinite(Product->NormalCapacity) || Product->DefaultContentLevel != 0.f)))
+		return EShopPurchaseResult::InvalidOffer;
+
+	bool bDropAreaBlocked = false;
+	const auto Result = Manager->SharedWallet->CommitWithResources(FGuid::NewGuid(), -PriceCents, Reason, [&]()
 	{
-	case EWalletOperationResult::Applied: return EShopPurchaseResult::Success;
-	case EWalletOperationResult::AlreadyApplied: return EShopPurchaseResult::AlreadyPurchased;
-	case EWalletOperationResult::InsufficientFunds: return EShopPurchaseResult::InsufficientFunds;
-	case EWalletOperationResult::OperationConflict: return EShopPurchaseResult::OperationConflict;
-	default: return EShopPurchaseResult::DeliveryFailed;
-	}
+		const int32 PID = Manager->RegisterProductFromDataAsset(Product);
+		const auto* Definition = Manager->FindProductDefinition(PID);
+		if (!Definition || !Definition->StaticMesh || Definition->bIsBottleCap != bCap
+			|| (bCap && Definition->DefaultCapType != EBottleCapType::Twist)
+			|| (bSeal && !IsTemporarySealProduct(PID)))
+		{
+			UE_LOG(LogDispenserClearance, Verbose, TEXT("No valid definition for dispenser offer %s (product %d)"), *OfferID.ToString(), PID);
+			return false;
+		}
+		FTransform ResolvedSpawn = SpawnTransform;
+		bDropAreaBlocked = !ResolveDispenserSpawn(*GetWorld(), *Definition->StaticMesh, ResolvedSpawn, Dispenser);
+		if (bDropAreaBlocked) return false;
+		const int32 ISID = Manager->GenerateProductInstance(PID, ResolvedSpawn);
+		if (ISID <= 0)
+		{
+			UE_LOG(LogDispenserClearance, Verbose, TEXT("Could not create dispenser product %d at %s"), PID, *ResolvedSpawn.GetLocation().ToString());
+			return false;
+		}
+
+		// Start in Settling when activating a new prop. Transitioning from Unsettled at zero speed can
+		// mark it AtRest immediately if there happens to be a floor under the outlet.
+		const bool bSettling = Manager->SetPropState(ISID, EPropState::Settling) && Manager->SetInstanceToSettling(ISID);
+		auto* Actor = Manager->GetActiveActorFromISID(ISID);
+		if (!bSettling || !Actor || !Actor->PropMesh || !Actor->PropMesh->IsSimulatingPhysics())
+		{
+			UE_LOG(LogDispenserClearance, Verbose, TEXT("Could not activate dispenser product %d (instance %d, settling %d, actor %s)"),
+				PID, ISID, bSettling, *GetPathNameSafe(Actor));
+			Manager->ReleaseInstanceToEmpty(ISID);
+			return false;
+		}
+		Actor->PropMesh->SetPhysicsLinearVelocity(FVector(0.0, 0.0, -20.0), true);
+		DeliveredISID = ISID;
+		return true;
+	});
+	return bDropAreaBlocked ? EShopPurchaseResult::DropAreaBlocked : ToShopPurchaseResult(Result);
 }

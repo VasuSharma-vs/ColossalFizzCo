@@ -1,6 +1,8 @@
 #include "Props/InteractablePropManager.h"
 #include "Props/ColaPropActor.h"
 #include "Components/ResourceTransferTypes.h"
+#include "Components/PropGrabInputComponent.h"
+#include "Shop/FillingMachineUpgradeTypes.h"
 #include "Shop/ShopCheckoutComponent.h"
 #include "Curves/CurveFloat.h"
 #include <cmath>
@@ -60,7 +62,8 @@ float APropManager::IntakeHoseContent(int32 SourceISID,FHoseResourceBuffer& Buff
 float APropManager::DeliverHoseContent(FHoseResourceBuffer& Buffer,int32 TargetISID,float Requested)
 {
     if (!HasAuthority() || GetNetMode()==NM_Client || !HoseContent::ValidBuffer(Buffer) || Buffer.Units<=0
-        || !FMath::IsFinite(Requested) || Requested<=0 || !HoseContent::AvailableStock(*this,TargetISID)) return 0;
+        || !FMath::IsFinite(Requested) || Requested<=0 || !HoseContent::AvailableStock(*this,TargetISID)
+        || !UPropGrabInputComponent::CanFillHeldBottle(*this, TargetISID)) return 0;
     const auto* Record=FindISIDData(TargetISID);
     const auto* Data=FindUniqueData(TargetISID);
     const auto* Product=Record ? FindProductDefinition(Record->ProductID) : nullptr;
@@ -84,7 +87,8 @@ float APropManager::DeliverHoseContent(FHoseResourceBuffer& Buffer,int32 TargetI
         AActivePropActor* Active=nullptr;
         if (!PromoteInstanceToASM(TargetISID,EPropActivationReason::Interaction,true,Active)) return 0;
     }
-    if (const auto* Bottle=Cast<AColaPropActor>(GetActiveActorFromISID(TargetISID)); Bottle && !Bottle->CanAcceptManufacturingContent(Buffer.ResourceID)) return 0;
+    const auto* Bottle=Cast<AColaPropActor>(GetActiveActorFromISID(TargetISID));
+    if (Bottle && !Bottle->CanAcceptManufacturingContent(Buffer.ResourceID)) return 0;
     Data=FindUniqueData(TargetISID);
     if (!Data) return 0;
     const float PreviousLevel=Data->EventData.ContentLevel;
@@ -92,7 +96,9 @@ float APropManager::DeliverHoseContent(FHoseResourceBuffer& Buffer,int32 TargetI
     const float Actual=(NewLevel-PreviousLevel)*Portions;
     if (Actual<=0 || Actual>Buffer.Units+UE_KINDA_SMALL_NUMBER) return 0;
     const double Existing=double(PreviousLevel)*Portions;
-    const float Temperature=float((Existing*Data->ContinuousData.Temperature+double(Actual)*Buffer.ContentTemperature)/(Existing+Actual));
+    const float Cooling=Bottle ? Bottle->GetActiveFillingUpgradeValue(EFillingMachineUpgradeType::TemperatureRegulator) : 0.f;
+    const float Temperature=float((Existing*Data->ContinuousData.Temperature
+        +double(Actual)*(Buffer.ContentTemperature-Cooling))/(Existing+Actual));
     FPropEventSyncDelta Credit; Credit.ISID=TargetISID; Credit.SetFlag(EPropEventDirtyMask::ContentLevel); Credit.SetFlag(EPropEventDirtyMask::ContentID);
     Credit.ContentLevel=NewLevel; Credit.ContentID=Buffer.ResourceID;
     Credit.ExtendedDirtyMask=EPropExtendedEventMask::ContentCreationTime;
@@ -106,7 +112,7 @@ float APropManager::DeliverHoseContent(FHoseResourceBuffer& Buffer,int32 TargetI
         FPropContinuousSyncItem Item; Item.ISID=TargetISID; Item.Temperature=Updated->ContinuousData.Temperature; Item.SealedPressure=Updated->ContinuousData.SealedPressure;
         Multicast_SyncContinuousBatch(WorldElapsedSeconds,{Item});
     }
-    if (auto* Bottle=Cast<AColaPropActor>(GetActiveActorFromISID(TargetISID))) Bottle->OnManufacturingLiquidReceived(PreviousLevel);
+    if (auto* UpdatedBottle=Cast<AColaPropActor>(GetActiveActorFromISID(TargetISID))) UpdatedBottle->OnManufacturingLiquidReceived(PreviousLevel);
     return Actual;
 }
 

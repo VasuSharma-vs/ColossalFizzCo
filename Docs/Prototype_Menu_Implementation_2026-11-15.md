@@ -8,7 +8,7 @@ Run `Play_ColossalFizzCo.cmd` in the ColossalFizzCo project folder. It uses the 
 
 For offline play, run the same launcher with `--offline`. The menu offers **Play solo offline**. The normal project configuration keeps online services disabled; an ordinary offline launch explains why its Epic sign-in button is disabled. This avoids putting service credentials in shared project configuration.
 
-Low graphics is the launcher default: one 1280x720 window, 30 FPS cap, a small texture-streaming pool, no ray tracing, and reduced optional graphics. Use `--quality project` to retain the project's usual renderer. The graphics overrides live in ignored custom launch profiles; they do not alter bottle materials or the default game renderer. `UE_ENGINE_ROOT` or `--editor` can select a different installed engine path.
+The launcher uses the project's renderer and the player's saved graphics settings by default. Use `--quality low` to launch a 1280×720 window with a 30 FPS cap, a smaller texture-streaming pool, ray tracing disabled, and reduced graphics quality. The renderer overrides live in ignored custom launch profiles. `UE_ENGINE_ROOT` or `--editor` can select a different installed engine path.
 
 This is an **Editor-based playable prototype launch**. The older packaged build14120 is preserved and does not acquire the menu automatically. A fresh Development/Shipping game package and packaged cross-network acceptance remain separate work.
 

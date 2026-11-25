@@ -6,20 +6,26 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerState.h"
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/RocketProjectileComponent.h"
 #include "Components/HoseTransferComponent.h"
 #include "Components/ResourceTransferEndpointComponent.h"
+#include "Components/ResourceTransferTypes.h"
 #include "Resources/HoseCableActor.h"
 #include "Props/ColaPropActor.h"
 #include "Props/InteractablePropDataAsset.h"
 #include "Props/InteractablePropManager.h"
 #include "Shop/BottleFillingComponent.h"
+#include "Shop/FillingMachineUpgradeTypes.h"
 #include "Shop/ManualColaFillingMachine.h"
+#include "Shop/PlayerUpgradesComponent.h"
+#include "Shop/SharedTeamWalletComponent.h"
 #include "Shop/ShopProductionStationComponent.h"
 #include "Shop/ShopPlayerInteractionComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "OnlineSubsystemTypes.h"
 #include "Serialization/MemoryWriter.h"
 #include "Serialization/MemoryReader.h"
 
@@ -299,6 +305,92 @@ bool FColaManufacturingFailureStopsFlowTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFillingMachineRegulatorDeliveryTest, "ColossalFizzCo.Shop.FillingMachineUpgrades.RegulatorDelivery",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FFillingMachineRegulatorDeliveryTest::RunTest(const FString& Parameters)
+{
+	ColaManufacturingTests::FFixture Fixture;
+	if (!Fixture.World) return false;
+	auto* Manager = Fixture.Manager;
+	FPropProductDefinition Equipment;
+	Equipment.ProductID = 9205;
+	Equipment.bEnableInstanceUniqueData = true;
+	Equipment.StaticMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	Equipment.CustomActiveActorClass = AManualColaFillingMachine::StaticClass();
+	if (!Manager->RegisterProductDefinition(Equipment)) return false;
+	const int32 MachineID = Manager->GenerateProductInstance(Equipment.ProductID, FTransform(FVector(0, 0, 1000)));
+	AActivePropActor* Active = nullptr;
+	if (!Manager->PromoteInstanceToASM(MachineID, EPropActivationReason::Interaction, false, Active)) return false;
+	auto* Machine = Cast<AManualColaFillingMachine>(Active);
+	if (!TestNotNull(TEXT("The fixture has an active filling table"), Machine)) return false;
+	Machine->PropMesh->SetSimulatePhysics(false);
+
+	FPropEventSyncDelta Upgrades;
+	Upgrades.ExtendedDirtyMask = EPropExtendedEventMask::FillingMachineUpgrades;
+	Upgrades.FillingMachineUpgrades.SetRank(EFillingMachineUpgradeType::PressureRegulator, 2);
+	Upgrades.FillingMachineUpgrades.SetRank(EFillingMachineUpgradeType::TemperatureRegulator, 2);
+	if (!Manager->SubmitInstanceEventUpdate(MachineID, Upgrades)) return false;
+
+	auto* Bottle = Fixture.Bottle(Machine->BottleHolderPoint->GetComponentLocation());
+	if (!Bottle) return false;
+	Bottle->RemoveBottleContent();
+	auto* Station = Machine->Production.Get();
+	auto* Filler = Machine->BottleFiller.Get();
+	if (!TestTrue(TEXT("The bottle seats at the table"), Station->SeatBottle(Bottle->ISID))) return false;
+	auto* Player = Fixture.World->SpawnActor<ACharacter>(Machine->GetActorLocation() + FVector(0, -100, 150), FRotator::ZeroRotator);
+	auto* Controller = Fixture.World->SpawnActor<APlayerController>();
+	if (!Player || !Controller) return false;
+	Player->SetActorEnableCollision(false);
+	Player->GetCharacterMovement()->DisableMovement();
+	Controller->Possess(Player);
+	auto* Interaction = NewObject<UShopPlayerInteractionComponent>(Player);
+	Player->AddInstanceComponent(Interaction);
+	Interaction->RegisterComponent();
+	Station->View.LeverOperator = Player;
+	Station->View.bLeverHeld = true;
+	Filler->LeverOperator = Player;
+	Filler->LeverExpiresAt = Fixture.World->GetTimeSeconds() + 10.0;
+	Filler->TargetISID = Bottle->ISID;
+	Filler->bIsFilling = true;
+	Machine->UpdateCradleMotion(Machine->CradleTravelSeconds);
+	if (!TestTrue(TEXT("The table holds the bottle while filling"), Station->IsLeverHoldingBottle(Bottle->ISID))) return false;
+
+	FHoseResourceBuffer Buffer;
+	Buffer.ResourceID = 9101;
+	Buffer.Units = 3.f;
+	Buffer.ContentTemperature = 20.f;
+	for (int32 Delivery = 0; Delivery < 2; ++Delivery)
+	{
+		if (!TestTrue(TEXT("One portion reaches the bottle"), FMath::IsNearlyEqual(Manager->DeliverHoseContent(Buffer, Bottle->ISID, 1.f), 1.f)))
+			return false;
+	}
+	const auto State = [&]() -> const FPropContinuousUpdateData&
+	{
+		return Manager->FindUniqueData(Bottle->ISID)->ContinuousData;
+	};
+	TestTrue(TEXT("Cooling two portions applies 0.04 degrees to each incoming portion"),
+		FMath::IsNearlyEqual(State().Temperature, 19.96f, .001f));
+	TestEqual(TEXT("Cooling does not change liquid already in the hose"), Buffer.ContentTemperature, 20.f);
+	const float BasePressureRise = .5f * FMath::Max(0.f, Bottle->ManufacturingPressurePerContentLevel - .1f);
+	TestTrue(TEXT("Rank two reduces bottle pressure buildup by 0.10 per full bottle"),
+		FMath::IsNearlyEqual(State().SealedPressure, BasePressureRise, .001f));
+
+	constexpr float SupplyPressure = 1.f;
+	constexpr float Flow = 2.f;
+	const float Response = 1.f - FMath::Exp(-4.f * .25f * (1.f + Flow / (4.f + Flow)));
+	Bottle->OnManufacturingSupplyReceived(1.f, SupplyPressure, Flow);
+	TestTrue(TEXT("Delivered pressure approaches the regulated 0.90 target"),
+		FMath::IsNearlyEqual(State().SealedPressure, FMath::Lerp(BasePressureRise, .90f, Response), .001f));
+
+	Filler->bIsFilling = false;
+	if (!TestTrue(TEXT("An unregulated delivery still adds the remaining portion"), FMath::IsNearlyEqual(Manager->DeliverHoseContent(Buffer, Bottle->ISID, 1.f), 1.f)))
+		return false;
+	TestTrue(TEXT("With filling stopped the station applies no cooling"),
+		FMath::IsNearlyEqual(State().Temperature, (2.f * 19.96f + 20.f) / 3.f, .001f));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FColaArmedSealDeltaTest,"ColossalFizzCo.Props.Manufacturing.SealDelta",EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
 bool FColaArmedSealDeltaTest::RunTest(const FString& Parameters)
 {
@@ -368,6 +460,74 @@ bool FPhysicalSealDurationTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("The HUD fraction uses the rolled duration"), Bottle->GetManufacturingSealIntegrity(), 0.5f);
 	}
 	TestTrue(TEXT("Separate seals get separate duration rolls"), Durations.Num() > 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlayerHandStabilityPressureTest, "ColossalFizzCo.PlayerUpgrades.HandStabilityPressure",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPlayerHandStabilityPressureTest::RunTest(const FString& Parameters)
+{
+	ColaManufacturingTests::FFixture Fixture;
+	if (!Fixture.World || !Fixture.Manager || !Fixture.Manager->SharedWallet) return false;
+	auto* Bottle = Fixture.Bottle();
+	auto* Holder = Fixture.World->SpawnActor<ACharacter>(FVector(0, -150, 1000), FRotator::ZeroRotator);
+	auto* Controller = Fixture.World->SpawnActor<APlayerController>();
+	auto* State = Fixture.World->SpawnActor<APlayerState>();
+	if (!Bottle || !Holder || !Controller || !State) return false;
+	State->SetOwner(Controller);
+	const FUniqueNetIdRef ProfileID = FUniqueNetIdString::Create(TEXT("pressure-player"), FName(TEXT("Test")));
+	State->SetUniqueId(FUniqueNetIdRepl(ProfileID));
+	Controller->SetPlayerState(State);
+	Controller->Possess(Holder);
+	UPlayerUpgradesComponent::RestoreForWorld(*Fixture.Manager);
+	auto* Upgrades = UPlayerUpgradesComponent::Find(State);
+	if (!TestNotNull(TEXT("Player profile has its upgrades component"), Upgrades)) return false;
+
+	FPropEventSyncDelta FinishedFilling;
+	FinishedFilling.ExtendedDirtyMask = EPropExtendedEventMask::TemporarySeal;
+	FinishedFilling.bManualFillPressure = false;
+	if (!Fixture.Manager->SubmitInstanceEventUpdate(Bottle->ISID, FinishedFilling)
+		|| !TestTrue(TEXT("Bottle attaches to its player holder"),
+			Fixture.Manager->BeginGrab(Bottle->ISID, Holder, Holder->GetRootComponent()) && Bottle->GetAttachParentActor() == Holder)) return false;
+
+	constexpr float StoredPressure = .25f;
+	const auto MeasureMovementPressure = [&]()
+	{
+		Fixture.Manager->SetBottleAgitationPressure(Bottle->ISID, StoredPressure);
+		Bottle->bHasAgitationHistory = false;
+		Bottle->LinearVelocity = FVector::ZeroVector;
+		Bottle->AngularVelocity = FVector::ZeroVector;
+		Bottle->UpdateMotionPressure(.05f);
+		Bottle->LinearVelocity = FVector(500, 0, 0);
+		Bottle->AngularVelocity = FVector(0, 0, 360);
+		Bottle->UpdateMotionPressure(.05f);
+		return Bottle->LocalUniqueData.ContinuousData.SealedPressure;
+	};
+	const auto MeasureImpactPressure = [&]()
+	{
+		Fixture.Manager->SetBottleAgitationPressure(Bottle->ISID, StoredPressure);
+		Bottle->LastImpactTime = -1;
+		Bottle->ApplyBottleImpact(FVector(0, 0, 2000), 0);
+		return Bottle->LocalUniqueData.ContinuousData.SealedPressure;
+	};
+	const float BaseMovementPressure = MeasureMovementPressure();
+	const float BaseImpactPressure = MeasureImpactPressure();
+	TestTrue(TEXT("Movement adds pressure at the starting rank"), BaseMovementPressure > StoredPressure);
+	TestTrue(TEXT("An impact adds pressure at the starting rank"), BaseImpactPressure > StoredPressure);
+
+	constexpr EPlayerUpgradeType Stability = EPlayerUpgradeType::HandStability;
+	Fixture.Manager->SharedWallet->Credit(FGuid::NewGuid(), 100000, TEXT("PressureTestFunding"));
+	for (int32 Rank = 0; Rank < UPlayerUpgradesComponent::GetMaxUpgradeRank(Stability); ++Rank)
+	{
+		if (!TestTrue(TEXT("Holder can buy the next stability rank"), Upgrades->RequestPurchase(Stability, Rank, FGuid::NewGuid()))
+			|| !TestEqual(TEXT("The requested rank was granted"), Upgrades->GetUpgradeRank(Stability), Rank + 1)) return false;
+	}
+	TestEqual(TEXT("Maximum stability resolves to half strength for the holder"), UPlayerUpgradesComponent::GetCarryShakeMultiplierFor(Holder), .5f);
+	const float ExpectedMovementPressure = StoredPressure + (BaseMovementPressure - StoredPressure) * .5f;
+	TestTrue(TEXT("The same movement adds half the agitation once, preserving stored pressure"),
+		FMath::IsNearlyEqual(MeasureMovementPressure(), ExpectedMovementPressure, UE_KINDA_SMALL_NUMBER));
+	TestEqual(TEXT("The same collision impulse adds unchanged pressure"), MeasureImpactPressure(), BaseImpactPressure);
 	return true;
 }
 #endif

@@ -45,10 +45,17 @@ bool UBottleFillingComponent::ConnectionsInRange() const
 		&& FVector::DistSquared(Origin, Manager->GetTransform(TargetISID).GetLocation()) <= FMath::Square(MaxConnectionDistance);
 }
 
+float UBottleFillingComponent::GetEffectiveTargetContentLevel() const
+{
+	const auto* Station=bRequireLever && GetOwner() ? GetOwner()->FindComponentByClass<UShopProductionStationComponent>() : nullptr;
+	return Station && Station->StopsFlowAtBottleCapacity() ? 1.f : TargetContentLevel;
+}
+
 bool UBottleFillingComponent::StartFilling(int32 Source, int32 Target)
 {
+	const float TargetLevel=GetEffectiveTargetContentLevel();
 	if (!GetOwner() || !GetOwner()->HasAuthority() || bIsFilling || !FMath::IsFinite(PortionsPerSecond) || PortionsPerSecond <= 0
-		|| !FMath::IsFinite(TargetContentLevel) || TargetContentLevel < 0) return false;
+		|| !FMath::IsFinite(TargetLevel) || TargetLevel < 0) return false;
 	Manager = APropManager::Get(this); SourceISID = Source; TargetISID = Target;
 	if (!ConnectionsInRange()) { SourceISID = TargetISID = 0; return false; }
 	const auto* TargetData = Manager->FindUniqueData(Target);
@@ -61,7 +68,7 @@ bool UBottleFillingComponent::StartFilling(int32 Source, int32 Target)
 			: (SourceData ? SourceData->EventData.ContentID : 0);
 		if (!Bottle || !Bottle->CanAcceptManufacturingContent(ContentID)) { SourceISID=TargetISID=0; return false; }
 	}
-	if (TargetContentLevel > 0 && (!TargetData || TargetData->EventData.ContentLevel >= TargetContentLevel))
+	if (TargetLevel > 0 && (!TargetData || TargetData->EventData.ContentLevel >= TargetLevel))
 	{ SourceISID = TargetISID = 0; return false; }
 	if (auto* Machine=Cast<AManualColaFillingMachine>(GetOwner()); Machine && bRequireLever && Machine->Production)
 	{
@@ -69,11 +76,11 @@ bool UBottleFillingComponent::StartFilling(int32 Source, int32 Target)
 		auto* Hose=Machine->GetSupplyHoseForPort(PortIndex); auto* Port=Machine->GetReceivingHosePort(PortIndex);
 		const int32 ContentID=Machine->GetSupplyContentID(PortIndex);
 		if (!Hose || !Port) { SourceISID=TargetISID=0; return false; }
-		if (Machine->HosePortContentIDs.IsValidIndex(PortIndex) && Machine->HosePortContentIDs[PortIndex]>0
-			&& Machine->HosePortContentIDs[PortIndex]!=ContentID) { SourceISID=TargetISID=0; return false; }
+		const int32 RequiredID=Machine->GetRequiredHoseContentID(PortIndex);
+		if (RequiredID>0 && RequiredID!=ContentID) { SourceISID=TargetISID=0; return false; }
 		Port->SetFlowRequested(false);
 		if (!Port->ConfigureManagedReceivingProxy(Manager.Get(),Target,ContentID)) { SourceISID=TargetISID=0; return false; }
-		Port->MaximumManagedContentLevel=TargetContentLevel;
+		Port->MaximumManagedContentLevel=TargetLevel;
 		auto* SourcePort=Hose->GetOtherEndpoint(Port);
 		if (!SourcePort) if (auto* Container=Cast<AColaSupplyContainer>(Hose->GetOwner())) SourcePort=Container->SupplyPort;
 		Port->SetFlowRequested(true);
@@ -121,15 +128,16 @@ void UBottleFillingComponent::TickComponent(float Dt, ELevelTick TickType, FActo
 	for (int32 I = 0; bIsFilling && I < 8 && AccumulatedSeconds >= Step; ++I)
 	{
 		AccumulatedSeconds -= Step;
-		if (!FMath::IsFinite(TargetContentLevel) || TargetContentLevel<0) { StopFilling(); break; }
+		const float TargetLevel=GetEffectiveTargetContentLevel();
+		if (!FMath::IsFinite(TargetLevel) || TargetLevel<0) { StopFilling(); break; }
 		if (ActiveReceivingPort.IsValid() && !ActiveHose.IsValid()) { StopFilling(); break; }
 		if (auto* Hose=ActiveHose.Get())
 		{
 			auto* Port=ActiveReceivingPort.Get();
 			if (!Port || !Hose->GetOtherEndpoint(Port) || !Hose->HasValidConnection() || !ConnectionsInRange()) { StopFilling(); break; }
 			const auto* Data=Manager->FindUniqueData(TargetISID);
-			if (!Data || (TargetContentLevel>0 && Data->EventData.ContentLevel>=TargetContentLevel)) { StopFilling(); break; }
-			Port->MaximumManagedContentLevel=TargetContentLevel;
+			if (!Data || (TargetLevel>0 && Data->EventData.ContentLevel>=TargetLevel)) { StopFilling(); break; }
+			Port->MaximumManagedContentLevel=TargetLevel;
 			DeliveredPortionsPerSecond=DeliveredSupplyPressure=0;
 			Hose->TransferForDuration(Step);
 			// Delivery callbacks may launch the bottle or pop this socket. Never resume that fill in the same frame.
@@ -137,8 +145,8 @@ void UBottleFillingComponent::TickComponent(float Dt, ELevelTick TickType, FActo
 			if (Hose->bBurst || !Hose->HasValidConnection()) { StopFilling(); break; }
 			const float Delivered=FMath::Max(0.f,-Hose->GetLastPortFlowUnits(Port));
 			DeliveredPortionsPerSecond=Delivered/Step;
-			if (TargetContentLevel>0)
-				if (const auto* Updated=Manager->FindUniqueData(TargetISID); Updated && Updated->EventData.ContentLevel>=TargetContentLevel)
+			if (TargetLevel>0)
+				if (const auto* Updated=Manager->FindUniqueData(TargetISID); Updated && Updated->EventData.ContentLevel>=TargetLevel)
 				{ StopFilling(); break; }
 			if (Delivered<=0)
 			{
@@ -155,13 +163,13 @@ void UBottleFillingComponent::TickComponent(float Dt, ELevelTick TickType, FActo
 			continue;
 		}
 		float Requested = PortionsPerSecond * Step;
-		if (TargetContentLevel > 0)
+		if (TargetLevel > 0)
 		{
 			const auto* Record = Manager->FindISIDData(TargetISID);
 			const auto* Data = Manager->FindUniqueData(TargetISID);
 			const auto* Product = Record ? Manager->FindProductDefinition(Record->ProductID) : nullptr;
 			if (!Data || !Product) { StopFilling(); break; }
-			Requested = FMath::Min(Requested, FMath::Max(0.f, TargetContentLevel - Data->EventData.ContentLevel) * Product->ConsumableProfile.NumOfPortions);
+			Requested = FMath::Min(Requested, FMath::Max(0.f, TargetLevel - Data->EventData.ContentLevel) * Product->ConsumableProfile.NumOfPortions);
 		}
 		const auto* Before=Manager->FindUniqueData(TargetISID);
 		const float PreviousLevel=Before ? Before->EventData.ContentLevel : 0;

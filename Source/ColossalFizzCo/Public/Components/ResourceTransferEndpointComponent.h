@@ -30,6 +30,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated, Category="Resource Transfer") bool bCanReceive=true;
 	/** Zero permits shared connections. Physical sockets normally use one, including hoses attached at only one end. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated, Category="Resource Transfer", meta=(ClampMin="0")) int32 MaxConnectedHoses=0;
+	/** One-way fittings use their authored supply or receive role, regardless of connector order. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Resource Transfer|Socket") bool bUseFixedHoseDirection=false;
+	/** An empty untyped inlet learns its liquid type from the first delivery. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Resource Transfer|Storage") bool bAcceptAnyContentWhenEmpty=false;
 	/** Use this endpoint's rotation for the attached hose connector mesh. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Resource Transfer|Socket") bool bUseAuthoredHoseConnectorFrame=false;
 	/** An optional class contract for physical connectors at this socket. */
@@ -43,11 +47,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated, Category="Resource Transfer|Flow", meta=(ClampMin="0")) float MaxSupplyUnitsPerSecond=0.f;
 	/** Normal intake rate of an open content socket. Zero leaves it unrestricted. Socket pop limits are independent. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated, Category="Resource Transfer|Flow", meta=(ClampMin="0", DisplayName="Intake Flow Rate Limit")) float MaxReceiveUnitsPerSecond=0.f;
+	/** Intake assist configured by the Flow Controller on its active, receiving-only socket. */
+	float ControllerIntakeSuctionStrength=0.f;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Replicated, Category="Resource Transfer|Flow") float TotalSuppliedUnits=0.f;
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Resource Transfer|Flow", meta=(DisplayName="Set Supply Flow Open")) bool SetSupplyEnabled(bool bEnabled);
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Resource Transfer|Flow", meta=(DisplayName="Set Intake Flow Open")) bool SetFlowRequested(bool bRequested);
 	UFUNCTION(BlueprintPure, Category="Resource Transfer|Flow") bool IsSupplyRequested() const;
 	bool HasConnectedSupplyHose() const;
+	/** Route a local outlet to an existing local inventory on the same actor. */
+	void SetLocalContentSupply(UResourceTransferEndpointComponent* Store);
 	UFUNCTION(BlueprintPure, Category="Resource Transfer|Flow") UHoseTransferComponent* GetReceivingHose() const;
 	/** Only explicit content adapters may bridge local storage and canonical managed bottles. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Replicated, Category="Resource Transfer|Managed Content") bool bAllowManagedContentBridge=false;
@@ -118,6 +126,9 @@ private:
 	bool HasValidStore() const;
 	bool IsIntakeOverloaded(float Pressure,float UnitsPerSecond) const;
 	float GetConnectorOverload(float Pressure,float UnitsPerSecond,bool bOuttake) const;
+	UResourceTransferEndpointComponent* GetLocalContentSupply();
+	const UResourceTransferEndpointComponent* GetLocalContentSupply() const;
+	UPROPERTY(Transient, Replicated) TObjectPtr<UResourceTransferEndpointComponent> LocalContentSupply;
 	UPROPERTY(Replicated) bool bManagedContent=false;
 	UPROPERTY(Replicated) bool bManagedReceivingProxy=false;
 	UPROPERTY(Replicated) TObjectPtr<APropManager> ContentManager;

@@ -6,6 +6,9 @@
 #include "PropGrabInputComponent.generated.h"
 
 class ACharacter;
+class AActivePropActor;
+class AController;
+class APawn;
 class APropManager;
 class UPrimitiveComponent;
 
@@ -37,6 +40,7 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* TickFunction) override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	UPropGrabInputComponent();
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Grab", meta = (ClampMin = "0.01")) float HoldSeconds = .4f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Grab", meta = (ClampMin = "0.01")) float DoubleTapSeconds = .4f;
@@ -50,7 +54,13 @@ public:
 	/** Guards used by the existing owned-character RPC adapters before changing carry references. */
 	UFUNCTION(BlueprintPure, Category = "Grab") bool CanGrabTarget(AActor* Target) const;
 	UFUNCTION(BlueprintPure, Category = "Grab") bool OwnsHeldTarget(AActor* Target) const;
+	bool CanCarryProduct(const APropManager& Manager, int32 ItemID, bool bAllowBatch = true) const;
+	bool UsesBatchActor(const AActor& Actor) const;
+	void RestorePrimaryCarry(const AActor* Removed);
+	void NotifyPrimaryCarryRemoved(const AActor& Actor);
+	static bool CanFillHeldBottle(const APropManager& Manager, int32 BottleID);
 private:
+	friend class FPlayerCarryBatchTest;
 	struct FActorTravel
 	{
 		TWeakObjectPtr<AActor> Actor;
@@ -58,13 +68,26 @@ private:
 		int64 Sequence = 0;
 		bool bPlacing = false;
 		bool bWasSimulating = false;
+		TArray<TWeakObjectPtr<AActor>> IgnoredHeldActors;
 	};
 	bool TryBeginActorTravel(EPropGrabInputPhase Phase, AActor* HeldActor);
+	bool IsSameCarryBatch(const APropManager& Manager, const AActor& HeldActor, int32 ItemID) const;
+	bool ShouldDropBatchedActor(const AActor& Actor) const;
+	bool AddToCarryBatch(ACharacter& Player, AActivePropActor& Actor);
+	void LayoutCarryBatch();
+	void ReleaseCarryBatch();
+	UFUNCTION() void OnCarryControllerChanged(APawn* Pawn, AController* OldController, AController* NewController);
 	bool IsActorInAnotherPlayerHand(const AActor* Actor) const;
+	void ClearTravelCollisionIgnores(const FActorTravel& Movement);
 	void DropTravelActor();
 	void CompleteTravelPickup(ACharacter& Player, AActor& Actor);
 	UFUNCTION(Server, Reliable) void Server_BeginActorTravel(int64 Sequence, int32 ISID, AActor* Actor, FVector_NetQuantize10 HitLocation, bool bPlacing);
 	UFUNCTION(Server, Reliable) void Server_EndActorTravel(int64 Sequence);
+	UFUNCTION(Server, Reliable) void Server_DropBatchedActor(AActor* ExpectedPrimary);
+	UFUNCTION(Client, Reliable) void Client_ClearRemovedCarryActor(AActor* Removed);
+	UFUNCTION() void OnRep_AdditionalHeldActors();
+	UPROPERTY(ReplicatedUsing = OnRep_AdditionalHeldActors) TArray<TObjectPtr<AActivePropActor>> AdditionalHeldActors;
+	TArray<TWeakObjectPtr<AActivePropActor>> ClientIgnoredHeldActors;
 	FPropGrabGesture Gesture;
 	FActorTravel Travel;
 	int64 LocalTravelSequence = 0;

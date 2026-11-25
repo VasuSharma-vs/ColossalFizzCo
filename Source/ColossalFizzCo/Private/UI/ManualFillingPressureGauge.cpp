@@ -39,4 +39,13 @@ public:
 private:
 	TWeakObjectPtr<UManualFillingPressureGauge> Reading;
 };
+
+void UManualFillingPressureGauge::SetReading(float InPressure, float InSafePressure)
+{
+	if (Pressure==InPressure && SafePressure==InSafePressure) return;
+	Pressure=InPressure;
+	SafePressure=InSafePressure;
+	if (const auto Widget=GetCachedWidget()) Widget->Invalidate(EInvalidateWidgetReason::Paint);
+}
+
 TSharedRef<SWidget> UManualFillingPressureGauge::RebuildWidget() { return SNew(SManualFillingPressureGauge).Reading(this); }

@@ -1,6 +1,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Shop/FillingMachineUpgradeTypes.h"
+#include "Shop/FlowControllerUpgradeTypes.h"
+#include "Shop/PlayerUpgradeTypes.h"
 #include "Shop/SharedWalletTypes.h"
 #include "Shop/ShopCheckoutTypes.h"
 #include "Props/LiquidReleaseTypes.h"
@@ -241,6 +244,7 @@ namespace EPropExtendedEventMask
 	constexpr uint8 TemporarySeal = 1 << 4;
 	constexpr uint8 LinkedSupply = 1 << 5;
 	constexpr uint8 ManualEquipment = 1 << 6;
+	constexpr uint8 FillingMachineUpgrades = 1 << 7;
 }
 
 /**
@@ -727,6 +731,8 @@ struct COLOSSALFIZZCO_API FPropEventUpdateData
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") TArray<int32> LoadedCapISIDs;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") TArray<int32> LoadedSealISIDs;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category="Unique Data|Manufacturing") int32 StoredInMachineISID = 0;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category="Unique Data|Manufacturing")
+	FFillingMachineUpgradeState FillingMachineUpgrades;
 
 	/** Normalized fill volume (0.0 = Empty, 1.0 = NormalCapacity, > 1.0 = Overfill; resting BasePressure) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, Category = "Unique Data|Event", meta = (ClampMin = "0.0"))
@@ -1055,6 +1061,7 @@ struct COLOSSALFIZZCO_API FPropEventSyncDelta
 	UPROPERTY() TArray<int32> LoadedCapISIDs;
 	UPROPERTY() TArray<int32> LoadedSealISIDs;
 	UPROPERTY() int32 StoredInMachineISID = 0;
+	UPROPERTY() FFillingMachineUpgradeState FillingMachineUpgrades;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Replication")
 	float ContentLevel = 0.0f;
@@ -2167,6 +2174,17 @@ struct COLOSSALFIZZCO_API FPropWorldSaveData
 
 	UPROPERTY(SaveGame)
 	FShopCheckoutSaveData ShopCheckout;
+
+	/** Persistent level actor paths, with PIE package prefixes removed. */
+	UPROPERTY(SaveGame)
+	TMap<FString, FFlowControllerUpgradeState> FlowControllerUpgrades;
+
+	/** Per-profile upgrade ranks from the same shop save as the shared bank. */
+	UPROPERTY(SaveGame)
+	TMap<FString, FPlayerUpgradeState> PlayerUpgrades;
+
+	UPROPERTY(SaveGame)
+	TArray<FName> PurchasedTableOffers;
 
 	UPROPERTY(SaveGame)
 	TArray<FPropProductDefinition> ProductDefinitions;

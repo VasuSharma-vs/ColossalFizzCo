@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "GameFramework/Actor.h"
+#include "Shop/ColaTableQueueComponent.h"
 #include "ColaTableCustomerComponent.generated.h"
 
 class AAIController;
@@ -14,6 +15,7 @@ class UPropContentDataAsset;
 class UStaticMeshComponent;
 class UWidgetComponent;
 struct FShopProductScanData;
+namespace EPathFollowingRequestResult { enum Type : int; }
 
 namespace ColaCustomerThrow
 {
@@ -51,7 +53,8 @@ enum class EColaTableCustomerState : uint8
 	Drinking,
 	ApproachingBin,
 	ThrowingBottle,
-	PreparingThrow
+	PreparingThrow,
+	WaitingForShop
 };
 
 /** A table visit for a placed AI character. The server owns the bottle, purchase, sips and disposal. */
@@ -137,13 +140,34 @@ private:
 
 	TWeakObjectPtr<ACharacter> Customer;
 	TWeakObjectPtr<AActivePropActor> ClientGrippedBottle;
+	TWeakObjectPtr<UStaticMeshComponent> DefaultTabletop;
 	TWeakObjectPtr<UStaticMeshComponent> Tabletop;
+	TWeakObjectPtr<UColaTableQueueComponent> TableQueue;
+	TArray<FColaServingBottle> ShelfBottles;
+	double NextShelfScan = 0.0;
 	TWeakObjectPtr<AAIController> Controller;
 	FName GripSocket;
 	FVector ApproachTarget = FVector::ZeroVector;
 	FVector LastBottleLocation = FVector::ZeroVector;
 	bool bHasApproachTarget = false;
 	bool bSipTaken = false;
+	TOptional<FVector> TableExit;
+	FVector LastQueueProgressLocation = FVector::ZeroVector;
+	double LastQueueProgressAt = 0.0;
+	double NextQueueMoveAt = 0.0;
+	struct FWalkTarget
+	{
+		FVector Goal;
+		float Acceptance;
+	};
+	TOptional<FWalkTarget> WalkTarget;
+	TOptional<FVector> SidestepGoal;
+	TOptional<FVector> PassBlockerGoal;
+	TOptional<float> SidestepStartYaw;
+	FVector LastWalkProgress = FVector::ZeroVector;
+	double LastWalkProgressAt = 0.0;
+	double SidestepDeadline = 0.0;
+	double NextSidestepAt = 0.0;
 	TOptional<float> WalkSpeedBeforeBottle;
 	double NextActionTime = 0.0;
 
@@ -157,12 +181,18 @@ private:
 	void UpdateClientBottleGrip();
 	void ClearClientBottleGrip();
 	void SyncClientBottleRelease();
-	bool Approach(AAIController& AI, const FBox& Bounds, double Now, const FVector* BottleLocation = nullptr);
+	bool Approach(AAIController& AI, const FBox& Bounds, double Now);
+	bool MoveToQueuePoint(AAIController& AI, const FVector& Goal, double Now, bool& bStalled);
+	EPathFollowingRequestResult::Type RequestWalk(AAIController& AI, const FVector& Goal, float Acceptance, double Now);
+	bool UpdateCollisionRecovery(AAIController& AI, double Now);
+	void UpdateWalkingFacing(float DeltaSeconds) const;
+	void RefreshServingShelf(AAIController& AI, const APropManager& Manager, double Now);
+	void VisitTable(AAIController& AI, double Now, bool bRush);
 	void WalkAround(AAIController& AI, double Now);
 	int32 FindBottle(const APropManager& Manager, FShopProductScanData& OutQuote) const;
 	bool BuyBottle(APropManager& Manager, const FShopProductScanData& Quote);
-	void Drink(APropManager& Manager, AAIController& AI, double Now);
+	void Drink(APropManager& Manager, AAIController& AI, double Now, bool bRecovering);
 	void ThrowBottle(APropManager& Manager, double Now);
 	void TrackThrownBottle(APropManager& Manager, double Now);
-	void Face(FVector Target) const;
+	bool Face(FVector Target, float DeltaSeconds) const;
 };

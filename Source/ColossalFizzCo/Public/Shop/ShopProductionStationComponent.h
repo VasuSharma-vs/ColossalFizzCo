@@ -9,9 +9,11 @@ class USceneComponent;
 class UBottleFillingComponent;
 class APropManager;
 class AActivePropActor;
+class AColaFlowController;
+class APawn;
 
 UENUM(BlueprintType)
-enum class EShopProductionAction : uint8 { Fill, StopFilling, AttachCap, CloseCap, OpenCap, HoldCapRole, RotateCapRole, PressCap, TurnCap, LeaveCapRole, ConnectSupply, AlignBottle, HoldFillingLever, ReleaseFillingLever, ApplyTemporarySeal, SelectContentPort, DisconnectSupply, ResumeFilling };
+enum class EShopProductionAction : uint8 { Fill, StopFilling, AttachCap, CloseCap, OpenCap, HoldCapRole, RotateCapRole, PressCap, TurnCap, LeaveCapRole, ConnectSupply, AlignBottle, HoldFillingLever, ReleaseFillingLever, ApplyTemporarySeal, SelectContentPort, DisconnectSupply, ResumeFilling, FitOrTightenCap };
 
 USTRUCT(BlueprintType)
 struct COLOSSALFIZZCO_API FShopProductionPort
@@ -86,12 +88,18 @@ public:
 	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Station") TObjectPtr<UBoxComponent> CylinderInput;
 	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Station") TObjectPtr<UBoxComponent> CapInput;
 	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Station") TObjectPtr<UBoxComponent> SealInput;
-	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Station|Supply Trays",meta=(ClampMin="1",ClampMax="64")) int32 CapTrayCapacity=4;
-	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Station|Supply Trays",meta=(ClampMin="1",ClampMax="64")) int32 SealTrayCapacity=4;
+	/** Authored fallback for stations without filling machine upgrades. */
+	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Station|Supply Trays",meta=(ClampMin="1",ClampMax="100",EditCondition="!bManualLeverMode",EditConditionHides)) int32 CapTrayCapacity=4;
+	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Station|Supply Trays",meta=(ClampMin="1",ClampMax="100",EditCondition="!bManualLeverMode",EditConditionHides)) int32 SealTrayCapacity=4;
+	UFUNCTION(BlueprintPure, Category="Station|Supply Trays") int32 GetCapTrayCapacity() const;
+	UFUNCTION(BlueprintPure, Category="Station|Supply Trays") int32 GetSealTrayCapacity() const;
 	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Station") TObjectPtr<USceneComponent> SupplyOutput;
 	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Station") TObjectPtr<UBottleFillingComponent> Filler;
 	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Station") bool bOffersSupplies=true;
 	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Station|Manual Filling") bool bManualLeverMode=false;
+	/** Spend a stocked temporary seal on lever release when bottle pressure is still unsafe. */
+	UPROPERTY(EditAnywhere,BlueprintReadWrite,Replicated,Category="Station|Manual Filling")
+	bool bAutoApplySealOnRelease=true;
 	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Station|Manual Filling") bool bAllowSoloCap=false;
 	UPROPERTY(EditAnywhere,BlueprintReadWrite,Category="Station|Manual Filling") TObjectPtr<USceneComponent> BottleHolder;
 	/** Legacy serialized settings retained for old assets. Cola|Manufacturing settings on the bottle now own these policies. */
@@ -112,6 +120,7 @@ public:
 	void ResetEquipmentSession();
 	void ReleaseSeatedBottle();
 	bool IsLeverHoldingBottle(int32 BottleISID) const;
+	bool StopsFlowAtBottleCapacity() const;
 	void EndManualLever();
 	bool UseTemporarySeal(int32 BottleISID);
 	int32 GetSupportedContentCount() const;
@@ -136,7 +145,20 @@ public:
 	void UpdateManualCapping(float DeltaSeconds);
 	bool HasSufficientCapHold(int32 BottleISID) const;
 private:
+	friend class AManualColaFillingMachine;
 	friend class ASocketColaFillingMachine;
+	friend class AColaFlowController;
+	TWeakObjectPtr<AColaFlowController> FlowLeverController;
+	bool bFlowControllerValveClosed=false;
+	int32 FlowControllerCompletedBottleISID=0;
+	bool BeginFlowControllerHold(AColaFlowController& Controller, APawn& Player);
+	bool IsFlowControllerBottleFull() const;
+	bool IsFlowControllerValveOpen(const AColaFlowController& Controller) const;
+	void CloseFlowControllerValve(AColaFlowController& Controller);
+	bool TryReleaseCompletedFlowControllerBottle(AColaFlowController& Controller);
+	void SetFlowControllerPaused(AColaFlowController& Controller, bool bPaused);
+	void ReleaseFlowControllerHold(AColaFlowController& Controller);
+	EShopCheckoutResult BeginManualLeverHold(int32 BottleID,AActor* Player,APropManager& Manager);
 	FTimerHandle RefreshTimer;
 	FGuid LiquidReleaseEpisode;
 	double LastManualUpdate=-1, LastHoldingPress=-1, LastRotationTurn=-1;

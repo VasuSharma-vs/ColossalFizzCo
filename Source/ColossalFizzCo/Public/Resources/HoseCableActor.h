@@ -61,6 +61,8 @@ public:
     int32 GetReceivingConnectorIndex() const;
     bool ConnectSupplyAtConnector(UResourceTransferEndpointComponent* Port, int32 PointIndex);
     bool ConnectReceivingAtConnector(UResourceTransferEndpointComponent* Port, int32 PointIndex);
+    /** Rebind a routed content hose after a selector changes while leaving both fittings plugged in. */
+    bool RefreshSourceContent();
     UStaticMeshComponent* GetConnectorMesh(int32 PointIndex) const;
     bool GetDischargeTransform(EHoseDischargePoint Point,FTransform& Transform) const;
     bool CanGrabConnector(int32 PointIndex) const;
@@ -97,6 +99,7 @@ private:
     void UpdatePressureVisuals();
     void UpdateDischargeJet();
     void ApplyDischargeRecoil(float DeltaSeconds);
+    bool IsUnassignedContentSource(const UResourceTransferEndpointComponent* Port) const;
     bool CanAttach(UResourceTransferEndpointComponent* Port, bool bSupply, int32 ExpectedResourceID, bool bWaitForSource) const;
     bool ConnectPortAtConnector(UResourceTransferEndpointComponent* Port, int32 PointIndex, bool bSupply,
         bool bAdoptReceiverResource, bool bWaitForSource = false);

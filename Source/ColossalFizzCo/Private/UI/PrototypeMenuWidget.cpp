@@ -1,6 +1,8 @@
 #include "UI/PrototypeMenuWidget.h"
 #include "UI/PrototypeMenuSubsystem.h"
 #include "UI/PrototypeMenuGameMode.h"
+#include "UI/PrototypeMenuStyle.h"
+#include "UI/PrototypeSettingsWidget.h"
 #include "CrossplaySubsystem.h"
 #include "CrossplaySettings.h"
 #include "Blueprint/WidgetTree.h"
@@ -16,29 +18,19 @@
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
+#include "Components/WidgetSwitcher.h"
 #include "Engine/GameInstance.h"
 #include "Engine/LocalPlayer.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Styling/CoreStyle.h"
-#include "Brushes/SlateRoundedBoxBrush.h"
 #include "InputCoreTypes.h"
 
 namespace
 {
- const FLinearColor Cream(.94f,.91f,.82f),Amber(1.f,.53f,.12f),Muted(.59f,.65f,.69f),Ink(.025f,.038f,.046f);
  void LabelButton(UButton* Button,const FString& Label)
  {if(Button)if(auto* Text=Cast<UTextBlock>(Button->GetContent()))Text->SetText(FText::FromString(Label));}
- void StyleButton(UButton* Button,bool Accent)
- {
-  FButtonStyle Style=Button->GetStyle();
-  Style.SetNormal(FSlateRoundedBoxBrush(Accent ? Amber : FLinearColor(.10f,.15f,.18f),6.f));
-  Style.SetHovered(FSlateRoundedBoxBrush(Accent ? FLinearColor(1,.67f,.27f) : FLinearColor(.17f,.25f,.29f),6.f));
-  Style.SetPressed(FSlateRoundedBoxBrush(Accent ? FLinearColor(.75f,.35f,.06f) : FLinearColor(.07f,.10f,.12f),6.f));
-  Style.SetDisabled(FSlateRoundedBoxBrush(FLinearColor(.08f,.10f,.11f),6.f));
-  Button->SetStyle(Style);
- }
 }
 void UPrototypeMenuRow::Choose(){if(auto* Owner=Menu.Get())Owner->ChooseRow(Index,bFriend);}
 UButton* UPrototypeMenuWidget::FindAction(FName Name) const
@@ -47,14 +39,14 @@ UTextBlock* UPrototypeMenuWidget::Text(UPanelWidget* Parent,const FString& Value
 {
  auto* T=WidgetTree->ConstructWidget<UTextBlock>();T->SetText(FText::FromString(Value));T->SetAutoWrapText(true);
  T->SetFont(FCoreStyle::GetDefaultFontStyle(Size>=24 ? TEXT("Bold") : TEXT("Regular"),Size));
- T->SetColorAndOpacity(Accent ? Amber : Cream);Parent->AddChild(T);
+ T->SetColorAndOpacity(Accent ? PrototypeMenuStyle::Amber : PrototypeMenuStyle::Cream);Parent->AddChild(T);
  if(auto* VerticalSlot=Cast<UVerticalBoxSlot>(T->Slot))VerticalSlot->SetPadding(FMargin(0,3));
  if(auto* ButtonSlot=Cast<UButtonSlot>(T->Slot))ButtonSlot->SetPadding(FMargin(16,9));return T;
 }
 UButton* UPrototypeMenuWidget::Button(UVerticalBox* Parent,FName Action,const FString& Label,bool Accent)
 {
- auto* B=WidgetTree->ConstructWidget<UButton>();StyleButton(B,Accent);
- auto* T=Text(B,Label,18);T->SetColorAndOpacity(Accent ? Ink : Cream);T->SetJustification(ETextJustify::Center);
+ auto* B=WidgetTree->ConstructWidget<UButton>();PrototypeMenuStyle::StyleButton(B,Accent);
+ auto* T=Text(B,Label,18);T->SetColorAndOpacity(Accent ? PrototypeMenuStyle::Ink : PrototypeMenuStyle::Cream);T->SetJustification(ETextJustify::Center);
  auto* ButtonLayout=Parent->AddChildToVerticalBox(B);ButtonLayout->SetPadding(FMargin(0,4));
  FScriptDelegate Click;Click.BindUFunction(this,Action);B->OnClicked.Add(Click);Actions.Add(Action,B);return B;
 }
@@ -63,18 +55,19 @@ TSharedRef<SWidget> UPrototypeMenuWidget::RebuildWidget()
  SetIsFocusable(true);if(!WidgetTree)WidgetTree=NewObject<UWidgetTree>(this);
  if(!WidgetTree->RootWidget)
  {
-  auto* Back=WidgetTree->ConstructWidget<UBorder>();Back->SetBrushColor(Ink);Back->SetPadding(FMargin(24));WidgetTree->RootWidget=Back;
+  auto* Back=WidgetTree->ConstructWidget<UBorder>();Back->SetBrushColor(PrototypeMenuStyle::Ink);Back->SetPadding(FMargin(24));WidgetTree->RootWidget=Back;
   auto* Fit=WidgetTree->ConstructWidget<UScaleBox>();Fit->SetStretch(EStretch::ScaleToFit);Fit->SetStretchDirection(EStretchDirection::DownOnly);Back->AddChild(Fit);
   auto* Size=WidgetTree->ConstructWidget<USizeBox>();Size->SetWidthOverride(1080);Size->SetHeightOverride(620);Fit->AddChild(Size);
   auto* Card=WidgetTree->ConstructWidget<UBorder>();Card->SetBrushColor(FLinearColor(.045f,.065f,.075f));Card->SetPadding(FMargin(30));Size->AddChild(Card);
-  auto* Layout=WidgetTree->ConstructWidget<UVerticalBox>();Card->AddChild(Layout);
+  MenuPages=WidgetTree->ConstructWidget<UWidgetSwitcher>(UWidgetSwitcher::StaticClass(),TEXT("PrototypeMenuPages"));Card->AddChild(MenuPages);
+  auto* Layout=WidgetTree->ConstructWidget<UVerticalBox>();MenuPages->AddChild(Layout);
   Text(Layout,TEXT("COLOSSAL FIZZ CO"),36,true);
-  Text(Layout,TEXT("NORMAL COLA PROTOTYPE  /  TWO-PLAYER CO-OP"),15)->SetColorAndOpacity(Muted);
+  Text(Layout,TEXT("NORMAL COLA PROTOTYPE  /  TWO-PLAYER CO-OP"),15)->SetColorAndOpacity(PrototypeMenuStyle::Muted);
   AccountText=Text(Layout,TEXT(""),17);
   StatusText=Text(Layout,TEXT("Choose how to open your shop."),17);
   InvitationPanel=WidgetTree->ConstructWidget<UVerticalBox>();Layout->AddChild(InvitationPanel);
   Body=WidgetTree->ConstructWidget<UVerticalBox>();auto* BodySlot=Layout->AddChildToVerticalBox(Body);BodySlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));BodySlot->SetPadding(FMargin(0,14,0,10));
-  Text(Layout,TEXT("Lemonade  /  Mint  /  Sweet  /  Spicy  /  Zero Calories"),14)->SetColorAndOpacity(Muted);
+  Text(Layout,TEXT("Lemonade  /  Mint  /  Sweet  /  Spicy  /  Zero Calories"),14)->SetColorAndOpacity(PrototypeMenuStyle::Muted);
  }
  return Super::RebuildWidget();
 }
@@ -94,6 +87,7 @@ void UPrototypeMenuWidget::NativeConstruct()
 }
 void UPrototypeMenuWidget::NativeDestruct()
 {
+ if(SettingsPanel)SettingsPanel->Exit();
  if(Service){Service->OnStatus.RemoveAll(this);Service->OnOperation.RemoveAll(this);Service->OnLobbies.RemoveAll(this);Service->OnFriends.RemoveAll(this);Service->OnMembersChanged.RemoveAll(this);Service->OnInvite.RemoveAll(this);}
  Super::NativeDestruct();
 }
@@ -130,9 +124,9 @@ void UPrototypeMenuWidget::Render()
    Text(Left,TEXT("Fill and cap giant cola bottles, stock your shelves and serve your customers. Open the shop solo or invite a teammate."),20);
    Text(Right,TEXT("Open your shop"),26);
    Button(Right,TEXT("Login"),TEXT("Sign in with Epic Games"),true);
-   Button(Right,TEXT("Offline"),TEXT("Play solo offline"));Button(Right,TEXT("Quit"),TEXT("Quit game"));
+   Button(Right,TEXT("Offline"),TEXT("Play solo offline"));Button(Right,TEXT("Settings"),TEXT("Settings"));Button(Right,TEXT("Quit"),TEXT("Quit game"));
    if(!bOnlineAvailable)
-    Text(Right,TEXT("Online play is unavailable in this launch. Use the Epic prototype launcher to sign in."),16)->SetColorAndOpacity(Muted);
+    Text(Right,TEXT("Online play is unavailable in this launch. Use the Epic prototype launcher to sign in."),16)->SetColorAndOpacity(PrototypeMenuStyle::Muted);
   }
   else if(View==TEXT("Browse"))
   {
@@ -141,7 +135,7 @@ void UPrototypeMenuWidget::Render()
    auto InputStyle=NameInput->GetWidgetStyle();InputStyle.SetFont(FCoreStyle::GetDefaultFontStyle(TEXT("Regular"),18));NameInput->SetWidgetStyle(InputStyle);
    Left->AddChild(NameInput);NameInput->OnTextChanged.AddDynamic(this,&UPrototypeMenuWidget::NameChanged);
    PrivateInput=WidgetTree->ConstructWidget<UCheckBox>();PrivateInput->SetIsChecked(bPrivate);Text(PrivateInput,TEXT("Invite-only session"),18);Left->AddChild(PrivateInput);PrivateInput->OnCheckStateChanged.AddDynamic(this,&UPrototypeMenuWidget::PrivacyChanged);
-   Button(Left,TEXT("Host"),TEXT("Host session"),true);Button(Left,TEXT("Offline"),TEXT("Play solo offline"));Button(Left,TEXT("Logout"),TEXT("Sign out"));Button(Left,TEXT("Quit"),TEXT("Quit game"));
+   Button(Left,TEXT("Host"),TEXT("Host session"),true);Button(Left,TEXT("Offline"),TEXT("Play solo offline"));Button(Left,TEXT("Settings"),TEXT("Settings"));Button(Left,TEXT("Logout"),TEXT("Sign out"));Button(Left,TEXT("Quit"),TEXT("Quit game"));
    Text(Right,TEXT("Join a shop"),26);Button(Right,TEXT("Find"),TEXT("Refresh public sessions"));
    auto* Scroll=WidgetTree->ConstructWidget<UScrollBox>();Right->AddChildToVerticalBox(Scroll)->SetSize(FSlateChildSize(ESlateSizeRule::Fill));SessionRows=WidgetTree->ConstructWidget<UVerticalBox>();Scroll->AddChild(SessionRows);
   }
@@ -150,12 +144,12 @@ void UPrototypeMenuWidget::Render()
    Text(Left,View==TEXT("Game") ? TEXT("Your shop session") : TEXT("Your team"),26);
    MembersText=Text(Left,TEXT("Connecting to the session..."),20);
    if(View==TEXT("Lobby"))
-   {Button(Left,TEXT("Ready"),TEXT("Ready"));Button(Left,TEXT("Start"),TEXT("Start prototype"),true);Text(Left,TEXT("All connected players must be ready. The host starts the shop."),16)->SetColorAndOpacity(Muted);}
+   {Button(Left,TEXT("Ready"),TEXT("Ready"));Button(Left,TEXT("Start"),TEXT("Start prototype"),true);Text(Left,TEXT("All connected players must be ready. The host starts the shop."),16)->SetColorAndOpacity(PrototypeMenuStyle::Muted);}
    else Button(Left,TEXT("Resume"),TEXT("Resume shop"),true);
-   Button(Left,TEXT("Microphone"),TEXT("Microphone: muted"));Button(Left,TEXT("Leave"),TEXT("Leave to main menu"));
+   Button(Left,TEXT("Settings"),TEXT("Settings"));Button(Left,TEXT("Microphone"),TEXT("Microphone: muted"));Button(Left,TEXT("Leave"),TEXT("Leave to main menu"));
    Text(Right,TEXT("Invite a teammate"),26);Button(Right,TEXT("Friends"),TEXT("Refresh Epic friends"));
    auto* Scroll=WidgetTree->ConstructWidget<UScrollBox>();Right->AddChildToVerticalBox(Scroll)->SetSize(FSlateChildSize(ESlateSizeRule::Fill));FriendRows=WidgetTree->ConstructWidget<UVerticalBox>();Scroll->AddChild(FriendRows);
-   Text(Right,TEXT("Friends must have access to this prototype. Sessions support two players."),15)->SetColorAndOpacity(Muted);
+   Text(Right,TEXT("Friends must have access to this prototype. Sessions support two players."),15)->SetColorAndOpacity(PrototypeMenuStyle::Muted);
   }
   if(Service){Lobbies(Service->Lobbies);FriendList(Service->Friends);Members(Service->GetMembers());}
   RefreshInvitation();
@@ -208,6 +202,29 @@ void UPrototypeMenuWidget::Friends(){Begin(TEXT("Friends"),[&]{return Service->R
 void UPrototypeMenuWidget::Accept(){Begin(TEXT("Join"),[&]{return Service->AcceptInvite();});}
 void UPrototypeMenuWidget::Microphone()
  {if(Service && Service->SetMicrophoneMuted(!Service->IsMicrophoneMuted()))UpdateEnabled();else if(StatusText)StatusText->SetText(FText::FromString(TEXT("Microphone unavailable. Check your audio device and microphone permission.")));}
+void UPrototypeMenuWidget::Settings()
+{
+ if(!SettingsPanel)
+ {
+  SettingsPanel=CreateWidget<UPrototypeSettingsWidget>(this,UPrototypeSettingsWidget::StaticClass(),TEXT("PrototypeSettingsPanel"));
+  if(!SettingsPanel)return;
+  SettingsPanel->OnBack.BindUObject(this,&UPrototypeMenuWidget::CloseSettings);
+  MenuPages->AddChild(SettingsPanel);
+ }
+ MenuPages->SetActiveWidget(SettingsPanel);
+ SettingsPanel->Enter();
+}
+void UPrototypeMenuWidget::CloseSettings()
+{
+ MenuPages->SetActiveWidgetIndex(0);
+ if(auto* Action=FindAction(TEXT("Settings"));Action && Action->GetIsEnabled())Action->SetKeyboardFocus();
+ else SetKeyboardFocus();
+}
+UUserWidget* UPrototypeMenuWidget::GetMenuFocusWidget()
+{
+ if(SettingsPanel && MenuPages->GetActiveWidget()==SettingsPanel)return SettingsPanel;
+ return this;
+}
 void UPrototypeMenuWidget::Resume(){if(MenuOwner && IsGameplay())MenuOwner->CloseMenu();}
 void UPrototypeMenuWidget::Quit(){UKismetSystemLibrary::QuitGame(this,GetOwningPlayer(),EQuitPreference::Quit,false);}
 void UPrototypeMenuWidget::NameChanged(const FText& Value){LobbyTitle=Value.ToString().Left(64);if(NameInput && Value.ToString().Len()>64)NameInput->SetText(FText::FromString(LobbyTitle));UpdateEnabled();}
@@ -233,21 +250,21 @@ void UPrototypeMenuWidget::Operation(FName Op,bool Success)
 void UPrototypeMenuWidget::Lobbies(const TArray<FCrossplayLobby>& Values)
 {
  if(!SessionRows)return;SessionRows->ClearChildren();Rows.RemoveAll([](const auto& R){return !R || !R->bFriend;});
- if(Values.IsEmpty())Text(SessionRows,TEXT("No sessions shown. Refresh to find public shops."),17)->SetColorAndOpacity(Muted);
+ if(Values.IsEmpty())Text(SessionRows,TEXT("No sessions shown. Refresh to find public shops."),17)->SetColorAndOpacity(PrototypeMenuStyle::Muted);
  for(int32 I=0;I<Values.Num();++I)
  {
   const auto& Item=Values[I];auto* Row=WidgetTree->ConstructWidget<UPrototypeMenuRow>();Row->Menu=this;Row->Index=I;Row->bAvailable=Item.Players<Item.Capacity;
-  StyleButton(Row,false);Text(Row,FString::Printf(TEXT("%s\n%d / %d players   -   %s"),*Item.Name,Item.Players,Item.Capacity,Row->bAvailable ? TEXT("Join") : TEXT("Full")),17);Row->OnClicked.AddDynamic(Row,&UPrototypeMenuRow::Choose);SessionRows->AddChildToVerticalBox(Row)->SetPadding(FMargin(0,4));Rows.Add(Row);
+  PrototypeMenuStyle::StyleButton(Row,false);Text(Row,FString::Printf(TEXT("%s\n%d / %d players   -   %s"),*Item.Name,Item.Players,Item.Capacity,Row->bAvailable ? TEXT("Join") : TEXT("Full")),17);Row->OnClicked.AddDynamic(Row,&UPrototypeMenuRow::Choose);SessionRows->AddChildToVerticalBox(Row)->SetPadding(FMargin(0,4));Rows.Add(Row);
  }
  UpdateEnabled();
 }
 void UPrototypeMenuWidget::FriendList(const TArray<FCrossplayFriend>& Values)
 {
  if(!FriendRows)return;FriendRows->ClearChildren();Rows.RemoveAll([](const auto& R){return !R || R->bFriend;});
- if(Values.IsEmpty())Text(FriendRows,TEXT("No friends listed. Refresh your Epic friends, or add your teammate in Epic first."),17)->SetColorAndOpacity(Muted);
+ if(Values.IsEmpty())Text(FriendRows,TEXT("No friends listed. Refresh your Epic friends, or add your teammate in Epic first."),17)->SetColorAndOpacity(PrototypeMenuStyle::Muted);
  for(int32 I=0;I<Values.Num();++I)
  {
-  auto* Row=WidgetTree->ConstructWidget<UPrototypeMenuRow>();Row->Menu=this;Row->Index=I;Row->bFriend=true;StyleButton(Row,false);
+  auto* Row=WidgetTree->ConstructWidget<UPrototypeMenuRow>();Row->Menu=this;Row->Index=I;Row->bFriend=true;PrototypeMenuStyle::StyleButton(Row,false);
   Text(Row,Values[I].Name+TEXT("   -   Invite"),17);Row->OnClicked.AddDynamic(Row,&UPrototypeMenuRow::Choose);FriendRows->AddChildToVerticalBox(Row)->SetPadding(FMargin(0,4));Rows.Add(Row);
  }
  UpdateEnabled();
@@ -271,6 +288,14 @@ void UPrototypeMenuWidget::RefreshInvitation()
 void UPrototypeMenuWidget::Invitation(const FString&){RefreshInvitation();}
 FReply UPrototypeMenuWidget::NativeOnKeyDown(const FGeometry& Geometry,const FKeyEvent& Event)
 {
- if(Event.GetKey()==EKeys::Escape){Resume();return FReply::Handled();}
+ if(Event.GetKey()==EKeys::Escape)
+ {
+  if(!Event.IsRepeat())
+  {
+   if(GetMenuFocusWidget()==SettingsPanel.Get())SettingsPanel->Back();
+   else Resume();
+  }
+  return FReply::Handled();
+ }
  return Super::NativeOnKeyDown(Geometry,Event);
 }

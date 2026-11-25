@@ -17,6 +17,7 @@
 #include "Components/ResourceTransferEndpointComponent.h"
 #include "Components/TextBlock.h"
 #include "Shop/ManualColaFillingMachine.h"
+#include "Shop/FillingMachineUpgradeTypes.h"
 #include "Shop/SocketColaFillingMachine.h"
 #include "Shop/ColaSupplyContainer.h"
 #include "Shop/ShopSupplyDepot.h"
@@ -30,6 +31,7 @@
 #include "Shop/ShopCheckoutComponent.h"
 #include "Shop/SharedTeamWalletComponent.h"
 #include "UI/ShopTerminalWidget.h"
+#include "UI/ManualFillingPressureGauge.h"
 #include "Shop/ShopCustomerFlow.h"
 #include "InputCoreTypes.h"
 #include "Kismet/GameplayStatics.h"
@@ -89,12 +91,29 @@ bool FManualColaFillingLoopTest::RunTest(const FString& Parameters)
 		if (Def->SourceDataAsset==MachineProduct && Manager->GetTransform(Pair.Key).GetLocation().Equals(PlacedTransform.GetLocation(),1)) PlacedID=Pair.Key;
 	auto* Starter=Manager->GetActiveActorFromISID(PlacedID);
 	if (!TestNotNull(TEXT("Starter machine receives an active managed inventory identity"),Starter)) return false;
+	auto* StarterMachine=Cast<AManualColaFillingMachine>(Starter);
+	if (!TestNotNull(TEXT("The placed stand keeps its filling machine class"),StarterMachine)) return false;
+	TestTrue(TEXT("The saved filling table defaults to a Flow Controller feed"),StarterMachine->bUseFlowController);
+	TestNull(TEXT("The filling table Blueprint has no legacy supply box"),StarterMachine->GetDefaultSubobjectByName(TEXT("SupplyPort")));
+	TestTrue(TEXT("The placed stand has a single hose socket"),StarterMachine->GetHoseSocket(0) && !StarterMachine->GetHoseSocket(1));
+	TestEqual(TEXT("The feed attaches directly to the filling table"),StarterMachine->GetHoseSocket(0),StarterMachine->FlowControllerInlet.Get());
+	TestEqual(TEXT("A new machine starts with one cap slot"),StarterMachine->Production->GetCapTrayCapacity(),1);
+	TestEqual(TEXT("A new machine starts with one seal slot"),StarterMachine->Production->GetSealTrayCapacity(),1);
 	TestEqual(TEXT("Level placement registers the stand at rest"),Starter->State,EPropState::AtRest);
 	TestFalse(TEXT("Level placement starts with stand physics off"),Starter->PropMesh->IsSimulatingPhysics());
 	for (int32 Step=0; Step<10; ++Step) World->Tick(LEVELTICK_All,.05f);
+	TestFalse(TEXT("The old selector dial stays hidden on the active stand"),StarterMachine->ContentSelectorDial->IsVisible());
+	const auto* StarterLayout=Cast<ASocketColaFillingMachine>(StarterMachine);
+	TestTrue(TEXT("The old housing is hidden and has no collision on the active stand"),
+		StarterLayout && !StarterLayout->FillingController->IsVisible()
+		&& StarterLayout->FillingController->GetCollisionEnabled()==ECollisionEnabled::NoCollision);
 	TestTrue(TEXT("The running stand preserves its level location and rotation"),Starter->GetActorTransform().Equals(PlacedTransform,0.01));
 	TArray<int32> MachineIDs;
-	if (!TestEqual(TEXT("Multiple manual machines can be purchased in one transaction"),Manager->ShopSupplies->Purchase(FGuid::NewGuid(),TEXT("ManualFillingMachine"),2,FTransform(FVector(0,0,1000)),MachineIDs),EShopPurchaseResult::Success)) return false;
+	{
+		auto* Defaults=MachineProduct->CustomActiveActorClass->GetDefaultObject<AManualColaFillingMachine>();
+		TGuardValue<bool> LegacyLayout(Defaults->bUseFlowController,false);
+		if (!TestEqual(TEXT("Multiple manual machines can be purchased in one transaction"),Manager->ShopSupplies->Purchase(FGuid::NewGuid(),TEXT("ManualFillingMachine"),2,FTransform(FVector(0,0,1000)),MachineIDs),EShopPurchaseResult::Success)) return false;
+	}
 	if (!TestEqual(TEXT("Two distinct managed machine identities delivered"),MachineIDs.Num(),2)) return false;
 	TestEqual(TEXT("Only the catalog machine price is charged"),Manager->SharedWallet->GetWalletState().BalanceCents,int64(20000)-2*MachineOffer->UnitCostCents);
 	auto* Machine=Cast<AManualColaFillingMachine>(Manager->GetActiveActorFromISID(MachineIDs[0]));
@@ -102,9 +121,9 @@ bool FManualColaFillingLoopTest::RunTest(const FString& Parameters)
 	if (!TestTrue(TEXT("Purchased machines use the native equipment actor"),Machine && Second)) return false;
 	auto* Layout = Cast<ASocketColaFillingMachine>(Machine);
 	if (!TestNotNull(TEXT("The catalog Blueprint uses the sample component hierarchy"), Layout)) return false;
-	TestTrue(TEXT("The Blueprint uses four editable Hose Socket components"), Machine->HoseSockets.Num()==4
+	TestTrue(TEXT("The legacy layout provides four hose sockets"), Machine->HoseSockets.Num()==4
 		&& !Machine->HoseSockets.ContainsByPredicate([&](const auto& Socket) { return !IsValid(Socket)
-			|| Socket->CreationMethod!=EComponentCreationMethod::SimpleConstructionScript || Socket->GetAttachParent()!=Machine->HoseConnections; }));
+			|| Socket->GetAttachParent()!=Machine->HoseConnections; }));
 	for (auto* M:{Machine,Second}) M->PropMesh->SetSimulatePhysics(false);
 	Manager->InitializeInstanceTransform(MachineIDs[0],FTransform(FVector(0,0,150)));
 	Manager->InitializeInstanceTransform(MachineIDs[1],FTransform(FVector(0,1000,150)));
@@ -182,7 +201,7 @@ bool FManualColaFillingLoopTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Connected nozzle matches socket position and orientation"),Container->SupplyNozzle->GetComponentLocation().Equals(Machine->GetHosePortTransform(0).GetLocation(),.01f) && Container->SupplyNozzle->GetComponentQuat().Equals(Machine->GetHosePortTransform(0).GetRotation(),.001f));
 	TestEqual(TEXT("One physical nozzle cannot supply two machines"),Second->Production->ExecuteForPlayer(Second->Production->View.SessionID,EShopProductionAction::ConnectSupply,0,Source,Partner->GetOwner()),EShopCheckoutResult::Unavailable);
 	TestTrue(TEXT("Receiving sockets are mounted on the separate filling controller"),
-		Machine->SupplyInputVolume->GetAttachParent() == Layout->FillingController);
+		Machine->HoseConnections->GetAttachParent() == Layout->FillingController);
 	Solo->GetOwner()->SetActorLocation(FVector(0,-120,220));
 
 	const FName BeginEvent(TEXT("On Intraction Begain")), EndEvent(TEXT("On Intraction  End"));
@@ -278,6 +297,13 @@ bool FManualColaFillingLoopTest::RunTest(const FString& Parameters)
 	FinishInputPlacement();
 	TestTrue(TEXT("Interacting with the seal tray registers the held seal"),!HeldSeal->bIsHeld && Station->View.SealTrayCount==1
 		&& HeldSeal->GetRootComponent()->GetAttachParent()==Station->SealInput);
+	FPropEventSyncDelta TrayUpgrades;
+	TrayUpgrades.ExtendedDirtyMask=EPropExtendedEventMask::FillingMachineUpgrades;
+	TrayUpgrades.FillingMachineUpgrades.SetRank(EFillingMachineUpgradeType::CapTray,3);
+	TrayUpgrades.FillingMachineUpgrades.SetRank(EFillingMachineUpgradeType::SealTray,3);
+	if (!TestTrue(TEXT("The physical tray fixture has four upgraded slots per tray"),
+		Manager->SubmitInstanceEventUpdate(Machine->ISID,TrayUpgrades)
+		&& Station->GetCapTrayCapacity()==4 && Station->GetSealTrayCapacity()==4)) return false;
 	TArray<int32> Caps,Seals;
 	for (int32 I=0;I<4;++I)
 	{
@@ -398,7 +424,7 @@ bool FManualColaFillingLoopTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Trace supplies authored nozzle position and rotation"),PortIndex==6 && ReportedMount.Equals(Mount));
 	TestEqual(TEXT("The hose socket volume uses trace-only collision"),Ports->GetHoseSocket(6)->GetTraceVolume()->GetCollisionEnabled(),ECollisionEnabled::QueryOnly);
 	const FVector BeforeMovingVolume=Ports->GetHosePortTransform(6).GetLocation();
-	Ports->SupplyInputVolume->AddRelativeLocation(FVector(30,20,10));
+	Ports->HoseConnections->AddRelativeLocation(FVector(30,20,10));
 	TestTrue(TEXT("Moving supply volume moves its nozzle sockets"),Ports->GetHosePortTransform(6).GetLocation().Equals(BeforeMovingVolume+FVector(30,20,10),.01f));
 	TestTrue(TEXT("All receiving volumes are exposed native components"),Machine->BottleInputVolume==Station->BottleInput && Machine->CapInputVolume==Station->CapInput && Machine->SealInputVolume==Station->SealInput);
 	Carrier->SetActorLocation(Station->BottleInput->GetComponentLocation()+FVector(0,-165,40));
@@ -469,8 +495,8 @@ bool FManualColaFillingLoopTest::RunTest(const FString& Parameters)
 	Action(EShopProductionAction::ReleaseFillingLever,Safe);
 	TestFalse(TEXT("Safe release uses no seal"),Manager->FindUniqueData(Safe)->EventData.bTemporarySealUsed);
 	const int32 CapID=Station->View.Caps[0].ISID;
-	TestEqual(TEXT("Cap comes from physical tray"),Action(EShopProductionAction::AttachCap,Safe,CapID),EShopCheckoutResult::Success);
-	TestEqual(TEXT("First cap turn succeeds"),Action(EShopProductionAction::TurnCap,Safe),EShopCheckoutResult::Success);
+	TestEqual(TEXT("Cap key fits a cap from the physical tray"),Action(EShopProductionAction::FitOrTightenCap,Safe),EShopCheckoutResult::Success);
+	TestEqual(TEXT("Next cap key press turns the fitted cap"),Action(EShopProductionAction::FitOrTightenCap,Safe),EShopCheckoutResult::Success);
 	Station->RefreshInputs();
 	Widget->RefreshProduction(Station);
 	const float PartlyTight=Manager->FindUniqueData(Safe)->EventData.CapSealed;
@@ -479,7 +505,7 @@ bool FManualColaFillingLoopTest::RunTest(const FString& Parameters)
 		&& Widget->CapTightnessReadout->GetText().ToString().Contains(FString::Printf(TEXT("%d%% TIGHT"),FMath::RoundToInt(PartlyTight*100)))
 		&& FMath::IsNearlyEqual(Widget->CapTightnessProgress->GetPercent(),PartlyTight));
 	Tick(.1f);
-	for (int32 I=0;I<20 && Manager->FindUniqueData(Safe)->EventData.CapSealed<1;++I) { Action(EShopProductionAction::TurnCap,Safe); Tick(.1f); }
+	for (int32 I=0;I<20 && Manager->FindUniqueData(Safe)->EventData.CapSealed<1;++I) { Action(EShopProductionAction::FitOrTightenCap,Safe); Tick(.1f); }
 	TestTrue(TEXT("Cap identity is retained in finished sealed bottle"),Manager->FindUniqueData(Safe)->EventData.AttachedCapISID==CapID && Manager->FindUniqueData(Safe)->EventData.CapSealed>=1);
 	Widget->RefreshProduction(Station);
 	TestTrue(TEXT("Corner HUD shows the fully tightened cap"),
@@ -488,12 +514,69 @@ bool FManualColaFillingLoopTest::RunTest(const FString& Parameters)
 		&& Widget->CapTightnessProgress->GetPercent()==1.f);
 	TestEqual(TEXT("Using cap removes one tray item"),Station->View.CapTrayCount,3);
 	TestEqual(TEXT("Magazine returns to trace-only once a cap is used"),Station->CapInput->GetCollisionEnabled(),ECollisionEnabled::QueryOnly);
+	{
+		// Isolate the visibility path from the machine art while keeping the real
+		// seated bottle, held cap, and server socket handoff.
+		Carrier->SetActorLocation(HandBottle->GetActorLocation()+FVector(0,-180,280));
+		const int32 RefillID=Spawn(CapPID,Carrier->GetActorLocation()+FVector(0,60,0));
+		auto* Refill=Manager->GetActiveActorFromISID(RefillID);
+		PropGrabTests::InvokeCarryRPC(Carrier,TEXT("RequestServertoAttachActortoComponent"),Refill);
+		if (!TestTrue(TEXT("The held cap is compatible with the seated bottle"),Refill && Refill->bIsHeld
+			&& Station->CanLoadCap(RefillID,Carrier))) return false;
+		FVector Eye;
+		FRotator View;
+		Carrier->GetActorEyesViewPoint(Eye,View);
+		const FVector TrayLocation=Station->CapInput->GetComponentLocation();
+		Station->CapInput->SetWorldLocation(Eye+FVector(0,170,0));
+		auto AddVisibilityBlocker=[](AActor& Owner,const FVector& Location)
+		{
+			auto* Box=NewObject<UBoxComponent>(&Owner);
+			Box->SetBoxExtent(FVector(12));
+			Box->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+			Box->SetCollisionResponseToAllChannels(ECR_Ignore);
+			Box->SetCollisionResponseToChannel(ECC_Visibility,ECR_Block);
+			Owner.AddInstanceComponent(Box);
+			if (Owner.GetRootComponent()) Box->SetupAttachment(Owner.GetRootComponent());
+			else Owner.SetRootComponent(Box);
+			Box->RegisterComponent();
+			Box->SetWorldLocation(Location);
+			return Box;
+		};
+		auto* BottleBlocker=AddVisibilityBlocker(*HandBottle,Eye+FVector(0,90,0));
+		auto* UnrelatedActor=World->SpawnActor<AActor>();
+		auto* UnrelatedBlocker=AddVisibilityBlocker(*UnrelatedActor,Eye+FVector(0,65,0));
+		TestEqual(TEXT("The external obstruction is in front of the cap tray"),TraceControl(Station->CapInput,Refill),
+			static_cast<UPrimitiveComponent*>(UnrelatedBlocker));
+		Layout->BeginSocketInteraction(Carrier,Station->CapInput);
+		TestTrue(TEXT("A separate obstruction prevents cap handoff"),HoldingActor->GetObjectPropertyValue_InContainer(Carrier)==Refill);
+		UnrelatedBlocker->DestroyComponent();
+		UnrelatedActor->Destroy();
+		TestEqual(TEXT("The seated bottle itself is now in front of the cap tray"),TraceControl(Station->CapInput,Refill),
+			static_cast<UPrimitiveComponent*>(BottleBlocker));
+		Layout->BeginSocketInteraction(Carrier,Station->CapInput);
+		TestNull(TEXT("The seated bottle cannot prevent cap handoff"),HoldingActor->GetObjectPropertyValue_InContainer(Carrier));
+		BottleBlocker->DestroyComponent();
+		Station->CapInput->SetWorldLocation(TrayLocation);
+		FinishInputPlacement();
+		TestEqual(TEXT("A cap loaded behind the seated bottle is registered"),Station->View.CapTrayCount,4);
+		Station->ReleaseStoredSupply(RefillID,false);
+		MoveAway(RefillID);
+	}
 	Carrier->SetActorLocation(Station->BottleInput->GetComponentLocation()+FVector(0,-165,40));
 	PropGrabTests::InvokeCarryRPC(Carrier,TEXT("RequestServertoAttachActortoComponent"),HandBottle);
 	TestTrue(TEXT("Finished bottle can be picked up and immediately makes the empty volume traceable"),
 		HandBottle->bIsHeld && Station->View.SeatedBottleISID==0 && Station->BottleInput->GetCollisionResponseToChannel(ECC_Visibility)==ECR_Block);
 	PropGrabTests::InvokeCarryRPC(Carrier,TEXT("RequestServertoDetachActortoComponent"),HandBottle);
 	MoveAway(Safe);
+	const int32 ReleaseWithAutoSealOff=MakeBottle();
+	if (!ReleaseWithAutoSealOff || !Fill(ReleaseWithAutoSealOff)) return false;
+	Station->bAutoApplySealOnRelease=false;
+	Action(EShopProductionAction::ReleaseFillingLever,ReleaseWithAutoSealOff);
+	TestEqual(TEXT("Disabling Auto Seal keeps all four stocked seals"),Station->View.SealTrayCount,4);
+	TestFalse(TEXT("Disabling Auto Seal leaves the released bottle unprotected"),
+		Manager->FindUniqueData(ReleaseWithAutoSealOff)->EventData.bTemporarySealUsed);
+	MoveAway(ReleaseWithAutoSealOff);
+	Station->bAutoApplySealOnRelease=true;
 	const int32 FlowRelease=MakeBottle(); if (!FlowRelease || !Fill(FlowRelease)) return false;
 	Action(EShopProductionAction::ReleaseFillingLever,FlowRelease);
 	auto* FlowReleasedBottle=Cast<AColaPropActor>(Manager->GetActiveActorFromISID(FlowRelease));
@@ -513,6 +596,13 @@ bool FManualColaFillingLoopTest::RunTest(const FString& Parameters)
 	const double AuthoredDuration=SealProduct->NumOfPortions;
 	TestTrue(TEXT("Early stopped release uses one physical seal with its authored duration and jitter"),
 		SealSeconds>=FMath::Max(.1,AuthoredDuration-1.0) && SealSeconds<=AuthoredDuration+1.0 && Station->View.SealTrayCount==2);
+	Station->RefreshInputs();
+	Widget->RefreshProduction(Station);
+	TestTrue(TEXT("Table HUD shows the active seal countdown"),
+		Widget->SealReadout && Widget->SealReadout->GetText().ToString()==FString::Printf(TEXT("SEAL %.1f s LEFT"),SealSeconds));
+	TestTrue(TEXT("Table gauge reads the seated bottle pressure"),
+		Widget->PressureGauge && Widget->PressureGauge->Pressure>0
+		&& FMath::IsNearlyEqual(Widget->PressureGauge->Pressure,Manager->FindUniqueData(Protected)->ContinuousData.SealedPressure));
 	TestEqual(TEXT("Seal cannot be reapplied to extend its deadline"),Action(EShopProductionAction::ApplyTemporarySeal,Protected),EShopCheckoutResult::Unavailable);
 	const auto* MintOffer=Catalog->FindOffer(TEXT("CylinderMint")); if (!MintOffer) return false;
 	const int32 Mint=Spawn(Manager->RegisterProductFromDataAsset(MintOffer->Product.LoadSynchronous()),SupplyOrigin + FVector(-115,-110,30));

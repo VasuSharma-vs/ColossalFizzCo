@@ -2,6 +2,7 @@
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 #include "Components/Button.h"
+#include "Shop/PlayerUpgradesComponent.h"
 #include "Shop/ShopPlayerInteractionComponent.h"
 #include "ShopTerminalWidget.generated.h"
 
@@ -11,6 +12,11 @@ class UTextBlock;
 class UProgressBar;
 class UManualFillingPressureGauge;
 class UCanvasPanel;
+class UBorder;
+class UFlowControllerIcon;
+class AColaFlowController;
+class ASocketColaFillingMachine;
+class UFlowControllerPressureDial;
 
 UCLASS()
 class COLOSSALFIZZCO_API UShopTerminalButton : public UButton
@@ -27,6 +33,10 @@ public:
 	bool bLever=false;
 	EShopProductionAction ProductionAction=EShopProductionAction::Fill;
 	bool bClose = false;
+	TOptional<EFlowControllerUpgradeType> FlowUpgradeSelection;
+	TOptional<EFillingMachineUpgradeType> FillingUpgradeSelection;
+	TOptional<EPlayerUpgradeType> PlayerUpgradeSelection;
+	bool bBuyFlowUpgrade=false;
 private:
 	TWeakObjectPtr<UShopTerminalWidget> Terminal;
 	UFUNCTION() void HandleClick();
@@ -56,12 +66,20 @@ class COLOSSALFIZZCO_API UShopTerminalWidget : public UUserWidget
 {
 	GENERATED_BODY()
 public:
-	void Configure(UShopPlayerInteractionComponent* InActions, AActor* InStation);
+	void Configure(UShopPlayerInteractionComponent* InActions, AActor* InStation, bool bOpenUpgrades=false);
+	void ConfigurePlayerUpgrades(UShopPlayerInteractionComponent* InActions);
 	void HandleButton(const UShopTerminalButton* Button);
-	void Close();
+	void FlowUpgradePurchaseResult(FGuid OperationID, EFlowControllerPurchaseResult Result);
+	void FillingUpgradePurchaseResult(FGuid OperationID, EFillingMachinePurchaseResult Result);
+	void Close(bool bReleaseCapRole=true);
 	void BeginLever(int32 BottleISID);
 	void EndLever();
 	bool IsShowingStation(const AActor* InStation) const { return Station.Get()==InStation; }
+	bool IsWorldReadout() const { return bWorldFillingDisplay || (bFlowControllerDisplay && !bFlowUpgradeMenu); }
+	bool IsFlowUpgradeMenu() const { return bFlowUpgradeMenu; }
+	bool IsFillingUpgradeMenu() const { return bFillingUpgradeMenu; }
+	bool IsPlayerUpgradeMenu() const { return bPlayerUpgradeMenu; }
+	bool IsUpgradeMenu() const { return bFlowUpgradeMenu || bFillingUpgradeMenu || bPlayerUpgradeMenu; }
 protected:
 	virtual void NativeConstruct() override;
 	virtual TSharedRef<SWidget> RebuildWidget() override;
@@ -72,6 +90,7 @@ protected:
 	virtual void NativeDestruct() override;
 private:
 	friend class FShopTerminalWidgetStabilityTest;
+	friend class FShopPlayerUpgradeMenuTest;
 	friend class FManualColaFillingLoopTest;
 	UPROPERTY(Transient) TObjectPtr<UVerticalBox> Body;
 	UPROPERTY(Transient) TObjectPtr<UTextBlock> Summary;
@@ -93,18 +112,85 @@ private:
 	UPROPERTY(Transient) TArray<TObjectPtr<UWidget>> CornerPanels;
 	UPROPERTY(Transient) TMap<int32,TObjectPtr<UTextBlock>> ProductionBottleLabels;
 	UPROPERTY(Transient) TArray<TObjectPtr<UTextBlock>> CheckoutTextRows;
-	UPROPERTY(Transient) TObjectPtr<UInputComponent> WorldFillingInput;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowHudFlavor;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowHudInPressure;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowHudOutPressure;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowHudInFlow;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowHudOutFlow;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowHudPerOutlet;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowHudBottleCount;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowHudLeverKey;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowHudUpgradeKey;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowHudMoveKey;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowHudPauseKey;
+	UPROPERTY(Transient) TObjectPtr<UFlowControllerIcon> FlowHudLeverIcon;
+	UPROPERTY(Transient) TObjectPtr<UFlowControllerIcon> FlowHudStatusIcon;
+	UPROPERTY(Transient) TObjectPtr<UFlowControllerIcon> FlowHudPauseIcon;
+	UPROPERTY(Transient) TObjectPtr<UFlowControllerPressureDial> FlowHudInletDial;
+	UPROPERTY(Transient) TObjectPtr<UFlowControllerPressureDial> FlowHudOutletDial;
+	UPROPERTY(Transient) TObjectPtr<UProgressBar> FlowHudInletMeter;
+	UPROPERTY(Transient) TObjectPtr<UProgressBar> FlowHudOutletMeter;
+	UPROPERTY(Transient) TArray<TObjectPtr<UBorder>> FlowHudInPorts;
+	UPROPERTY(Transient) TArray<TObjectPtr<UBorder>> FlowHudOutPorts;
+	UPROPERTY(Transient) TArray<TObjectPtr<UBorder>> FlowHudLeverPips;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowUpgradeName;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowUpgradeValue;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowUpgradeDescription;
+	UPROPERTY(Transient) TObjectPtr<UShopTerminalButton> BuyFlowUpgradeButton;
+	UPROPERTY(Transient) TArray<TObjectPtr<UShopTerminalButton>> FlowUpgradeTabs;
+	UPROPERTY(Transient) TArray<TObjectPtr<UFlowControllerIcon>> FlowUpgradeTabIcons;
+	UPROPERTY(Transient) TArray<TObjectPtr<UBorder>> FlowUpgradeRankPips;
+	UPROPERTY(Transient) TObjectPtr<UBorder> FlowUpgradeNextCard;
+	UPROPERTY(Transient) TObjectPtr<UFlowControllerIcon> FlowUpgradeCompareArrow;
+	UPROPERTY(Transient) TObjectPtr<UVerticalBox> FlowUpgradeCurrentGraphic;
+	UPROPERTY(Transient) TObjectPtr<UVerticalBox> FlowUpgradeNextGraphic;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowUpgradeCurrentValue;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowUpgradeNextValue;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowUpgradeEffectValue;
+	UPROPERTY(Transient) TObjectPtr<UFlowControllerIcon> FlowUpgradeEffectIcon;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> FlowUpgradeBuyPrice;
+	UPROPERTY(Transient) TObjectPtr<UFlowControllerIcon> FlowUpgradeBuyIcon;
+	UPROPERTY(Transient) TObjectPtr<UFlowControllerIcon> FlowUpgradeStatusIcon;
+	EFlowControllerUpgradeType RenderedFlowUpgrade=EFlowControllerUpgradeType::InputPorts;
+	int32 RenderedFlowRank=INDEX_NONE;
+	TOptional<EFlowControllerPurchaseResult> LastFlowUpgradeResult;
 	TWeakObjectPtr<UShopPlayerInteractionComponent> Actions;
 	TWeakObjectPtr<AActor> Station;
 	FString LastContents;
 	float RefreshCountdown = 0;
 	bool bWorldFillingDisplay = false;
+	bool bFlowControllerDisplay = false;
+	bool bFlowUpgradeMenu = false;
+	bool bFillingUpgradeMenu = false;
+	bool bPlayerUpgradeMenu = false;
+	EFlowControllerUpgradeType SelectedFlowUpgrade=EFlowControllerUpgradeType::InputPorts;
+	EFlowControllerUpgradeType PendingFlowUpgrade=EFlowControllerUpgradeType::InputPorts;
+	EFillingMachineUpgradeType SelectedFillingUpgrade=EFillingMachineUpgradeType::CapTray;
+	EFillingMachineUpgradeType PendingFillingUpgrade=EFillingMachineUpgradeType::CapTray;
+	EPlayerUpgradeType SelectedPlayerUpgrade=EPlayerUpgradeType::EmptyBottleHandling;
+	EPlayerUpgradeType PendingPlayerUpgrade=EPlayerUpgradeType::EmptyBottleHandling;
+	TWeakObjectPtr<UPlayerUpgradesComponent> PlayerUpgrades;
+	FGuid PendingUpgradeOperation;
+	int32 DisplayedUpgradeRank=INDEX_NONE;
+	int32 PendingUpgradeRank=INDEX_NONE;
+	bool bWaitingForPurchasedRank=false;
+	FText UpgradeFeedback;
 	int32 LocalLeverBottle=0;
 	float LeverHeartbeat=0;
-	void BindWorldFillingControls();
-	void UnbindWorldFillingControls();
-	void UseWorldFillingControl(EShopProductionAction Action);
 	void Refresh();
+	void BuildFlowControllerHud(UCanvasPanel* Canvas);
+	void RefreshFlowController(const AColaFlowController& Flow);
+	void BuildUpgradeMenu(UCanvasPanel* Canvas);
+	void BuildFlowUpgradePanel(UVerticalBox& Column);
+	void RefreshFlowUpgradeMenu(const AColaFlowController& Flow);
+	void RefreshFlowUpgradePurchase(int64 Cost, int64 Balance, bool bHasWallet, bool bMaxed, bool bBusy);
+	void HandleFlowUpgradeButton(const UShopTerminalButton& Button, AColaFlowController& Flow);
+	void RefreshFillingUpgradeMenu(const ASocketColaFillingMachine& Table);
+	void HandleFillingUpgradeButton(const UShopTerminalButton& Button, ASocketColaFillingMachine& Table);
+	void RefreshPlayerUpgradeMenu();
+	void HandlePlayerUpgradeButton(const UShopTerminalButton& Button);
+	UFUNCTION() void PlayerUpgradePurchaseResult(FGuid OperationID, EPlayerUpgradePurchaseResult Result);
+	void RefreshUpgradePurchaseButton(int64 Cost, bool bMaxed, bool bBusy);
 	void RefreshProduction(UShopProductionStationComponent* Production);
 	UTextBlock* AddText(const FString& Text);
 	UShopTerminalButton* AddButton(const FString& Label);

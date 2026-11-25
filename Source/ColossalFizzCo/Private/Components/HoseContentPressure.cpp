@@ -14,6 +14,42 @@ namespace
 		float InputRate=0.f;
 		float LastFlow=0.f;
 	};
+
+	float GetControllerIntakeAssist(const UResourceTransferEndpointComponent& Port)
+	{
+		return Port.bCanReceive && !Port.bCanSupply && Port.bRequestsFlow && FMath::IsFinite(Port.ControllerIntakeSuctionStrength)
+			? FMath::Max(0.f,Port.ControllerIntakeSuctionStrength) : 0.f;
+	}
+}
+
+float UHoseTransferComponent::GetPressureFlowCapacity(float Head) const
+{
+	return float(FMath::Min(double(MaxDrivenUnitsPerSecond),
+		double(MaxUnitsPerSecond)*(1.+double(FMath::Max(0.f,Head-RatedPressure))*FlowBoostPerPressure)));
+}
+
+float UHoseTransferComponent::GetContentLineRate(float Head,bool bPassive,float IntakeAssist) const
+{
+	const float ReferencePressure=FMath::Max(RatedPressure,UE_KINDA_SMALL_NUMBER);
+	const float DrivenHead=Head+IntakeAssist*ReferencePressure;
+	return GetPressureFlowCapacity(DrivenHead)*(bPassive ? 1.f : FMath::Min(1.f,DrivenHead/ReferencePressure));
+}
+
+float UHoseTransferComponent::GetContentFeedRate(const UResourceTransferEndpointComponent& Receiver) const
+{
+	if (Category!=EResourceTransportCategory::Content || bBurst || !bTransferEnabled || !bIntakeEnabled
+		|| !bDrainEnabled || !Receiver.bCanReceive || !HasValidConnection()) return 0.f;
+	const auto* Supply=GetOtherEndpoint(&Receiver);
+	if (!Supply || !Supply->bCanSupply || !Supply->bSupplyEnabled || !Supply->CanTransferResource(true)
+		|| Supply->GetStoredUnits()<=0 || (bRequiresMotorDrive && !Supply->IsMotorRunning() && !Receiver.IsMotorRunning())) return 0.f;
+	const float Pressure=Supply->GetOperatingPressure();
+	const bool bPassive=Pressure==0.f && SourceEndpoint==Supply && !Supply->bUseSignedPressure && !Receiver.bUseSignedPressure;
+	const float IntakeAssist=GetControllerIntakeAssist(Receiver);
+	if (!FMath::IsFinite(Pressure) || Pressure<0.f || (Pressure==0.f && !bPassive && IntakeAssist<=0.f)) return 0.f;
+	float Rate=GetContentLineRate(Pressure,bPassive,IntakeAssist);
+	if (Supply->MaxSupplyUnitsPerSecond>0.f) Rate=FMath::Min(Rate,Supply->MaxSupplyUnitsPerSecond);
+	if (Receiver.MaxReceiveUnitsPerSecond>0.f) Rate=FMath::Min(Rate,Receiver.MaxReceiveUnitsPerSecond);
+	return FMath::IsFinite(Rate) ? FMath::Max(0.f,Rate) : 0.f;
 }
 
 float UHoseTransferComponent::IntegrateContentStep(float DeltaSeconds)
@@ -40,10 +76,6 @@ float UHoseTransferComponent::IntegrateContentStep(float DeltaSeconds)
 		return Spilled>0.f ? DeltaSeconds : 0.f;
 	}
 
-	const auto FlowCapacity = [this](float Head)
-	{
-		return float(FMath::Min(double(MaxDrivenUnitsPerSecond), double(MaxUnitsPerSecond)*(1.+double(FMath::Max(0.f,Head-RatedPressure))*FlowBoostPerPressure)));
-	};
 	const auto LimitedSupply = [](const UResourceTransferEndpointComponent& Socket,float Rate)
 	{
 		return Socket.MaxSupplyUnitsPerSecond>0.f ? FMath::Min(Socket.MaxSupplyUnitsPerSecond,Rate) : Rate;
@@ -63,7 +95,7 @@ float UHoseTransferComponent::IntegrateContentStep(float DeltaSeconds)
 		if (Socket->MaxReceiveUnitsPerSecond>0.f) Port.ReceiveLimit=Socket->MaxReceiveUnitsPerSecond;
 		if (Port.Pressure>0.f && Port.Available>0.f)
 		{
-			const float RatedPump=Socket->MaxSupplyUnitsPerSecond>0.f ? Socket->MaxSupplyUnitsPerSecond : FlowCapacity(Port.Pressure);
+			const float RatedPump=Socket->MaxSupplyUnitsPerSecond>0.f ? Socket->MaxSupplyUnitsPerSecond : GetPressureFlowCapacity(Port.Pressure);
 			Port.PumpRate=FMath::Min(RatedPump,MaxDrivenUnitsPerSecond);
 		}
 	}
@@ -101,7 +133,10 @@ float UHoseTransferComponent::IntegrateContentStep(float DeltaSeconds)
 	const bool OpenTip=VentPoint!=EHoseDischargePoint::None && !Outlet.Socket;
 	if (OpenTip) Outlet.Room=MAX_flt;
 	if (Head==0.f && GaugePressure<0.f) Head=-Outlet.Pressure;
-	const float LineRate=FlowCapacity(Head)*(LegacyPassive ? 1.f : FMath::Min(1.f,Head/FMath::Max(RatedPressure,UE_KINDA_SMALL_NUMBER)));
+	const float IntakeAssist=Inlet.Socket && Inlet.Socket->bCanSupply && Outlet.Socket
+		? GetControllerIntakeAssist(*Outlet.Socket) : 0.f;
+	const float LoadDivisor=1.f+IntakeAssist;
+	const float LineRate=GetContentLineRate(Head,LegacyPassive,IntakeAssist);
 	const bool OpposingPumps=Inlet.PumpRate>0.f && Outlet.PumpRate>0.f;
 	// A lower-pressure pump can only oppose its share of the inlet's drive.
 	// Its flow rating cannot cancel a stronger pressure at the other end.
@@ -120,14 +155,16 @@ float UHoseTransferComponent::IntegrateContentStep(float DeltaSeconds)
 	const float Rise=Blocked ? (FMath::Max(0.f,Ports[0].Pressure)+FMath::Max(0.f,Ports[1].Pressure))*BlockedPressureRisePerSecond : 0.f;
 	const float InitialPressure=GaugePressure+BackPressure;
 	if (!FMath::IsFinite(Rise) || !FMath::IsFinite(InitialPressure)) return 0.f;
-	const float InletStress=FMath::Max(Ports[0].Pressure,Ports[1].Pressure);
+	const float InitialLoad=InitialPressure/LoadDivisor;
+	const float LoadRise=Rise/LoadDivisor;
+	const float InletStress=FMath::Max(Ports[0].Pressure,Ports[1].Pressure)/LoadDivisor;
 	EHoseFailureMode BodyFailure=EHoseFailureMode::None;
 	float TimeToLimit=0.f;
-	if (FMath::Max(InitialPressure,InletStress)>BurstPressureThreshold) BodyFailure=EHoseFailureMode::OverpressureBurst;
-	else if (InitialPressure<0.f && InitialPressure<=-VacuumCollapseThreshold) BodyFailure=EHoseFailureMode::VacuumCollapse;
-	else if (Rise>0.f)
+	if (FMath::Max(InitialLoad,InletStress)>BurstPressureThreshold) BodyFailure=EHoseFailureMode::OverpressureBurst;
+	else if (InitialLoad<0.f && InitialLoad<=-VacuumCollapseThreshold) BodyFailure=EHoseFailureMode::VacuumCollapse;
+	else if (LoadRise>0.f)
 	{
-		TimeToLimit=FMath::Max(0.f,(BurstPressureThreshold-InitialPressure)/Rise);
+		TimeToLimit=FMath::Max(0.f,(BurstPressureThreshold-InitialLoad)/LoadRise);
 		if (TimeToLimit<=DeltaSeconds) BodyFailure=EHoseFailureMode::OverpressureBurst;
 	}
 	const float Exposure=BodyFailure==PendingBodyFailure && TimeToLimit==0.f ? OverpressureSeconds : 0.f;
@@ -135,13 +172,14 @@ float UHoseTransferComponent::IntegrateContentStep(float DeltaSeconds)
 	const float SimulatedSeconds=FMath::Min(DeltaSeconds,FailureTime);
 	const float Pressure=InitialPressure+Rise*SimulatedSeconds;
 	if (!FMath::IsFinite(Pressure)) return 0.f;
-	CurrentPressure=Pressure;
+	const float PressureLoad=Pressure/LoadDivisor;
+	CurrentPressure=PressureLoad;
 	// An accepting suction socket draws the reserve toward itself. Otherwise,
 	// a loose tip vents first and a live supply can use the remaining flow budget.
 	const bool SuctionOutlet=Outlet.Socket && Outlet.Pressure<0.f && OutletRate>0.f;
 	const float VentPressure=FMath::Max3(0.f,Ports[0].Pressure,Ports[1].Pressure);
 	const float Vented=SuctionOutlet ? 0.f : DrainTrappedContents(VentPoint,SimulatedSeconds,VentPressure);
-	if (VentPoint!=EHoseDischargePoint::None && Pressure>=0.f) CurrentPressure=FMath::Max(Pressure,TrappedDrainPressure);
+	if (VentPoint!=EHoseDischargePoint::None && PressureLoad>=0.f) CurrentPressure=FMath::Max(PressureLoad,TrappedDrainPressure);
 	if (!SameConnections()) { UnbindEndpoints(); return SimulatedSeconds; }
 
 	// Trip the connector before committing any intake or delivery. If both are overloaded the more overloaded fitting releases first.
@@ -163,7 +201,7 @@ float UHoseTransferComponent::IntegrateContentStep(float DeltaSeconds)
 		if (!Port.Socket) continue;
 		const float Received=Index==OutletIndex ? DrainOffer : 0.f;
 		const bool Outtake=Received<=0.f && (IntakeOffer[Index]>0.f || (Port.Pressure>0.f && Port.Socket->bCanSupply));
-		const float Stress=FMath::Max3(FMath::Abs(Port.Pressure),FMath::Abs(Pressure),Received>0.f ? Head : 0.f);
+		const float Stress=FMath::Max3(FMath::Abs(Port.Pressure),FMath::Abs(Pressure),Received>0.f ? Head : 0.f)/LoadDivisor;
 		const float OfferedFlow=(Outtake ? IntakeOffer[Index] : Received)/DeltaSeconds;
 		const float Overload=(Stress>0.f || OfferedFlow>0.f) ? Port.Socket->GetConnectorOverload(Stress,OfferedFlow,Outtake) : 0.f;
 		if (Overload>MaxOverload)
@@ -204,8 +242,8 @@ float UHoseTransferComponent::IntegrateContentStep(float DeltaSeconds)
 	if (SuctionOutlet && Outflow>0.f)
 		TrappedDrainPressure*=Buffer.Units/(Buffer.Units+Outflow);
 	// Only the volume actually accepted relieves a single pushing inlet, weighted by its offered rate.
-	if (Pressure>0.f && Inlet.Pressure>0.f && Outlet.Pressure<=0.f && FeedRate>0.f && SimulatedSeconds>0.f)
-		CurrentPressure=FMath::Max(TrappedDrainPressure,Pressure*(1.f-FMath::Clamp((Outflow+Vented)/(FeedRate*SimulatedSeconds),0.f,1.f)));
+	if (PressureLoad>0.f && Inlet.Pressure>0.f && Outlet.Pressure<=0.f && FeedRate>0.f && SimulatedSeconds>0.f)
+		CurrentPressure=FMath::Max(TrappedDrainPressure,PressureLoad*(1.f-FMath::Clamp((Outflow+Vented)/(FeedRate*SimulatedSeconds),0.f,1.f)));
 	LastStartPortFlowUnits=Ports[0].LastFlow; LastEndPortFlowUnits=Ports[1].LastFlow;
 	if (!SameConnections()) { UnbindEndpoints(); return SimulatedSeconds; }
 	BackPressure+=Rise*SimulatedSeconds;
@@ -213,7 +251,7 @@ float UHoseTransferComponent::IntegrateContentStep(float DeltaSeconds)
 	OverpressureSeconds=BodyFailure==EHoseFailureMode::None ? 0.f : Exposure+FMath::Max(0.f,SimulatedSeconds-TimeToLimit);
 	if (FailureTime<=DeltaSeconds)
 	{
-		CurrentPressure=BodyFailure==EHoseFailureMode::OverpressureBurst ? FMath::Max(Pressure,InletStress) : Pressure;
+		CurrentPressure=BodyFailure==EHoseFailureMode::OverpressureBurst ? FMath::Max(PressureLoad,InletStress) : PressureLoad;
 		Rupture(BodyFailure);
 	}
 	return SimulatedSeconds;

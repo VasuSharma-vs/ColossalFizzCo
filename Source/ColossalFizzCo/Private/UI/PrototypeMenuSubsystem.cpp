@@ -73,8 +73,9 @@ void UPrototypeMenuSubsystem::OpenMenu()
  if(!Menu)return;
  if(!Menu->IsInViewport())Menu->AddToPlayerScreen(200);
  PC->FlushPressedKeys();
- PC->SetInputMode(FInputModeUIOnly().SetWidgetToFocus(Menu->TakeWidget()).SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock));
- PC->bShowMouseCursor=true;Menu->SetKeyboardFocus();
+ auto* Focus=Menu->GetMenuFocusWidget();
+ PC->SetInputMode(FInputModeUIOnly().SetWidgetToFocus(Focus->TakeWidget()).SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock));
+ PC->bShowMouseCursor=true;Focus->SetKeyboardFocus();
 }
 void UPrototypeMenuSubsystem::CloseMenu()
 {

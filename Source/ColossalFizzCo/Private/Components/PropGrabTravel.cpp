@@ -5,6 +5,7 @@
 #include "Engine/World.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/PlayerController.h"
+#include "Props/InteractableProp.h"
 #include "Props/InteractablePropManager.h"
 #include "UObject/StructOnScope.h"
 #include "UObject/UnrealType.h"
@@ -25,6 +26,9 @@ namespace
 	bool TraceGrab(const ACharacter& Player, const FVector& Start, const FVector& End, FHitResult& Hit, const AActor* Ignore = nullptr)
 	{
 		FCollisionQueryParams Params(SCENE_QUERY_STAT(PlayerPropGrab), true, &Player);
+		TArray<AActor*> Attached;
+		Player.GetAttachedActors(Attached);
+		Params.AddIgnoredActors(Attached);
 		if (Ignore) Params.AddIgnoredActor(Ignore);
 		return Player.GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params);
 	}
@@ -87,14 +91,32 @@ bool UPropGrabInputComponent::TryBeginActorTravel(EPropGrabInputPhase Phase, AAc
 	auto* Player = Cast<ACharacter>(GetOwner());
 	if (!IsValid(Player) || !Player->IsLocallyControlled() || !IsValid(Player->GetMesh())) return false;
 	const auto* Manager = APropManager::Get(this);
-	const bool bPlacing = LastIntent == EPropGrabIntent::Place;
+	bool bPlacing = LastIntent == EPropGrabIntent::Place;
 	FHitResult Hit;
 	AActor* Actor = HeldActor;
 	int32 ISID = 0;
 	if (bPlacing)
 	{
 		if (!IsValid(Actor)) return false;
-		if (const auto* Prop = Cast<AActivePropActor>(Actor)) ISID = Prop->ISID;
+		if (const auto* Prop = Cast<AActivePropActor>(Actor))
+		{
+			ISID = Prop->ISID;
+			FVector Eye;
+			FRotator Aim;
+			GetGrabView(*Player, Eye, Aim);
+			FHitResult Aimed;
+			if (Manager && TraceGrab(*Player, Eye, Eye + Aim.Vector() * GrabTraceLength, Aimed))
+			{
+				const int32 AimedID = GetHitISID(Manager, Aimed);
+				if (IsSameCarryBatch(*Manager, *Actor, AimedID))
+				{
+					// The server checks capacity before claiming the aimed prop.
+					bPlacing = false;
+					ISID = AimedID;
+					Hit = Aimed;
+				}
+			}
+		}
 	}
 	else
 	{
@@ -159,7 +181,7 @@ void UPropGrabInputComponent::Server_BeginActorTravel_Implementation(int64 Seque
 	}
 	else
 	{
-		if (IsValid(HeldActor) || HitLocation.ContainsNaN()) return;
+		if (HitLocation.ContainsNaN()) return;
 		FVector Eye;
 		FRotator Aim;
 		GetGrabView(*Player, Eye, Aim);
@@ -170,9 +192,11 @@ void UPropGrabInputComponent::Server_BeginActorTravel_Implementation(int64 Seque
 		if (GetHitISID(Manager, VerifiedHit) != ISID) return;
 		if (ISID > 0)
 		{
+			if (!Manager || (IsValid(HeldActor) && !IsSameCarryBatch(*Manager, *HeldActor, ISID))
+				|| !CanCarryProduct(*Manager, ISID)) return;
 			Actor = Manager->ReserveGrabForTravel(ISID, Player);
 		}
-		else if (!IsValid(Actor) || Actor->IsA<AActivePropActor>() || VerifiedHit.GetActor() != Actor || IsActorInAnotherPlayerHand(Actor)
+		else if (IsValid(HeldActor) || !IsValid(Actor) || Actor->IsA<AActivePropActor>() || VerifiedHit.GetActor() != Actor || IsActorInAnotherPlayerHand(Actor)
 			|| !CanGrabLegacyActor(*Actor, VerifiedHit.GetComponent())) return;
 	}
 	if (!IsValid(Actor) || Actor->GetWorld() != GetWorld()) return;
@@ -186,6 +210,14 @@ void UPropGrabInputComponent::Server_BeginActorTravel_Implementation(int64 Seque
 		Travel.bWasSimulating = Root->IsSimulatingPhysics();
 		Root->SetSimulatePhysics(false);
 		Root->IgnoreActorWhenMoving(Player, true);
+		TArray<AActor*> Attached;
+		Player->GetAttachedActors(Attached);
+		for (auto* Item : Attached)
+		{
+			if (Item == Actor) continue;
+			Root->IgnoreActorWhenMoving(Item, true);
+			Travel.IgnoredHeldActors.Add(Item);
+		}
 	}
 	Actor->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
 	if (bPlacing) WorldInteractionCarry::ClearHeldActor(*Player, *Actor);
@@ -207,8 +239,21 @@ void UPropGrabInputComponent::Server_EndActorTravel_Implementation(int64 Sequenc
 
 void UPropGrabInputComponent::EndPlay(const EEndPlayReason::Type Reason)
 {
+	if (auto* Player = Cast<APawn>(GetOwner()))
+		Player->ReceiveControllerChangedDelegate.RemoveDynamic(this, &UPropGrabInputComponent::OnCarryControllerChanged);
 	if (Travel.Sequence) DropTravelActor();
+	if (Reason == EEndPlayReason::Destroyed || Reason == EEndPlayReason::RemovedFromWorld) ReleaseCarryBatch();
 	Super::EndPlay(Reason);
+}
+
+void UPropGrabInputComponent::ClearTravelCollisionIgnores(const FActorTravel& Movement)
+{
+	auto* Actor = Movement.Actor.Get();
+	auto* Root = Actor ? Cast<UPrimitiveComponent>(Actor->GetRootComponent()) : nullptr;
+	if (!Root) return;
+	Root->IgnoreActorWhenMoving(GetOwner(), false);
+	for (const auto& Item : Movement.IgnoredHeldActors)
+		if (Item.IsValid()) Root->IgnoreActorWhenMoving(Item.Get(), false);
 }
 
 void UPropGrabInputComponent::DropTravelActor()
@@ -221,8 +266,7 @@ void UPropGrabInputComponent::DropTravelActor()
 	if (!Actor || !Player || !Player->HasAuthority() || GetNetMode() == NM_Client) return;
 	const auto* Prop = Cast<AActivePropActor>(Actor);
 	if (Dropped.ISID > 0 && (!Prop || Prop->ISID != Dropped.ISID)) return;
-	if (auto* Root = Cast<UPrimitiveComponent>(Actor->GetRootComponent()))
-		Root->IgnoreActorWhenMoving(Player, false);
+	ClearTravelCollisionIgnores(Dropped);
 	if (Dropped.ISID > 0)
 	{
 		if (OwnsHeldTarget(Actor))
@@ -245,13 +289,23 @@ void UPropGrabInputComponent::DropTravelActor()
 
 void UPropGrabInputComponent::CompleteTravelPickup(ACharacter& Player, AActor& Actor)
 {
-	if (auto* Root = Cast<UPrimitiveComponent>(Actor.GetRootComponent())) Root->IgnoreActorWhenMoving(&Player, false);
+	auto* Manager = Travel.ISID > 0 ? APropManager::Get(this) : nullptr;
+	if (Travel.ISID > 0 && (!Manager || !CanCarryProduct(*Manager, Travel.ISID)))
+	{
+		DropTravelActor();
+		return;
+	}
+	ClearTravelCollisionIgnores(Travel);
 	auto* Mesh = Player.GetMesh();
 	const FName Socket = Mesh->DoesSocketExist(HoldingSocket) ? HoldingSocket : NAME_None;
 	const bool Attached = Travel.ISID > 0
 		? CastChecked<AActivePropActor>(&Actor)->OnPlayerGrab(Mesh, Socket)
 		: AttachLegacyActor(Actor, *Mesh, Socket);
-	if (!Attached || !WorldInteractionCarry::PublishHeldActor(Player, Actor))
+	const bool bHasPrimary = IsValid(WorldInteractionCarry::GetCarryReference(Player, TEXT("Holding Actor")));
+	const bool bPublished = Attached && (bHasPrimary && Travel.ISID > 0
+		? AddToCarryBatch(Player, *CastChecked<AActivePropActor>(&Actor))
+		: WorldInteractionCarry::PublishHeldActor(Player, Actor));
+	if (!bPublished)
 	{
 		DropTravelActor();
 		return;

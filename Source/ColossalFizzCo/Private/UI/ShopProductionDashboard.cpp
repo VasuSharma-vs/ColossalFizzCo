@@ -1,5 +1,6 @@
 #include "UI/ShopTerminalWidget.h"
 #include "UI/ManualFillingPressureGauge.h"
+#include "Shop/ManualColaFillingMachine.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/Border.h"
 #include "Components/CanvasPanel.h"
@@ -17,6 +18,11 @@
 
 void UShopTerminalWidget::BuildProductionDashboard(UCanvasPanel* Canvas)
 {
+	if (bFlowControllerDisplay)
+	{
+		BuildFlowControllerHud(Canvas);
+		return;
+	}
 	const FLinearColor DashboardCream(.91f,.93f,.87f), DashboardMuted(.48f,.64f,.66f), Mint(.23f,.85f,.65f), Gold(.94f,.7f,.36f);
 	auto Label=[&](UVerticalBox* Parent,const FString& Value,int32 Size,FLinearColor Color,bool Bold=false)
 	{
@@ -43,7 +49,9 @@ void UShopTerminalWidget::BuildProductionDashboard(UCanvasPanel* Canvas)
 		auto* CloseButton=WidgetTree->ConstructWidget<UShopTerminalButton>(); CloseButton->Configure(this,TEXT("ESC   Close depot")); CloseButton->bClose=true; Store->AddChild(CloseButton);
 		ResultText=Label(Store,TEXT("Purchases arrive at the delivery point."),10,DashboardMuted); return;
 	}
-	auto* Instrument=Card(FVector2D(0,0),FVector2D(18,18),bWorldFillingDisplay ? FVector2D(304,248) : FVector2D(330,310));
+	const auto* Table=Cast<AManualColaFillingMachine>(Production->GetOwner());
+	const bool bSplitTable=bWorldFillingDisplay && Table && Table->bUseFlowController;
+	auto* Instrument=Card(FVector2D(0,0),FVector2D(18,18),bWorldFillingDisplay ? FVector2D(304,bSplitTable ? 268 : 248) : FVector2D(330,310));
 	Label(Instrument,bWorldFillingDisplay ? TEXT("BOTTLING") : TEXT("COLOSSAL FIZZ CO.  /  MANUAL BOTTLING"),10,Gold,true);
 	ProductionStatus=Label(Instrument,TEXT("Ready for a bottle"),18,DashboardCream,true);
 	if (!bWorldFillingDisplay) Summary=Label(Instrument,TEXT("Connect a physical supply hose"),11,DashboardMuted);
@@ -73,6 +81,11 @@ void UShopTerminalWidget::BuildProductionDashboard(UCanvasPanel* Canvas)
 	UProgressBar* Seal=nullptr; Bar(Seal,Gold); SealProgress=Seal;
 	ProductionHint=Label(Instrument,FString(),11,DashboardMuted);
 
+	if (bSplitTable)
+	{
+		SupplyTrayReadout=Label(Instrument,FString(),10,DashboardMuted);
+		return;
+	}
 	if (bWorldFillingDisplay)
 	{
 		auto* Supply=Card(FVector2D(1,0),FVector2D(-18,18),FVector2D(268,182));

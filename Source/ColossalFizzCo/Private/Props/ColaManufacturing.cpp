@@ -1,7 +1,9 @@
 #include "Props/ColaPropActor.h"
 #include "Props/InteractablePropManager.h"
+#include "Shop/ManualColaFillingMachine.h"
 #include "Shop/ShopProductionStationComponent.h"
 #include "Shop/BottleFillingComponent.h"
+#include "Components/PropGrabInputComponent.h"
 
 namespace
 {
@@ -27,6 +29,7 @@ bool AColaPropActor::CanAcceptManufacturingContent(int32 ContentID) const
 {
 	const auto* Def=ResolveProductDefinition();
 	if (!PropManagerReference || !Def || !bHasValidUniqueData || Def->bIsBottleCap || Def->ConsumableProfile.NumOfPortions<=0
+		|| !UPropGrabInputComponent::CanFillHeldBottle(*PropManagerReference, ISID)
 		|| GetStrength()<=.7f || !LocalUniqueData.EventData.bClean || GetCapSealed()>0 || LocalUniqueData.EventData.AttachedCapISID>0
 		|| AcceptedFailureType!=EContainmentFailureType::None || IsManufacturingFailureActive()
 		|| (RocketComp && RocketComp->IsPoweredFlight()) || (GetContentLevel()>0 && GetContentID()!=ContentID)
@@ -43,8 +46,10 @@ void AColaPropActor::OnManufacturingLiquidReceived(float PreviousLevel)
 		|| RocketComp->GetSimulationState()==ERocketSimulationState::AtRest)) bManufacturingFailureDispatched=false;
 	auto Delta=ManufacturingState(*this); Delta.bManualFillPressure=true;
 	if (!PropManagerReference->SubmitInstanceEventUpdate(ISID,Delta)) return;
+	const float PressurePerLevel=FMath::Max(0.f,ManufacturingPressurePerContentLevel
+		-GetActiveFillingUpgradeValue(EFillingMachineUpgradeType::PressureRegulator));
 	const float Pressure=(PreviousLevel<=0 ? 0.f : LocalUniqueData.ContinuousData.SealedPressure)
-		+(GetContentLevel()-PreviousLevel)*FMath::Max(0.f,ManufacturingPressurePerContentLevel);
+		+(GetContentLevel()-PreviousLevel)*PressurePerLevel;
 	PropManagerReference->SetBottleAgitationPressure(ISID,Pressure);
 	EvaluateManufacturingPressureFailure(true);
 }
@@ -57,18 +62,40 @@ bool AColaPropActor::IsManufacturingFlowActive() const
 		&& (!Filler->IsHoseFilling() || Filler->DeliveredPortionsPerSecond>UE_SMALL_NUMBER);
 }
 
+float AColaPropActor::GetActiveFillingUpgradeValue(EFillingMachineUpgradeType Type) const
+{
+	const auto* Station=ManualFillingStation.Get();
+	const auto* Filler=Station ? Station->Filler.Get() : nullptr;
+	if (!Filler || !Filler->bIsFilling || Filler->TargetISID!=ISID || !Station->IsLeverHoldingBottle(ISID)) return 0.f;
+	const auto* Machine=Cast<AManualColaFillingMachine>(Station->GetOwner());
+	return Machine ? Machine->GetUpgradeValue(Type,Machine->GetUpgradeRank(Type)) : 0.f;
+}
+
 void AColaPropActor::OnManufacturingSupplyReceived(float ActualUnits,float IncomingPressure,float ActualRate)
 {
 	if (!HasAuthority() || GetNetMode()==NM_Client || !PropManagerReference || IsEmpty() || IsManufacturingFailureActive()
 		|| AcceptedFailureType!=EContainmentFailureType::None || (RocketComp && RocketComp->IsPoweredFlight())
-		|| !FMath::IsFinite(ActualUnits) || ActualUnits<=0 || !FMath::IsFinite(IncomingPressure) || IncomingPressure<0
+		|| !FMath::IsFinite(ActualUnits) || ActualUnits<=0 || !FMath::IsFinite(IncomingPressure) || IncomingPressure<=0
 		|| !FMath::IsFinite(ActualRate) || ActualRate<=0) return;
+	const float RegulatedPressure=FMath::Max(0.f,IncomingPressure-GetActiveFillingUpgradeValue(EFillingMachineUpgradeType::PressureRegulator));
 	const float Limit=FMath::IsFinite(ManufacturingMaxSupplyPressure) ? FMath::Max(0.f,ManufacturingMaxSupplyPressure) : 3.f;
-	const bool Overpressure=IncomingPressure>Limit;
-	const float ReceivedPressure=Overpressure ? FMath::Max(IncomingPressure,FMath::Max(0.f,SafeResidualPressure)+.001f) : IncomingPressure;
-	if (!PropManagerReference->SetBottleAgitationPressure(ISID,FMath::Max(LocalUniqueData.ContinuousData.SealedPressure,ReceivedPressure))) return;
-	// The nozzle/temporary seal can restrain ordinary filling pressure, but cannot protect against an excessive supply.
-	if (Overpressure && HandleManufacturingPressureFailure(true,false)) bManufacturingFailureDispatched=true;
+	const float CurrentPressure=LocalUniqueData.ContinuousData.SealedPressure;
+	if (RegulatedPressure>Limit)
+	{
+		// The nozzle and temporary seal cannot restrain an excessive supply.
+		const float FailurePressure=FMath::Max3(CurrentPressure,RegulatedPressure,FMath::Max(0.f,SafeResidualPressure)+.001f);
+		if (PropManagerReference->SetBottleAgitationPressure(ISID,FailurePressure) && HandleManufacturingPressureFailure(true,false))
+			bManufacturingFailureDispatched=true;
+		return;
+	}
+
+	// Pressure approaches the nozzle pressure as liquid enters. Divide by bottle
+	// capacity so the same delivery builds pressure more slowly in a larger bottle.
+	const float Capacity=float(FMath::Max(1,GetNumPortions()));
+	const float FlowRatio=ActualRate/(Capacity+ActualRate);
+	const float Response=1.f-FMath::Exp(-4.f*(ActualUnits/Capacity)*(1.f+FlowRatio));
+	const float BottlePressure=FMath::Lerp(CurrentPressure,RegulatedPressure,Response);
+	PropManagerReference->SetBottleAgitationPressure(ISID,BottlePressure);
 }
 
 bool AColaPropActor::CanApplyManufacturingSeal() const

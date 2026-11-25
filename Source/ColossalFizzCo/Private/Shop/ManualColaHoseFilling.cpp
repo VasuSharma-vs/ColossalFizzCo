@@ -1,4 +1,5 @@
 #include "Shop/ManualColaFillingMachine.h"
+#include "Shop/SocketColaFillingMachine.h"
 #include "Shop/ShopProductionStationComponent.h"
 #include "Shop/BottleFillingComponent.h"
 #include "Shop/ColaSupplyContainer.h"
@@ -40,12 +41,13 @@ bool AManualColaFillingMachine::PrepareReceivingHosePort(int32 PortIndex,int32 C
 
 int32 AManualColaFillingMachine::GetRequiredHoseContentID(int32 PortIndex) const
 {
-	return HosePortContentIDs.IsValidIndex(PortIndex) ? FMath::Max(0, HosePortContentIDs[PortIndex]) : 0;
+	return !bUseFlowController && HosePortContentIDs.IsValidIndex(PortIndex) ? FMath::Max(0, HosePortContentIDs[PortIndex]) : 0;
 }
 
 bool AManualColaFillingMachine::PrepareReceivingHoseConnection(int32 PortIndex, int32 ContentID, const AHoseCableActor* Hose)
 {
 	if (!HasAuthority() || GetNetMode()==NM_Client || !bIsActive || !Production || Production->View.bLeverHeld) return false;
+	if (const auto* Layout = Cast<ASocketColaFillingMachine>(this); Layout && Layout->IsMachinePlacementActive()) return false;
 	auto* Port=GetHoseSocket(PortIndex); auto* Manager=APropManager::Get(this);
 	if (!Port || Port->bIsBroken || (Port->ConnectedHose && Port->ConnectedHose.Get() != Hose) || !Manager || PropManagerReference != Manager
 		|| (!Port->IsManagedContentEndpoint() && Port->StoredUnits > 0)

@@ -3,6 +3,7 @@
 #include "Components/ArrowComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/CollisionCableComponent.h"
+#include "Components/HoseSocketComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/Pawn.h"
 #include "Net/UnrealNetwork.h"
@@ -55,8 +56,8 @@ ASocketColaFillingMachine::ASocketColaFillingMachine()
 	CapInputVolume->ComponentTags.Add(TEXT("ShopInteractionPoint"));
 	SealInputVolume->ComponentTags.Add(TEXT("ShopInteractionPoint"));
 
-	SupplyInputVolume->SetupAttachment(FillingController);
-	HoseConnections->SetRelativeTransform(FTransform::Identity);
+	HoseConnections->SetupAttachment(FillingController);
+	HoseConnections->SetRelativeLocation(FVector(100,0,50));
 	for (int32 Index=0; Index<HosePortTransforms.Num(); ++Index)
 		HosePortTransforms[Index] = GetDefaultHosePortTransform(Index);
 
@@ -70,9 +71,11 @@ ASocketColaFillingMachine::ASocketColaFillingMachine()
 	ControlCable = CreateDefaultSubobject<UCollisionCableComponent>(TEXT("ControllerCable"));
 	ControlCable->SetupAttachment(CapPin);
 	ControlCable->bEnableGrabbing = false;
+	ControlCable->bEnableMovementRestrictions = false;
 	ControlCable->bEnableNetworkSync = false;
 	ControlCable->bAttachStart = true;
 	ControlCable->bAttachEnd = true;
+	ControlCable->bStartAttachmentIsWorldAnchor = false;
 	ControlCable->AttachEndTo.ComponentProperty = GET_MEMBER_NAME_CHECKED(ASocketColaFillingMachine, FillingController);
 	OnPropBecomeActive.AddDynamic(this, &ASocketColaFillingMachine::ResetControlCable);
 
@@ -94,7 +97,20 @@ ASocketColaFillingMachine::ASocketColaFillingMachine()
 
 FVector ASocketColaFillingMachine::GetSupplyConnectionOrigin() const
 {
-	return FillingController->GetComponentLocation();
+	return bUseFlowController ? FlowControllerInlet->GetComponentLocation() : FillingController->GetComponentLocation();
+}
+
+void ASocketColaFillingMachine::UpdateControlLayout()
+{
+	Super::UpdateControlLayout();
+	FillingController->SetVisibility(!bUseFlowController);
+	FillingController->SetCollisionEnabled(bUseFlowController ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryAndPhysics);
+	Lever->SetCollisionEnabled(bUseFlowController ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryOnly);
+	// Both ends of this cable belong to the cabinet and move with it.
+	if (ControlCable->bEnableMovementRestrictions)
+		ControlCable->SetCableFeatureEnabled(ECableFeature::MovementRestrictions, false);
+	ControlCable->SetVisibility(!bUseFlowController);
+	ControlCable->SetComponentTickEnabled(!bUseFlowController);
 }
 
 FTransform ASocketColaFillingMachine::GetDefaultHosePortTransform(int32 Index) const
@@ -108,10 +124,15 @@ void ASocketColaFillingMachine::GetLifetimeReplicatedProps(TArray<FLifetimePrope
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(ASocketColaFillingMachine, bWorldLeverPressed);
 	DOREPLIFETIME(ASocketColaFillingMachine, InputPlacements);
+	DOREPLIFETIME(ASocketColaFillingMachine, PlacementOperator);
+	DOREPLIFETIME(ASocketColaFillingMachine, bMachinePlacementActive);
+	DOREPLIFETIME(ASocketColaFillingMachine, bPlacementHadCollision);
+	DOREPLIFETIME(ASocketColaFillingMachine, PlacementItems);
 }
 
 void ASocketColaFillingMachine::UpdateLeverVisual(float DeltaSeconds)
 {
+	if (bUseFlowController) return;
 	const bool bPulled = bWorldLeverPressed || Production->View.bLeverHeld;
 	FRotator Rotation = Lever->GetRelativeRotation();
 	const float Speed = 110.f / FMath::Max(.05f, LeverTravelSeconds);
@@ -121,6 +142,7 @@ void ASocketColaFillingMachine::UpdateLeverVisual(float DeltaSeconds)
 
 void ASocketColaFillingMachine::Tick(float DeltaSeconds)
 {
+	UpdateMachinePlacement();
 	if (HasAuthority() && bWorldLeverPressed)
 	{
 		APawn* Operator = WorldLeverOperator.Get();
@@ -136,12 +158,16 @@ void ASocketColaFillingMachine::Tick(float DeltaSeconds)
 
 void ASocketColaFillingMachine::EndPlay(const EEndPlayReason::Type Reason)
 {
+	if (HasAuthority() && GetNetMode() != NM_Client) RestoreMachinePlacement();
+	else RestorePlacementItems();
 	CancelInputPlacements();
 	Super::EndPlay(Reason);
 }
 
 void ASocketColaFillingMachine::ResetTransientPoolState()
 {
+	if (HasAuthority() && GetNetMode() != NM_Client) RestoreMachinePlacement();
+	else RestorePlacementItems();
 	CancelInputPlacements();
 	ReleaseWorldLever();
 	Super::ResetTransientPoolState();
@@ -150,6 +176,7 @@ void ASocketColaFillingMachine::ResetTransientPoolState()
 
 void ASocketColaFillingMachine::ResetControlCable(AActivePropActor*, int32, int32, FTransform)
 {
+	if (bUseFlowController) { UpdateControlLayout(); return; }
 	ControlCable->SetAttachEndToComponent(FillingController);
 	ControlCable->ResetCable();
 }

@@ -7,6 +7,7 @@
 #include "GameFramework/WorldSettings.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "../Shop/WorldInteractionCarry.h"
 
 EPropGrabIntent FPropGrabGesture::Process(EPropGrabInputPhase Phase, double Now, uint64 HeldToken, double HoldSeconds, double DoubleTapSeconds)
 {
@@ -57,6 +58,8 @@ void UPropGrabInputComponent::BeginPlay()
 	// Apply on every peer through the existing player component; NPC movement is untouched.
 	if (ACharacter* Character = Cast<ACharacter>(GetOwner()))
 	{
+		if (Character->HasAuthority())
+			Character->ReceiveControllerChangedDelegate.AddUniqueDynamic(this, &UPropGrabInputComponent::OnCarryControllerChanged);
 		if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
 		{
 			Movement->InitialPushForceFactor = .02f;
@@ -126,6 +129,11 @@ void UPropGrabInputComponent::ProcessGrabInput(EPropGrabInputPhase Phase, AActor
 		if (bEnding) CableActions->FinishHosePickupPress();
 		LastIntent = EPropGrabIntent::None;
 	}
+	else if (LastIntent == EPropGrabIntent::Drop && IsValid(HeldActor) && ShouldDropBatchedActor(*HeldActor))
+	{
+		Server_DropBatchedActor(HeldActor);
+		LastIntent = EPropGrabIntent::None;
+	}
 	else if ((LastIntent == EPropGrabIntent::Grab || LastIntent == EPropGrabIntent::Place) && !IsValid(HeldComponent)
 		&& TryBeginActorTravel(Phase, HeldActor)) LastIntent = EPropGrabIntent::None;
 }
@@ -133,6 +141,8 @@ void UPropGrabInputComponent::ProcessGrabInput(EPropGrabInputPhase Phase, AActor
 bool UPropGrabInputComponent::CanGrabHitComponent(const UPrimitiveComponent* HittingComponent) const
 {
 	if (!IsValid(HittingComponent) || HittingComponent->GetWorld()!=GetWorld() || !IsValid(HittingComponent->GetOwner())) return false;
+	if (const auto* Player = Cast<APawn>(GetOwner()); Player
+		&& IsValid(WorldInteractionCarry::GetCarryReference(*Player, TEXT("Holding Actor")))) return false;
 	const auto* Prop=Cast<AActivePropActor>(HittingComponent->GetOwner());
 	return !Prop || Prop->AllowsPlayerGrab();
 }
@@ -140,6 +150,9 @@ bool UPropGrabInputComponent::CanGrabHitComponent(const UPrimitiveComponent* Hit
 bool UPropGrabInputComponent::CanGrabTarget(AActor* Target) const
 {
 	if (!IsValid(Target) || Target->GetWorld() != GetWorld() || !IsValid(GetOwner())) return false;
+	if (const auto* Player = Cast<APawn>(GetOwner()); Player
+		&& (IsValid(WorldInteractionCarry::GetCarryReference(*Player, TEXT("Holding Actor")))
+			|| IsValid(WorldInteractionCarry::GetCarryReference(*Player, TEXT("Holding Component"))))) return false;
 	if (const auto* Prop = Cast<AActivePropActor>(Target))
 	{
 		const auto* Manager = APropManager::Get(this);

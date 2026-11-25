@@ -60,6 +60,8 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Replicated, Category="Resource Transfer|Flow") float LastTransferUpdateSeconds=0;
 	/** Live receiver demand propagated to the supply valve; false never discards trapped contents. */
 	UFUNCTION(BlueprintPure, Category="Resource Transfer|Flow") bool IsRequestingContent() const;
+	/** Available input rate at a neutral content receiver, before storage or downstream demand limits it. */
+	float GetContentFeedRate(const UResourceTransferEndpointComponent& Receiver) const;
 	/** Bounded integration keeps continuous throughput independent of finite hose capacity and frame rate. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Resource Transfer|Simulation", meta=(ClampMin="0.001",ClampMax="0.1")) float MaxTransferStepSeconds=.05f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Resource Transfer|Simulation", meta=(ClampMin="1",ClampMax="1024")) int32 MaxTransferSubsteps=128;
@@ -91,6 +93,8 @@ private:
 	float DrainTrappedContents(EHoseDischargePoint Point,float DeltaSeconds,float SupplyPressure);
 	float IntegrateTransferStep(float DeltaSeconds);
 	float IntegrateContentStep(float DeltaSeconds);
+	float GetPressureFlowCapacity(float Head) const;
+	float GetContentLineRate(float Head,bool bPassive,float IntakeAssist) const;
 	float IntakeFrom(UResourceTransferEndpointComponent* Port,float Units);
 	float DeliverTo(UResourceTransferEndpointComponent* Port,float Units,float Pressure,float DeltaSeconds);
 	void Rupture(EHoseFailureMode Mode);

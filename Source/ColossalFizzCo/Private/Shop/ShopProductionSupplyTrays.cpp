@@ -15,6 +15,20 @@
 
 namespace ManualEquipment { FPropEventSyncDelta State(const FPropEventUpdateData& Event,int32 Count); }
 
+int32 UShopProductionStationComponent::GetCapTrayCapacity() const
+{
+	if (const auto* Machine=Cast<AManualColaFillingMachine>(GetOwner()))
+		return int32(Machine->GetUpgradeValue(EFillingMachineUpgradeType::CapTray,Machine->GetUpgradeRank(EFillingMachineUpgradeType::CapTray)));
+	return FMath::Clamp(CapTrayCapacity,1,FFillingMachineUpgradeState::MaxTrayCapacity);
+}
+
+int32 UShopProductionStationComponent::GetSealTrayCapacity() const
+{
+	if (const auto* Machine=Cast<AManualColaFillingMachine>(GetOwner()))
+		return int32(Machine->GetUpgradeValue(EFillingMachineUpgradeType::SealTray,Machine->GetUpgradeRank(EFillingMachineUpgradeType::SealTray)));
+	return FMath::Clamp(SealTrayCapacity,1,FFillingMachineUpgradeState::MaxTrayCapacity);
+}
+
 bool UShopProductionStationComponent::IsTraySupply(int32 ID, bool bSeal, const AActor* Carrier) const
 {
 	const auto* Manager = APropManager::Get(this);
@@ -52,7 +66,7 @@ bool UShopProductionStationComponent::CanLoadCap(int32 ID, const AActor* Carrier
 	const auto* Manager = APropManager::Get(this);
 	const auto* Equipment = Machine && Manager ? Manager->FindUniqueData(Machine->ISID) : nullptr;
 	return Machine && Machine->HasAuthority() && !Machine->bIsHeld && CapInput && Equipment
-		&& Equipment->EventData.LoadedCapISIDs.Num() < FMath::Clamp(CapTrayCapacity,1,64)
+		&& Equipment->EventData.LoadedCapISIDs.Num() < GetCapTrayCapacity()
 		&& !Equipment->EventData.LoadedCapISIDs.Contains(ID) && IsTraySupply(ID,false,Carrier) && SupportsIncomingCap(ID);
 }
 
@@ -62,7 +76,7 @@ bool UShopProductionStationComponent::CanLoadSeal(int32 ID, const AActor* Carrie
 	const auto* Manager = APropManager::Get(this);
 	const auto* Equipment = Machine && Manager ? Manager->FindUniqueData(Machine->ISID) : nullptr;
 	return Machine && Machine->HasAuthority() && !Machine->bIsHeld && SealInput && Equipment
-		&& Equipment->EventData.LoadedSealISIDs.Num() < FMath::Clamp(SealTrayCapacity,1,64)
+		&& Equipment->EventData.LoadedSealISIDs.Num() < GetSealTrayCapacity()
 		&& !Equipment->EventData.LoadedSealISIDs.Contains(ID) && IsTraySupply(ID,true,Carrier);
 }
 
@@ -92,6 +106,7 @@ void UShopProductionStationComponent::RefreshSupplyTrays(int32 PreferredCapISID,
 {
 	auto* Manager=APropManager::Get(this); auto* Machine=Cast<AActivePropActor>(GetOwner());
 	if (!Manager || !Machine || !Machine->HasAuthority() || Machine->ISID<=0 || Machine->bIsHeld) return;
+	if (const auto* Layout = Cast<ASocketColaFillingMachine>(Machine); Layout && Layout->IsMachinePlacementActive()) return;
 	const auto* Equipment=Manager->FindUniqueData(Machine->ISID); if (!Equipment) return;
 	// Convert previously purchased abstract stock into physical deliveries once.
 	// Keep any undelivered balance if creation fails; tray limits still apply.
@@ -121,13 +136,15 @@ void UShopProductionStationComponent::RefreshSupplyTrays(int32 PreferredCapISID,
 	TArray<FPropEventSyncDelta> ItemUpdates;
 	TArray<int32> ToRelease,Rejected;
 	auto* SocketMachine = Cast<ASocketColaFillingMachine>(Machine);
+	const bool bManagedCapacity=Machine->IsA<AManualColaFillingMachine>();
 	auto Tray=[&](UBoxComponent* Volume,bool Seal,int32 Limit,TArray<int32>& Loaded,int32 PreferredISID)
 	{
-		Limit=FMath::Clamp(Limit,1,64);
 		const auto Previous=Loaded; Loaded.Reset();
 		for (int32 ID:Previous)
 		{
-			if (Volume && IsTraySupply(ID,Seal) && Loaded.Num()<Limit) Loaded.AddUnique(ID);
+			// Legacy machines may still hold supplies loaded before upgrade ranks were saved.
+			if (Volume && IsTraySupply(ID,Seal)
+				&& Loaded.Num()<(bManagedCapacity ? FFillingMachineUpgradeState::MaxTrayCapacity : Limit)) Loaded.AddUnique(ID);
 			else ToRelease.AddUnique(ID);
 		}
 		if (!Volume) return;
@@ -155,8 +172,8 @@ void UShopProductionStationComponent::RefreshSupplyTrays(int32 PreferredCapISID,
 			ItemUpdates.Add(ItemDelta); Loaded.Add(ID);
 		}
 	};
-	Tray(CapInput,false,CapTrayCapacity,Update.LoadedCapISIDs,PreferredCapISID);
-	Tray(SealInput,true,SealTrayCapacity,Update.LoadedSealISIDs,PreferredSealISID);
+	Tray(CapInput,false,GetCapTrayCapacity(),Update.LoadedCapISIDs,PreferredCapISID);
+	Tray(SealInput,true,GetSealTrayCapacity(),Update.LoadedSealISIDs,PreferredSealISID);
 	Equipment=Manager->FindUniqueData(Machine->ISID); if (!Equipment) return;
 	const bool Changed=Update.LoadedCapISIDs!=Equipment->EventData.LoadedCapISIDs || Update.LoadedSealISIDs!=Equipment->EventData.LoadedSealISIDs;
 	if (Changed)
@@ -212,11 +229,21 @@ FTransform UShopProductionStationComponent::GetTraySupplyPose(const AActivePropA
 	if (const auto* Machine = Cast<ASocketColaFillingMachine>(GetOwner()); Machine && &Volume == CapInput && Machine->CapSocket)
 	{
 		const auto& Socket = Machine->CapSocket->GetComponentTransform();
-		return FTransform(Socket.GetRotation(), Socket.TransformPosition(FVector(0, 0, Index * Machine->CapStackSpacing)), Scale);
+		constexpr int32 CapsPerStack=4;
+		constexpr int32 StackColumns=5;
+		constexpr int32 StackOffsets[StackColumns]={0,1,-1,2,-2};
+		const int32 Stack=FMath::Clamp(Index,0,FFillingMachineUpgradeState::MaxTrayCapacity-1)/CapsPerStack;
+		const FVector Extent=Item.PropMesh->GetStaticMesh()->GetBoundingBox().GetExtent()*Scale.GetAbs();
+		const FVector SocketScale=Socket.GetScale3D().GetAbs().ComponentMax(FVector(UE_KINDA_SMALL_NUMBER));
+		const FVector Offset(
+			StackOffsets[Stack%StackColumns]*(2.0*Extent.X+1.0)/SocketScale.X,
+			StackOffsets[Stack/StackColumns]*(2.0*Extent.Y+1.0)/SocketScale.Y,
+			(Index%CapsPerStack)*Machine->CapStackSpacing);
+		return FTransform(Socket.GetRotation(), Socket.TransformPosition(Offset), Scale);
 	}
 
 	const bool bSealTray = &Volume == SealInput;
-	const int32 Limit = FMath::Clamp(bSealTray ? SealTrayCapacity : CapTrayCapacity, 1, 64);
+	const int32 Limit = bSealTray ? GetSealTrayCapacity() : GetCapTrayCapacity();
 	const int32 Columns = FMath::CeilToInt(FMath::Sqrt(float(Limit)));
 	const int32 Rows = FMath::DivideAndRoundUp(Limit, Columns);
 	const FVector Extent = Volume.GetUnscaledBoxExtent();
@@ -299,6 +326,6 @@ void UShopProductionStationComponent::UpdateSupplyTrayCollision()
 		Volume->SetCollisionEnabled(Full ? ECollisionEnabled::QueryAndPhysics : (bTraceable ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision));
 	};
 	const bool bTraceable=GetOwner()->IsA<ASocketColaFillingMachine>();
-	SetFullCollision(CapInput,View.CapTrayCount>=FMath::Clamp(CapTrayCapacity,1,64),bTraceable);
-	SetFullCollision(SealInput,View.SealTrayCount>=FMath::Clamp(SealTrayCapacity,1,64),bTraceable);
+	SetFullCollision(CapInput,View.CapTrayCount>=GetCapTrayCapacity(),bTraceable);
+	SetFullCollision(SealInput,View.SealTrayCount>=GetSealTrayCapacity(),bTraceable);
 }

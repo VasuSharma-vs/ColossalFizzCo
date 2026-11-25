@@ -12,6 +12,7 @@ class USkeletalMeshComponent;
 class UMaterialInstanceDynamic;
 class URocketProjectileComponent;
 class UShopProductionStationComponent;
+enum class EFillingMachineUpgradeType : uint8;
 
 USTRUCT(BlueprintType)
 struct FColaRocketLaunchConfiguration
@@ -91,6 +92,7 @@ public:
 	/** Hose delivery supplies line pressure separately from the canonical liquid/temperature transaction. */
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Cola|Manufacturing") void OnManufacturingSupplyReceived(float ActualUnits,float IncomingPressure,float ActualRate);
 	UFUNCTION(BlueprintPure, Category="Cola|Manufacturing") bool IsManufacturingFlowActive() const;
+	float GetActiveFillingUpgradeValue(EFillingMachineUpgradeType Type) const;
 	UFUNCTION(BlueprintPure, Category="Cola|Manufacturing|Seal") bool CanApplyManufacturingSeal() const;
 	bool BuildManufacturingSealDelta(FPropEventSyncDelta& OutDelta, float DurationSeconds = 0.0f) const;
 	/** Applies the bottle state; stations use BuildManufacturingSealDelta for atomic consumption of a physical seal. */
@@ -158,6 +160,7 @@ protected:
 private:
 	void UpdateRocketPlume();
 	void StopRocketPlume();
+	float GetHeldMovementShakeMultiplier() const;
 	bool bRocketNozzleRegistered = false;
 
 public:

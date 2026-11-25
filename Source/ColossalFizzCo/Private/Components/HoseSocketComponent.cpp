@@ -27,7 +27,9 @@ void UHoseSocketComponent::OnRegister()
 	constexpr EObjectFlags ChildFlags = RF_Transient | RF_DuplicateTransient | RF_TextExportTransient;
 	if (!IsValid(TraceVolume))
 	{
-		TraceVolume = NewObject<UBoxComponent>(Owner, NAME_None, ChildFlags);
+		const FName TraceName(*(GetName() + TEXT("TraceVolume")));
+		TraceVolume = NewObject<UBoxComponent>(Owner, TraceName, ChildFlags);
+		TraceVolume->SetNetAddressable();
 		TraceVolume->SetupAttachment(this);
 		TraceVolume->SetCollisionObjectType(ECC_WorldDynamic);
 		TraceVolume->SetCollisionResponseToAllChannels(ECR_Ignore);
@@ -125,7 +127,7 @@ AManualColaFillingMachine* UHoseSocketComponent::FindFillingMachine(int32& PortI
 {
 	PortIndex = INDEX_NONE;
 	auto* Machine = Cast<AManualColaFillingMachine>(GetOwner());
-	if (!Machine || GetAttachParent() != Machine->HoseConnections) return nullptr;
+	if (!Machine || (GetAttachParent()!=Machine->HoseConnections && this!=Machine->FlowControllerInlet)) return nullptr;
 	PortIndex = Machine->HoseSockets.IndexOfByKey(this);
 	return Machine;
 }
@@ -146,8 +148,9 @@ bool UHoseSocketComponent::AttachHose(AHoseCableActor* Hose, int32 ConnectorInde
 	{
 		const bool bEmptyUnconnectedHose = !Hose->StartPort && !Hose->EndPort
 			&& Hose->bMatchSourceResourceWhenEmpty && Hose->Transfer->Buffer.Units <= 0;
-		const int32 ContentID = bEmptyUnconnectedHose ? Machine->GetRequiredHoseContentID(PortIndex) : Hose->Transfer->ResourceID;
-		const bool bWaitForSource = bEmptyUnconnectedHose && ContentID == 0;
+		const int32 RequiredID=Machine->GetRequiredHoseContentID(PortIndex);
+		const bool bWaitForSource = Hose->IsUnassignedContentSource(Hose->StartPort) || (bEmptyUnconnectedHose && RequiredID==0);
+		const int32 ContentID = bWaitForSource ? 0 : (bEmptyUnconnectedHose ? RequiredID : Hose->Transfer->ResourceID);
 		if (!bContent || (ContentID <= 0 && !bWaitForSource)
 			|| !Machine->PrepareReceivingHoseConnection(PortIndex, ContentID, Hose)) return false;
 		if (bWaitForSource) return Hose->ConnectPortAtConnector(this, ConnectorIndex, bSupply, false, true);

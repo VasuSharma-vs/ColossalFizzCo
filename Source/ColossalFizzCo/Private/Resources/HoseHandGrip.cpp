@@ -1,6 +1,7 @@
 #include "Resources/HoseCableActor.h"
 
 #include "Components/CollisionCableComponent.h"
+#include "Components/ResourceTransferEndpointComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/Character.h"
 #include "UObject/StructOnScope.h"

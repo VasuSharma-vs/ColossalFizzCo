@@ -2,22 +2,38 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Shop/FillingMachineUpgradeTypes.h"
+#include "Shop/FlowControllerUpgradeTypes.h"
 #include "Shop/ShopCheckoutTypes.h"
 #include "Shop/ShopProductionStationComponent.h"
+#include "Shop/ShopTableOfferComponent.h"
 #include "Components/CableFeatureTypes.h"
 #include "ShopPlayerInteractionComponent.generated.h"
 
 class UShopScannerComponent;
 class UShopATMComponent;
 class UShopTerminalWidget;
+class UShopBalanceWidget;
+class UShopBottleDispenserWidget;
 class SWidget;
 class ULocalPlayer;
 class UCollisionCableComponent;
 class UHoseSocketComponent;
 class AHoseCableActor;
 class APressurizedColaContainer;
+class AColaFlowController;
+class ASocketColaFillingMachine;
+class AShopMachinePlacementPreview;
+class AShopBottleDispenser;
+class AShopTableUpgradeTerminal;
+class UShopTablePurchaseWidget;
+class AController;
+class APlayerController;
 class APawn;
 class UPrimitiveComponent;
+class UInputComponent;
+class UEnhancedInputComponent;
+class UInputMappingContext;
 
 UENUM(BlueprintType)
 enum class EShopScannerAction : uint8 { Save, RemoveItem, Clear, LockBill, Complete, CashCompensation, ProvideReplacement };
@@ -37,9 +53,13 @@ public:
 	void RequestScannerAction(UShopScannerComponent* Scanner, FGuid ExpectedSession, EShopScannerAction Action, int32 ItemISID, FGuid CaseID);
 	UFUNCTION(BlueprintCallable, Category = "Shop") void RequestATMWithdrawal(UShopATMComponent* ATM, const TArray<int32>& Denominations);
 	UFUNCTION(BlueprintCallable, Category = "Shop") void OpenTerminal(AActor* Station);
+	UFUNCTION(BlueprintCallable, Category = "Shop") void OpenPlayerUpgrades();
 	/** Local E interaction: trace from the real camera using the station reach budget. */
 	UFUNCTION(BlueprintCallable, Category="Shop") bool TryOpenTerminalFromView();
-	/** Shared query used by the input path and collision/reach regression tests. */
+	UFUNCTION(BlueprintCallable, Category="Flow Controller") void RequestFlowControllerPause(bool bPaused);
+	bool RequestFlowControllerUpgrade(AColaFlowController* Flow, EFlowControllerUpgradeType Upgrade, int32 ExpectedRank, FGuid OperationID);
+	bool RequestFillingMachineUpgrade(ASocketColaFillingMachine* Table, EFillingMachineUpgradeType Upgrade, int32 ExpectedRank, FGuid OperationID);
+	/** Returns a reachable station and optionally reports the first blocking hit for passive readouts. */
 	AActor* FindTerminalInView(const FVector& ViewLocation, const FVector& ViewDirection, FHitResult* StationHit=nullptr) const;
 	UFUNCTION(BlueprintPure, Category="Shop") bool IsTerminalOpen() const;
 	/** Use the selected cable's Default Grab Settings. Disable to configure a stronger/weaker participant here. */
@@ -74,7 +94,9 @@ public:
 	EShopCheckoutResult ExecuteProductionAction(UShopProductionStationComponent* Station, FGuid SessionID, EShopProductionAction Action, int32 BottleISID, int32 OtherISID, int64 Sequence);
 	void ShowProductionResult(EShopCheckoutResult Result);
 	void ClearProductionNotice();
+	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	bool IsStationReachable(const AActor* Station) const { return CanReach(Station); }
 	EShopCheckoutResult ExecuteATMWithdrawal(UShopATMComponent* ATM, const TArray<int32>& Denominations, FGuid OperationID, int64 Sequence);
 	/** Server/test entry uses the same access, ordering, session and case checks as the owned RPC. */
@@ -88,9 +110,96 @@ private:
 	UFUNCTION(Server, Reliable) void Server_SupplyPurchase(UShopProductionStationComponent* Station, FGuid SessionID, FName OfferID, int32 Quantity, FGuid OperationID, int64 Sequence);
 	UFUNCTION(Server, Reliable) void Server_ProductionAction(UShopProductionStationComponent* Station, FGuid SessionID, EShopProductionAction Action, int32 BottleISID, int32 OtherISID, int64 Sequence);
 	UFUNCTION(Client, Reliable) void Client_OpenTerminal(AActor* Station);
+	bool OpenTableUpgradePicker(APlayerController& Controller, AShopTableUpgradeTerminal& Station);
+	void CloseTableUpgradePicker();
+	bool IsTableUpgradePickerOpen() const;
+	bool RequestTablePurchase(FName OfferID, int64 ExpectedPriceCents, FGuid OperationID);
+	EShopTablePurchaseResult ExecuteTablePurchase(AShopTableUpgradeTerminal* Station, FName OfferID, int64 ExpectedPriceCents);
+	UFUNCTION(Server, Reliable) void Server_PurchaseTable(AShopTableUpgradeTerminal* Station, FName OfferID, int64 ExpectedPriceCents, FGuid OperationID);
+	UFUNCTION(Client, Reliable) void Client_TablePurchaseResult(FGuid OperationID, EShopTablePurchaseResult Result);
 	bool TryUseSocketMachineControl(APawn& Pawn, const FHitResult& Hit);
 	UFUNCTION(Server, Reliable) void Server_UseSocketMachineControl(int32 MachineISID, FName ControlName);
+	AShopBottleDispenser* FindAimedBottleDispenser(const APawn& Pawn, const FHitResult& Hit, const FVector& Eye,
+		const FVector& Direction, bool& bAimingAtLever) const;
+	UFUNCTION(Server, Reliable) void Server_UseBottleDispenser(AShopBottleDispenser* Dispenser);
+	UFUNCTION(Server, Reliable) void Server_UseFlowSelector(AColaFlowController* FlowController);
+	UFUNCTION(Server, Reliable) void Server_SetFlowLever(AColaFlowController* FlowController, bool bPressed);
+	UFUNCTION(Server, Reliable) void Server_SetFlowPaused(AColaFlowController* FlowController, bool bPaused);
+	UFUNCTION(Server, Reliable) void Server_UpgradeFlowController(AColaFlowController* FlowController, EFlowControllerUpgradeType Upgrade, int32 ExpectedRank, FGuid OperationID);
+	UFUNCTION(Client, Reliable) void Client_FlowControllerUpgradeResult(AColaFlowController* FlowController, FGuid OperationID, EFlowControllerPurchaseResult Result);
+	UFUNCTION(Server, Reliable) void Server_UpgradeFillingMachine(ASocketColaFillingMachine* Table, EFillingMachineUpgradeType Upgrade, int32 ExpectedRank, FGuid OperationID);
+	UFUNCTION(Client, Reliable) void Client_FillingMachineUpgradeResult(FGuid OperationID, EFillingMachinePurchaseResult Result);
+	UPROPERTY(Transient, Replicated) TObjectPtr<AColaFlowController> ActiveFlowLever;
+	TWeakObjectPtr<AColaFlowController> PressedFlowLever;
+	UPROPERTY(Transient) TObjectPtr<UInputComponent> FlowControlInput;
+	AColaFlowController* GetLocalFlowLever() const;
+	bool BeginFlowLeverInput(APawn& Pawn, AColaFlowController& FlowController);
+	void EndFlowLeverInput();
+	void CleanupFlowLeverInput();
+	void UpdateStationReadoutsFromView();
+	void OpenAimedFillingMachineUpgrades();
+	void EnsureShopBalanceWidget(APlayerController& PC);
+	void UpdateBottleDispenserReadout(APlayerController& PC, const AShopBottleDispenser* Dispenser, bool bAimingAtLever);
+	void CloseBottleDispenserReadout();
+	void ShowTerminal(AActor* Station, bool bManualOpen, bool bOpenUpgrades=false);
+	void CloseFlowReadout();
+	void CloseFillingTableReadout();
+	FTimerHandle StationReadoutTimer;
+	TWeakObjectPtr<ASocketColaFillingMachine> PinnedFillingTable;
+	TWeakObjectPtr<ASocketColaFillingMachine> DismissedFillingTable;
+	UPROPERTY(Transient) TObjectPtr<UShopTerminalWidget> FlowReadoutWidget;
 	UPROPERTY(Transient) TObjectPtr<UShopTerminalWidget> TerminalWidget;
+	UPROPERTY(Transient) TObjectPtr<UShopTablePurchaseWidget> TableUpgradePicker;
+	TWeakObjectPtr<AShopTableUpgradeTerminal> TableUpgradeTerminal;
+	UPROPERTY(Transient) TObjectPtr<UShopBalanceWidget> ShopBalanceWidget;
+	UPROPERTY(Transient) TObjectPtr<UShopBottleDispenserWidget> BottleDispenserWidget;
+	UPROPERTY(Transient) TObjectPtr<UInputComponent> FillingTableInput;
+	UFUNCTION() void OnFillingPawnControllerChanged(APawn* Pawn, AController* OldController, AController* NewController);
+	void BindFillingTableInput(APlayerController* PC);
+	void UnbindFillingTableInput();
+	APlayerController* GetMachinePlacementController() const;
+	AActor* FindMachineForPlacement(const APlayerController& Controller) const;
+	void PressMachinePlacementKey();
+	void ReleaseMachinePlacementKey();
+	void ClearMachinePlacementHold();
+	void UpdateMachinePlacementHold();
+	void UpdateMachinePlacementPreview();
+	void CommitMachinePlacementInput();
+	void CancelMachinePlacementInput();
+	void StartMachinePlacementRotation();
+	void StopMachinePlacementRotation();
+	bool BindMachinePlacementInput(APlayerController& Controller);
+	void CloseMachinePlacementPreview();
+	void ReleaseMachinePlacementInputWhenReady();
+	void UnbindMachinePlacementInput();
+	void CleanupMachinePlacement();
+	UFUNCTION(Server, Reliable) void Server_BeginMachinePlacement(AActor* Machine, int64 Sequence);
+	UFUNCTION(Server, Reliable) void Server_FinishMachinePlacement(AActor* Machine, int64 Sequence, FTransform Pose);
+	UFUNCTION(Server, Reliable) void Server_CancelMachinePlacement(AActor* Machine, int64 Sequence);
+	UFUNCTION(Client, Reliable) void Client_MachinePlacementState(AActor* Machine, int64 Sequence, bool bActive);
+	FTimerHandle MachinePlacementHoldTimer;
+	FTimerHandle MachinePlacementPreviewTimer;
+	FTimerHandle MachinePlacementInputReleaseTimer;
+	TWeakObjectPtr<AActor> PendingPlacementMachine;
+	TWeakObjectPtr<AActor> LocalPlacementMachine;
+	TWeakObjectPtr<AActor> ServerPlacementMachine;
+	TWeakObjectPtr<APawn> ServerPlacementPawn;
+	UPROPERTY(Transient) TObjectPtr<AShopMachinePlacementPreview> MachinePlacementPreview;
+	UPROPERTY(Transient) TObjectPtr<UEnhancedInputComponent> MachinePlacementInput;
+	UPROPERTY(Transient) TObjectPtr<UInputMappingContext> MachinePlacementMapping;
+	int64 LocalPlacementSequence = 0;
+	int64 ServerPlacementSequence = 0;
+	double MachinePlacementHoldTime = 0;
+	float MachinePlacementYaw = 0;
+	bool bMachinePlacementKeyDown = false;
+	bool bMachinePlacementRotating = false;
+	bool bMachinePlacementCommitPending = false;
+	friend class FShopTerminalViewTest;
+	bool IsFillingTableReachable(const ASocketColaFillingMachine* Table) const;
+	ASocketColaFillingMachine* FindAimedFillingTable(const FHitResult& Hit) const;
+	ASocketColaFillingMachine* FindNearbyFillingTable(bool bPreferAimedCapInput=false) const;
+	void ToggleFillingTableReadout();
+	void UseFillingTableControl(EShopProductionAction Action);
 	bool CanReach(const AActor* Station) const;
 	TSharedPtr<SWidget> ProductionNotice;
 	TWeakObjectPtr<ULocalPlayer> NoticePlayer;

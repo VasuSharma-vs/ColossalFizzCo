@@ -2,6 +2,7 @@
 #include "Shop/ManualColaFillingMachine.h"
 #include "Shop/SocketColaFillingMachine.h"
 #include "Shop/BottleFillingComponent.h"
+#include "Shop/ColaFlowController.h"
 #include "Shop/ShopInstanceVolumeQuery.h"
 #include "Shop/ShopProcurementComponent.h"
 #include "Shop/ShopCheckoutComponent.h"
@@ -14,6 +15,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Components/RocketProjectileComponent.h"
 #include "Engine/World.h"
+#include "GameFramework/Pawn.h"
 
 namespace ManualEquipment
 {
@@ -64,7 +66,7 @@ namespace ManualEquipment
 int32 UShopProductionStationComponent::GetSupportedContentCount() const
 {
 	const auto* Machine=Cast<AManualColaFillingMachine>(GetOwner());
-	return Machine ? FMath::Clamp(Machine->SupportedContentCount,1,32) : 1;
+	return Machine ? Machine->GetActiveHosePortCount() : 1;
 }
 
 void UShopProductionStationComponent::ResetEquipmentSession()
@@ -106,7 +108,8 @@ bool UShopProductionStationComponent::CanSeatBottle(int32 ID,const AActor* Carri
 	const auto* Manager = APropManager::Get(this);
 	if (!Machine || !Machine->HasAuthority() || Machine->ISID <= 0 || Machine->bIsHeld || !Manager || !BottleHolder
 		|| !Filler || Filler->bIsFilling || View.bLeverHeld || (View.SeatedBottleISID && View.SeatedBottleISID != ID)) return false;
-	if (const auto* Layout = Cast<ASocketColaFillingMachine>(Machine); Layout && Layout->IsBottleHolderReserved(ID)) return false;
+	if (const auto* Layout = Cast<ASocketColaFillingMachine>(Machine); Layout
+		&& (Layout->IsMachinePlacementActive() || Layout->IsBottleHolderReserved(ID))) return false;
 
 	const auto* Record = Manager->FindISIDData(ID);
 	const auto* Definition = Record ? Manager->FindProductDefinition(Record->ProductID) : nullptr;
@@ -163,9 +166,110 @@ void UShopProductionStationComponent::UpdateBottleInputTrace()
 bool UShopProductionStationComponent::IsLeverHoldingBottle(int32 ID) const
 {
 	const auto* Machine=Cast<AActivePropActor>(GetOwner());
-	return View.bLeverHeld && View.SeatedBottleISID==ID && Filler && GetWorld()
-		&& GetWorld()->GetTimeSeconds()<Filler->LeverExpiresAt && OperatorInRange(View.LeverOperator)
-		&& (!Machine || !Machine->bIsHeld) && IsBottleAligned(ID);
+	if (!View.bLeverHeld || View.SeatedBottleISID!=ID || !Filler || !GetWorld()
+		|| (Machine && Machine->bIsHeld) || !IsBottleAligned(ID)) return false;
+	if (const auto* Controller=FlowLeverController.Get())
+	{
+		const auto* Table=Cast<AManualColaFillingMachine>(Machine);
+		return Table && Controller->IsDrivingTable(*Table,View.LeverOperator);
+	}
+	return GetWorld()->GetTimeSeconds()<Filler->LeverExpiresAt && OperatorInRange(View.LeverOperator);
+}
+
+EShopCheckoutResult UShopProductionStationComponent::BeginManualLeverHold(int32 BottleID,AActor* Player,APropManager& Manager)
+{
+	if (View.SeatedBottleISID!=BottleID || !IsBottleAligned(BottleID)) return EShopCheckoutResult::Unavailable;
+	const auto* Machine=Cast<AManualColaFillingMachine>(GetOwner());
+	if (Machine && !Machine->HasSupplyNozzle(View.SelectedContentPort,View.ConnectedSourceISID)) return EShopCheckoutResult::Unavailable;
+	if (View.bLeverHeld && View.LeverOperator!=Player) return EShopCheckoutResult::OperationConflict;
+	const auto* Data=Manager.FindUniqueData(BottleID);
+	if (!Manager.FindISIDData(BottleID) || !Data || Data->EventData.AttachedCapISID>0) return EShopCheckoutResult::Unavailable;
+	const auto* Bottle=Cast<AColaPropActor>(Manager.GetActiveActorFromISID(BottleID));
+	const auto* Source=Manager.FindUniqueData(View.ConnectedSourceISID);
+	const int32 ContentID=Machine ? Machine->GetSupplyContentID(View.SelectedContentPort) : (Source ? Source->EventData.ContentID : 0);
+	if (!Bottle || ContentID<=0 || (!View.bFlowStopped && !Bottle->HasTemporaryManufacturingSeal() && !Bottle->CanAcceptManufacturingContent(ContentID)))
+		return EShopCheckoutResult::ContentNotSupported;
+	Filler->LeverOperator=Player;
+	Filler->LeverExpiresAt=GetWorld()->GetTimeSeconds()+FMath::Max(.15f,LeverLeaseSeconds);
+	View.LeverOperator=Player;
+	View.bLeverHeld=true;
+	return EShopCheckoutResult::Success;
+}
+
+bool UShopProductionStationComponent::BeginFlowControllerHold(AColaFlowController& Controller, APawn& Player)
+{
+	auto* Table=Cast<AManualColaFillingMachine>(GetOwner());
+	auto* Manager=APropManager::Get(this);
+	if (!Table || !Table->HasAuthority() || !bManualLeverMode || !Filler || !Manager
+		|| !Controller.IsDrivingTable(*Table,&Player)) return false;
+	if (Controller.LeverLevel==4)
+	{
+		const int32 BottleID=View.SeatedBottleISID;
+		const auto* Data=Manager->FindUniqueData(BottleID);
+		const auto* Bottle=Cast<AColaPropActor>(Manager->GetActiveActorFromISID(BottleID));
+		if (BottleID<=0 || BottleID==FlowControllerCompletedBottleISID || !Data || !Bottle
+			|| Data->EventData.ContentLevel>=1.f-UE_KINDA_SMALL_NUMBER
+			|| !Bottle->CanAcceptManufacturingContent(Table->GetSupplyContentID(View.SelectedContentPort))) return false;
+	}
+	RefreshInputs();
+	if (View.bLeverHeld || BeginManualLeverHold(View.SeatedBottleISID,&Player,*Manager)!=EShopCheckoutResult::Success) return false;
+	FlowLeverController=&Controller;
+	bFlowControllerValveClosed=false;
+	Filler->LeverExpiresAt=0;
+	UpdateManualEquipment();
+	Table->ForceNetUpdate();
+	return true;
+}
+
+bool UShopProductionStationComponent::StopsFlowAtBottleCapacity() const
+{
+	const auto* Controller=FlowLeverController.Get();
+	return Controller && Controller->LeverLevel>=3;
+}
+
+bool UShopProductionStationComponent::IsFlowControllerBottleFull() const
+{
+	const auto* Manager=APropManager::Get(this);
+	const auto* Bottle=Manager ? Manager->FindUniqueData(View.SeatedBottleISID) : nullptr;
+	return Bottle && Bottle->EventData.ContentLevel>=1.f-UE_KINDA_SMALL_NUMBER;
+}
+
+bool UShopProductionStationComponent::IsFlowControllerValveOpen(const AColaFlowController& Controller) const
+{
+	return FlowLeverController.Get()==&Controller && View.bLeverHeld && !View.bFlowStopped
+		&& !bFlowControllerValveClosed && Filler && Filler->IsHoseFilling();
+}
+
+void UShopProductionStationComponent::CloseFlowControllerValve(AColaFlowController& Controller)
+{
+	if (bFlowControllerValveClosed) return;
+	bFlowControllerValveClosed=true;
+	FlowControllerCompletedBottleISID=View.SeatedBottleISID;
+	SetFlowControllerPaused(Controller,true);
+}
+
+bool UShopProductionStationComponent::TryReleaseCompletedFlowControllerBottle(AColaFlowController& Controller)
+{
+	if (FlowLeverController.Get()!=&Controller || !bFlowControllerValveClosed) return false;
+	const auto* Manager=APropManager::Get(this);
+	const auto* Bottle=Manager ? Cast<AColaPropActor>(Manager->GetActiveActorFromISID(View.SeatedBottleISID)) : nullptr;
+	if (!Bottle || (!Bottle->IsManufacturingSafeToRelease() && !Bottle->HasTemporaryManufacturingSeal())) return false;
+	EndManualLever();
+	return true;
+}
+
+void UShopProductionStationComponent::SetFlowControllerPaused(AColaFlowController& Controller, bool bPaused)
+{
+	if (FlowLeverController.Get()!=&Controller || !View.bLeverHeld) return;
+	View.bFlowStopped=bPaused || bFlowControllerValveClosed;
+	if (View.bFlowStopped) Filler->StopFilling();
+	UpdateManualEquipment();
+	GetOwner()->ForceNetUpdate();
+}
+
+void UShopProductionStationComponent::ReleaseFlowControllerHold(AColaFlowController& Controller)
+{
+	if (FlowLeverController.Get()==&Controller) EndManualLever();
 }
 
 bool UShopProductionStationComponent::UseTemporarySeal(int32 ID)
@@ -199,6 +303,8 @@ void UShopProductionStationComponent::EndManualLever()
 	if (!GetOwner() || !GetOwner()->HasAuthority()) return;
 	const bool WasHeld=View.bLeverHeld;
 	const int32 BottleID=View.SeatedBottleISID;
+	FlowLeverController.Reset();
+	bFlowControllerValveClosed=false;
 	View.bLeverHeld=false; View.bDepressurizing=false; View.LeverOperator=nullptr;
 	View.bFilling=false; View.bFlowStopped=false;
 	if (Filler) { Filler->StopFilling(); Filler->LeverOperator.Reset(); Filler->LeverExpiresAt=0; }
@@ -207,7 +313,8 @@ void UShopProductionStationComponent::EndManualLever()
 	if (auto* Bottle=Manager ? Cast<AColaPropActor>(Manager->GetActiveActorFromISID(BottleID)) : nullptr)
 	{
 		// A stocked seal is fitted before releasing nozzle restraint. The bottle chooses its duration/failure policy.
-		if (!Bottle->IsManufacturingSafeToRelease() && !Bottle->HasTemporaryManufacturingSeal()) UseTemporarySeal(BottleID);
+		if (bAutoApplySealOnRelease && !Bottle->IsManufacturingSafeToRelease() && !Bottle->HasTemporaryManufacturingSeal())
+			UseTemporarySeal(BottleID);
 		Bottle->NotifyManufacturingLeverReleased();
 	}
 	GetOwner()->ForceNetUpdate();
@@ -216,6 +323,8 @@ void UShopProductionStationComponent::EndManualLever()
 void UShopProductionStationComponent::HandleManualOverfill(int32 BottleID)
 {
 	if (!GetOwner()->HasAuthority() || BottleID<=0 || View.SeatedBottleISID!=BottleID) return;
+	FlowLeverController.Reset();
+	bFlowControllerValveClosed=false;
 	View.bLeverHeld=false; View.LeverOperator=nullptr; View.bFilling=false;
 	View.bFlowStopped=false; View.bDepressurizing=false;
 	if (Filler) { Filler->StopFilling(); Filler->LeverExpiresAt=0; Filler->LeverOperator.Reset(); }
@@ -228,6 +337,7 @@ void UShopProductionStationComponent::ReleaseSeatedBottle()
 	auto* Manager=APropManager::Get(this);
 	auto* Previous=Manager ? Manager->GetActiveActorFromISID(View.SeatedBottleISID) : nullptr;
 	View.SeatedBottleISID=0;
+	FlowControllerCompletedBottleISID=0;
 	UpdateBottleInputTrace();
 	GetOwner()->ForceNetUpdate();
 	if (auto* Bottle=Cast<AColaPropActor>(Previous)) if (Bottle->ManualFillingStation.Get()==this) Bottle->ManualFillingStation.Reset();
@@ -243,6 +353,7 @@ void UShopProductionStationComponent::UpdateManualEquipment()
 {
 	auto* Manager=APropManager::Get(this); if (!Manager || !Filler) return;
 	auto* Machine=Cast<AActivePropActor>(GetOwner());
+	if (const auto* Layout = Cast<ASocketColaFillingMachine>(Machine); Layout && Layout->IsMachinePlacementActive()) return;
 	if (auto* Equipment=Cast<AManualColaFillingMachine>(Machine)) Equipment->RestoreSupplyNozzles();
 	const auto* State=Machine ? Manager->FindUniqueData(Machine->ISID) : nullptr;
 	View.SupplyPorts.Reset();
@@ -316,6 +427,12 @@ EShopCheckoutResult UShopProductionStationComponent::ManualEquipmentAction(EShop
 	auto* Manager=APropManager::Get(this); if (!Manager) return EShopCheckoutResult::Unavailable;
 	auto* Machine=Cast<AActivePropActor>(GetOwner());
 	if (Machine && Machine->bIsHeld) return EShopCheckoutResult::Unavailable;
+	if (const auto* Layout = Cast<ASocketColaFillingMachine>(Machine); Layout && Layout->IsMachinePlacementActive()) return EShopCheckoutResult::Unavailable;
+	auto* EquipmentActor=Cast<AManualColaFillingMachine>(Machine);
+	if (EquipmentActor && EquipmentActor->bUseFlowController
+		&& (Action==EShopProductionAction::HoldFillingLever || Action==EShopProductionAction::ReleaseFillingLever
+			|| Action==EShopProductionAction::StopFilling || Action==EShopProductionAction::ResumeFilling))
+		return EShopCheckoutResult::Unavailable;
 	UpdateManualEquipment();
 	if (Action==EShopProductionAction::ConnectSupply || Action==EShopProductionAction::DisconnectSupply || Action==EShopProductionAction::SelectContentPort)
 	{
@@ -325,7 +442,6 @@ EShopCheckoutResult UShopProductionStationComponent::ManualEquipmentAction(EShop
 		if (Action==EShopProductionAction::ConnectSupply)
 		{
 			const auto* Source=Manager->FindISIDData(OtherID);
-			const auto* EquipmentActor=Cast<AManualColaFillingMachine>(Machine);
 			if (!Source || !EquipmentActor || !Manager->ShopSupplies || !Manager->ShopSupplies->IsCylinderProduct(Source->ProductID)
 				|| FVector::DistSquared(EquipmentActor->GetSupplyConnectionOrigin(),Manager->GetTransform(OtherID).GetLocation())>FMath::Square(Filler->MaxConnectionDistance)) return EShopCheckoutResult::Unavailable;
 			const auto* SourceData=Manager->FindUniqueData(OtherID);
@@ -346,7 +462,7 @@ EShopCheckoutResult UShopProductionStationComponent::ManualEquipmentAction(EShop
 			SourceUpdate.StoredInMachineISID=Action==EShopProductionAction::ConnectSupply ? Machine->ISID : 0; Updates.Add(SourceUpdate);
 		}
 		if (!Manager->SubmitAtomicInstanceEventUpdates(Updates)) return EShopCheckoutResult::Unavailable;
-		if (Action==EShopProductionAction::DisconnectSupply) if (auto* EquipmentActor=Cast<AManualColaFillingMachine>(Machine)) EquipmentActor->DisconnectSupplyNozzle(BottleID);
+		if (Action==EShopProductionAction::DisconnectSupply && EquipmentActor) EquipmentActor->DisconnectSupplyNozzle(BottleID);
 	}
 	else if (Action==EShopProductionAction::AlignBottle)
 	{
@@ -356,19 +472,8 @@ EShopCheckoutResult UShopProductionStationComponent::ManualEquipmentAction(EShop
 	}
 	else if (Action==EShopProductionAction::HoldFillingLever)
 	{
-		if (View.SeatedBottleISID!=BottleID || !IsBottleAligned(BottleID)) return EShopCheckoutResult::Unavailable;
-		if (const auto* EquipmentActor=Cast<AManualColaFillingMachine>(Machine); EquipmentActor && !EquipmentActor->HasSupplyNozzle(View.SelectedContentPort,View.ConnectedSourceISID)) return EShopCheckoutResult::Unavailable;
-		if (View.bLeverHeld && View.LeverOperator!=Player) return EShopCheckoutResult::OperationConflict;
-		const auto* B=Manager->FindISIDData(BottleID); const auto* Data=Manager->FindUniqueData(BottleID); const auto* S=Manager->FindUniqueData(View.ConnectedSourceISID);
-		if (!B || !Data || Data->EventData.AttachedCapISID>0) return EShopCheckoutResult::Unavailable;
-		auto* Cola=Cast<AColaPropActor>(Manager->GetActiveActorFromISID(BottleID));
-		const auto* EquipmentActor=Cast<AManualColaFillingMachine>(Machine);
-		const int32 ContentID=EquipmentActor ? EquipmentActor->GetSupplyContentID(View.SelectedContentPort) : (S ? S->EventData.ContentID : 0);
-		if (!Cola || ContentID<=0 || (!View.bFlowStopped && !Cola->HasTemporaryManufacturingSeal() && !Cola->CanAcceptManufacturingContent(ContentID))) return EShopCheckoutResult::ContentNotSupported;
-		Filler->LeverOperator=Player; Filler->LeverExpiresAt=GetWorld()->GetTimeSeconds()+FMath::Max(.15f,LeverLeaseSeconds);
-		View.LeverOperator=Player; View.bLeverHeld=true;
-		// Flow starts in UpdateManualEquipment only after the cradle reaches its filling angle.
-
+		const auto Result=BeginManualLeverHold(BottleID,Player,*Manager);
+		if (Result!=EShopCheckoutResult::Success) return Result;
 	}
 	else if (Action==EShopProductionAction::StopFilling || Action==EShopProductionAction::ResumeFilling)
 	{

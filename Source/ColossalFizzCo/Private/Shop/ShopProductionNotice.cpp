@@ -30,4 +30,13 @@ void UShopPlayerInteractionComponent::ClearProductionNotice()
  ProductionNotice.Reset();NoticePlayer.Reset();if(GetWorld())GetWorld()->GetTimerManager().ClearTimer(NoticeTimer);
 }
 void UShopPlayerInteractionComponent::EndPlay(const EEndPlayReason::Type Reason)
-{CancelSocketUnplugHold();CleanupCableGrab();ClearProductionNotice();Super::EndPlay(Reason);}
+{
+	if (auto* Pawn=Cast<APawn>(GetOwner()))
+		Pawn->ReceiveControllerChangedDelegate.RemoveDynamic(this,&UShopPlayerInteractionComponent::OnFillingPawnControllerChanged);
+	UnbindFillingTableInput();
+	CleanupFlowLeverInput();
+	CancelSocketUnplugHold();
+	CleanupCableGrab();
+	ClearProductionNotice();
+	Super::EndPlay(Reason);
+}

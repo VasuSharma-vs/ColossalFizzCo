@@ -10,6 +10,7 @@ namespace WorldInteractionCarry
 {
     UObject* GetCarryReference(const APawn& Player,FName PropertyName);
     bool PublishHeldActor(APawn& Player, AActor& Item);
+    void IgnoreHeldActor(APawn& Player, AActor& Item);
     void ClearHeldActor(APawn& Player, const AActor& Item);
     bool InvokeCarryRelease(APawn& Player,const TCHAR* FunctionName,UObject* HeldObject,EFunctionFlags NetRole=FUNC_NetServer);
     void ClearLocalMountedItem(AActor& Item);

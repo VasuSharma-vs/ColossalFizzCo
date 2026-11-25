@@ -39,7 +39,7 @@ FTransform ASocketColaFillingMachine::GetInputPlacementDestination(const AActive
 bool ASocketColaFillingMachine::BeginInputPlacement(APropManager& Manager, int32 ID, UBoxComponent& Socket)
 {
 	const auto* Equipment = Manager.FindUniqueData(ISID);
-	if (!HasAuthority() || !bIsActive || bIsHeld || !FMath::IsFinite(InputPlacementSpeed) || InputPlacementSpeed <= 0
+	if (!HasAuthority() || !bIsActive || bIsHeld || IsMachinePlacementActive() || !FMath::IsFinite(InputPlacementSpeed) || InputPlacementSpeed <= 0
 		|| !Equipment || InputPlacements.ContainsByPredicate([ID](const FSocketMachineInputPlacement& Entry)
 			{ return Entry.ISID == ID; })) return false;
 	const int32 Loaded = &Socket == CapInputVolume.Get() ? Equipment->EventData.LoadedCapISIDs.Num() : Equipment->EventData.LoadedSealISIDs.Num();

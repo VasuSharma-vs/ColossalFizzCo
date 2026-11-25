@@ -11,6 +11,8 @@ class UTextBlock;
 class UEditableTextBox;
 class UCheckBox;
 class UPrototypeMenuWidget;
+class UPrototypeSettingsWidget;
+class UWidgetSwitcher;
 
 UCLASS()
 class COLOSSALFIZZCO_API UPrototypeMenuRow : public UButton
@@ -36,10 +38,13 @@ public:
  virtual FReply NativeOnKeyDown(const FGeometry& Geometry,const FKeyEvent& Event) override;
  void RefreshInvitation();
  void ChooseRow(int32 Index,bool bFriend);
+ UUserWidget* GetMenuFocusWidget();
  UFUNCTION(BlueprintPure,Category="Prototype|Menu") UButton* FindAction(FName Name) const;
 private:
  UPROPERTY(Transient) TObjectPtr<UCrossplaySubsystem> Service;
  UPROPERTY(Transient) TObjectPtr<UPrototypeMenuSubsystem> MenuOwner;
+ UPROPERTY(Transient) TObjectPtr<UWidgetSwitcher> MenuPages;
+ UPROPERTY(Transient) TObjectPtr<UPrototypeSettingsWidget> SettingsPanel;
  UPROPERTY(Transient) TObjectPtr<UVerticalBox> Body;
  UPROPERTY(Transient) TObjectPtr<UVerticalBox> SessionRows;
  UPROPERTY(Transient) TObjectPtr<UVerticalBox> FriendRows;
@@ -73,6 +78,8 @@ private:
  UFUNCTION() void Friends();
  UFUNCTION() void Accept();
  UFUNCTION() void Microphone();
+ UFUNCTION() void Settings();
+ void CloseSettings();
  UFUNCTION() void Resume();
  UFUNCTION() void Quit();
  UFUNCTION() void NameChanged(const FText& Value);

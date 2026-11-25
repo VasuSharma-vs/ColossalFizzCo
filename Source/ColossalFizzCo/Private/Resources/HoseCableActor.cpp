@@ -94,6 +94,7 @@ bool AHoseCableActor::CanAttach(UResourceTransferEndpointComponent* Port, bool b
 {
     if (!HasAuthority() || GetNetMode()==NM_Client || !IsValid(Port) || Port->GetWorld()!=GetWorld() || Port->GetOwner()==this
         || !IsValid(Port->GetOwner()) || !Port->GetOwner()->HasAuthority() || Transfer->bBurst || !Port->CanAcceptHose(Transfer)) return false;
+    if (Port->bUseFixedHoseDirection && (bSupply ? !Port->bCanSupply : !Port->bCanReceive)) return false;
     if (bWaitForSource ? Port->Category != Transfer->Category : !Port->SupportsResource(Transfer->Category, ExpectedResourceID)) return false;
     const bool CanUseSocket=Transfer->Category==EResourceTransportCategory::Content ? Port->bCanSupply || Port->bCanReceive
         : bSupply ? Port->bCanSupply : Port->bCanReceive;
@@ -126,15 +127,24 @@ bool AHoseCableActor::ConnectReceivingAtConnector(UResourceTransferEndpointCompo
 {
     return ConnectPortAtConnector(Port, PointIndex, false, true);
 }
+
+bool AHoseCableActor::IsUnassignedContentSource(const UResourceTransferEndpointComponent* Port) const
+{
+    return IsValid(Port) && Port->Category==EResourceTransportCategory::Content && Port->bCanSupply
+        && Port->ResourceID==0 && Transfer->Category==EResourceTransportCategory::Content
+        && bMatchSourceResourceWhenEmpty && Transfer->Buffer.Units<=0;
+}
+
 bool AHoseCableActor::ConnectPortAtConnector(UResourceTransferEndpointComponent* Port, int32 PointIndex, bool bSupply,
     bool bAdoptReceiverResource, bool bWaitForSource)
 {
     if (!IsValid(Port) || !GetConnectorMesh(PointIndex)) return false;
-    const bool bAdopt = !bWaitForSource && bMatchSourceResourceWhenEmpty && Transfer->Buffer.Units<=0
+    const bool bPendingContent = bWaitForSource || IsUnassignedContentSource(bSupply ? Port : StartPort.Get());
+    const bool bAdopt = !bPendingContent && bMatchSourceResourceWhenEmpty && Transfer->Buffer.Units<=0
         && (bSupply || (bAdoptReceiverResource && !StartPort));
     const int32 PreviousID = Transfer->ResourceID;
     const int32 ExpectedID = bAdopt ? Port->ResourceID : PreviousID;
-    if (!CanAttach(Port, bSupply, ExpectedID, bWaitForSource)) return false;
+    if (!CanAttach(Port, bSupply, ExpectedID, bPendingContent)) return false;
 
     const bool bNewSourceAtEnd = bSupply ? PointIndex!=0 : PointIndex==0;
     // Keep the other connector in place if the player has already hooked it up.
@@ -142,7 +152,7 @@ bool AHoseCableActor::ConnectPortAtConnector(UResourceTransferEndpointComponent*
 
     auto& Socket = bSupply ? StartPort : EndPort;
     const auto& Other = bSupply ? EndPort : StartPort;
-    if (const auto* Inlet = Cast<UHoseSocketComponent>(Other.Get()))
+    if (const auto* Inlet = Cast<UHoseSocketComponent>(Other.Get()); Inlet && !bPendingContent)
     {
         int32 PortIndex = INDEX_NONE;
         if (auto* Machine = Inlet->FindFillingMachine(PortIndex))
@@ -155,7 +165,7 @@ bool AHoseCableActor::ConnectPortAtConnector(UResourceTransferEndpointComponent*
         }
     }
     Transfer->ResourceID = ExpectedID;
-    if (Other && !Transfer->ConnectEndpoints(bSupply ? Port : Other.Get(), bSupply ? Other.Get() : Port))
+    if (Other && !bPendingContent && !Transfer->ConnectEndpoints(bSupply ? Port : Other.Get(), bSupply ? Other.Get() : Port))
     {
         Transfer->ResourceID = PreviousID;
         return false;
@@ -172,6 +182,35 @@ bool AHoseCableActor::ConnectPortAtConnector(UResourceTransferEndpointComponent*
     ForceNetUpdate();
     return true;
 }
+
+bool AHoseCableActor::RefreshSourceContent()
+{
+    if (!HasAuthority() || GetNetMode()==NM_Client || !IsValid(StartPort) || Transfer->bBurst
+        || Transfer->Category!=EResourceTransportCategory::Content) return false;
+    const int32 ContentID=StartPort->ResourceID;
+    if (ContentID<=0) return false;
+    if (Transfer->ResourceID==ContentID && (!EndPort || Transfer->HasValidConnection())) return true;
+
+    int32 TablePort=INDEX_NONE;
+    auto* Socket=Cast<UHoseSocketComponent>(EndPort.Get());
+    auto* Table=Socket ? Socket->FindFillingMachine(TablePort) : nullptr;
+    if (Table && Table->GetRequiredHoseContentID(TablePort)>0 && Table->GetRequiredHoseContentID(TablePort)!=ContentID) return false;
+    if (EndPort && !Table && !EndPort->SupportsResource(EResourceTransportCategory::Content,ContentID)) return false;
+
+    if (Transfer->ResourceID!=ContentID && Transfer->Buffer.Units>0.f)
+    {
+        Transfer->PurgeContents();
+        if (Transfer->Buffer.Units>0.f) return false;
+    }
+    Transfer->DisconnectEndpoints();
+    if (Table && (!Socket->IsManagedReceivingProxy() || !Socket->SupportsResource(EResourceTransportCategory::Content,ContentID))
+        && !Table->PrepareReceivingHoseConnection(TablePort,ContentID,this)) return false;
+    Transfer->ResourceID=ContentID;
+    const bool bConnected=!EndPort || Transfer->ConnectEndpoints(StartPort,EndPort);
+    ForceNetUpdate();
+    return bConnected;
+}
+
 void AHoseCableActor::DisconnectStart() { DisconnectPort(StartPort); }
 void AHoseCableActor::DisconnectEnd() { DisconnectPort(EndPort); }
 

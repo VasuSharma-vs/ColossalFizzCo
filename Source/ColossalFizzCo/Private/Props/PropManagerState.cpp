@@ -97,10 +97,12 @@ namespace
 			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::TemporarySeal) || (FMath::IsFinite(D.TemporarySealUntil) && D.TemporarySealUntil >= 0
 				&& FMath::IsFinite(D.TemporarySealDurationSeconds) && D.TemporarySealDurationSeconds >= 0.0f))
 			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::LinkedSupply) || D.LinkedSupplyISID >= 0)
+			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::FillingMachineUpgrades) || D.FillingMachineUpgrades.IsValid())
 			&& (!(D.ExtendedDirtyMask & EPropExtendedEventMask::ManualEquipment) || (D.ConnectedSupplyISIDs.Num()<=32
 				&& D.SelectedSupplyPort>=0 && D.SelectedSupplyPort<32 && D.TemporarySealCharges>=0
 				&& !D.ConnectedSupplyISIDs.ContainsByPredicate([](int32 ID){return ID<0;})
-				&& D.LoadedCapISIDs.Num()<=64 && D.LoadedSealISIDs.Num()<=64 && D.StoredInMachineISID>=0
+				&& D.LoadedCapISIDs.Num()<=FFillingMachineUpgradeState::MaxTrayCapacity
+				&& D.LoadedSealISIDs.Num()<=FFillingMachineUpgradeState::MaxTrayCapacity && D.StoredInMachineISID>=0
 				&& !D.LoadedCapISIDs.ContainsByPredicate([](int32 ID){return ID<=0;})
 				&& !D.LoadedSealISIDs.ContainsByPredicate([](int32 ID){return ID<=0;})));
 	}
@@ -129,6 +131,8 @@ namespace
 		if (D.ExtendedDirtyMask & EPropExtendedEventMask::ManualEquipment)
 		{ E.ConnectedSupplyISIDs=D.ConnectedSupplyISIDs; E.SelectedSupplyPort=D.SelectedSupplyPort; E.TemporarySealCharges=D.TemporarySealCharges;
 		  E.LoadedCapISIDs=D.LoadedCapISIDs; E.LoadedSealISIDs=D.LoadedSealISIDs; E.StoredInMachineISID=D.StoredInMachineISID; }
+		if (D.ExtendedDirtyMask & EPropExtendedEventMask::FillingMachineUpgrades)
+			E.FillingMachineUpgrades=D.FillingMachineUpgrades;
 		E.EventSequence = D.EventSequence;
 	}
 }

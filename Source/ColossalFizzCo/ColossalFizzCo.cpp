@@ -2,6 +2,7 @@
 
 #include "ColossalFizzCo.h"
 #include "Modules/ModuleManager.h"
+#include "UI/SettingsAudioVideo.h"
 #include "UObject/CoreRedirects.h"
 
 class FColossalFizzCoModule : public FDefaultGameModuleImpl
@@ -10,6 +11,7 @@ public:
 	virtual void StartupModule() override
 	{
 		FDefaultGameModuleImpl::StartupModule();
+		SettingsAudioVideo::Initialize();
 #if !WITH_EDITOR
 		// Cooked builds discard editor redirector packages. Old save-game object
 		// paths must still resolve before their product definitions deserialize.
@@ -20,6 +22,12 @@ public:
 				TEXT("/Game/Assest/meshs/Cola1.Cola1"),TEXT("/Game/Assest/meshs/PlasticBottle/SM_PlasticBottle.SM_PlasticBottle"))
 		},TEXT("ColossalFizzCo legacy bottle migration"));
 #endif
+	}
+
+	virtual void ShutdownModule() override
+	{
+		SettingsAudioVideo::Shutdown();
+		FDefaultGameModuleImpl::ShutdownModule();
 	}
 };
 

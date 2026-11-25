@@ -10,6 +10,7 @@ class UResourceTransferEndpointComponent;
 class UHoseSocketComponent;
 class UHoseTransferComponent;
 class AHoseCableActor;
+class UTextRenderComponent;
 
 /** Purchasable/carryable manual equipment using the existing managed-prop lifecycle. */
 UCLASS()
@@ -26,6 +27,7 @@ public:
 	virtual void Tick(float DeltaSeconds) override;
 	virtual bool CanDemoteToISM() const override { return false; }
 	virtual void OnApplySharedDefinitions(const FPropProductDefinition* Product,const FPropContentDefinition* Content) override;
+	virtual void OnApplyEventData(const FPropEventUpdateData& InEventData, uint8 DirtyMask=0xFF) override;
 	virtual void ResetTransientPoolState() override;
 	UPROPERTY(VisibleAnywhere,BlueprintReadOnly) TObjectPtr<UShopProductionStationComponent> Production;
 	UPROPERTY(VisibleAnywhere,BlueprintReadOnly) TObjectPtr<UBottleFillingComponent> BottleFiller;
@@ -33,7 +35,6 @@ public:
 	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Machine|Layout") TObjectPtr<UBoxComponent> BottleInputVolume;
 	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Machine|Layout") TObjectPtr<UBoxComponent> CapInputVolume;
 	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Machine|Layout") TObjectPtr<UBoxComponent> SealInputVolume;
-	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Machine|Layout") TObjectPtr<UBoxComponent> SupplyInputVolume;
 	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Machine|Layout") TObjectPtr<USceneComponent> BottleHolderPoint;
 	/** Bottle local +Z points toward the cap. At rest it slopes upward; during filling it slopes downward. */
 	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Machine|Cradle") TObjectPtr<USceneComponent> CradlePivot;
@@ -47,8 +48,15 @@ public:
 	UFUNCTION(BlueprintPure,Category="Machine|Cradle") bool IsCradleInFillPosition() const;
 	void UpdateCradleMotion(float DeltaSeconds);
 	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Machine|Layout") TObjectPtr<USceneComponent> SupplyDeliveryPoint;
+	/** Mount for the built-in selector sockets on standalone machines. */
 	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Machine|Layout") TObjectPtr<USceneComponent> HoseConnections;
+	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Machine|Hose Ports") TObjectPtr<UHoseSocketComponent> FlowControllerInlet;
 	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Machine|Layout") TObjectPtr<UStaticMeshComponent> ContentSelectorDial;
+	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Machine|Layout") TObjectPtr<UStaticMeshComponent> AutoSealSwitch;
+	UPROPERTY(VisibleAnywhere,BlueprintReadOnly,Category="Machine|Layout") TObjectPtr<UTextRenderComponent> AutoSealLabel;
+	/** Use one external supply socket. Selection and flow splitting take place on a Flow Controller. */
+	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Machine|Hose Ports") bool bUseFlowController=false;
+	int32 GetActiveHosePortCount() const { return bUseFlowController ? 1 : FMath::Clamp(SupportedContentCount,1,32); }
 	/** Number of active inlets on the content dial. Empty slots get a generated Hose Socket. */
 	UPROPERTY(EditAnywhere,BlueprintReadOnly,Category="Machine|Hose Ports",meta=(ClampMin="1",ClampMax="32")) int32 SupportedContentCount=4;
 	/** Layout for generated inlets, relative to HoseConnections. Local +X points out of the old mount and maps to the new socket's +Z. */
@@ -82,19 +90,45 @@ public:
 	bool HasSupplyNozzle(int32 PortIndex,int32 SourceISID) const;
 	void RestoreSupplyNozzles();
 	void DisconnectSupplyNozzle(int32 PortIndex);
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Machine|Upgrades")
+	FFillingMachineUpgradePrice CapTrayUpgradePrice;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Machine|Upgrades")
+	FFillingMachineUpgradePrice SealTrayUpgradePrice;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Machine|Upgrades")
+	FFillingMachineUpgradePrice PressureRegulatorUpgradePrice;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Machine|Upgrades")
+	FFillingMachineUpgradePrice TemperatureRegulatorUpgradePrice;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Machine|Upgrades", meta=(ClampMin="1", ClampMax="10000"))
+	int32 MaximumTemperatureRegulatorRank=100;
+	UFUNCTION(BlueprintPure, Category="Machine|Upgrades")
+	int32 GetUpgradeRank(EFillingMachineUpgradeType Type) const;
+	UFUNCTION(BlueprintPure, Category="Machine|Upgrades")
+	int32 GetMaxUpgradeRank(EFillingMachineUpgradeType Type) const;
+	UFUNCTION(BlueprintPure, Category="Machine|Upgrades")
+	float GetUpgradeValue(EFillingMachineUpgradeType Type, int32 Rank) const;
+	UFUNCTION(BlueprintPure, Category="Machine|Upgrades")
+	int64 GetNextUpgradeCostCents(EFillingMachineUpgradeType Type) const;
+	bool CanOpenUpgrades(const APawn* Player, float Reach) const;
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Machine|Upgrades")
+	EFillingMachinePurchaseResult PurchaseUpgrade(const APawn* Player, float Reach, EFillingMachineUpgradeType Type,
+		int32 ExpectedRank, const FGuid& OperationID);
 protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Machine|Layout") TObjectPtr<UStaticMeshComponent> Lever;
 	virtual FTransform GetDefaultHosePortTransform(int32 Index) const;
 	virtual void UpdateLeverVisual(float DeltaSeconds);
+	virtual void UpdateControlLayout();
 private:
 	UPROPERTY() TObjectPtr<UStaticMeshComponent> Pipe;
+	UPROPERTY(VisibleAnywhere, Category="Machine|Hose Ports") TObjectPtr<UStaticMeshComponent> FlowInletCollar;
 	UPROPERTY(Transient) TArray<TObjectPtr<UStaticMeshComponent>> SupplyPipes;
 	UPROPERTY(Replicated) TArray<TObjectPtr<USceneComponent>> ConnectedNozzles;
 	FQuat ContentDialRestRotation = FQuat::Identity;
 	int32 BoundMachineISID=0;
 	float DisplayedCapProgress=0.f;
+	TOptional<bool> DisplayedAutoSeal;
 	void RefreshHosePortLayout();
 	void RebuildHoseSockets();
+	void UpdateAutoSealLabel();
 	void ConfigureReceivingHosePort(UHoseSocketComponent& Port, bool bGenerated);
 	UFUNCTION() void HandleSupplyReceived(UResourceTransferEndpointComponent* Socket,UHoseTransferComponent* Hose,float ActualUnits,float IncomingPressure,float ActualRate);
 	UFUNCTION() void HandleSupplySocketOverloaded(UResourceTransferEndpointComponent* Socket,UHoseTransferComponent* Hose,float IncomingPressure,float OfferedRate);

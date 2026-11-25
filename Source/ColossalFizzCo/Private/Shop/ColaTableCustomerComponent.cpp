@@ -1,6 +1,7 @@
 #include "Shop/ColaTableCustomerComponent.h"
 
 #include "AIController.h"
+#include "Animation/AnimInstance.h"
 #include "BrainComponent.h"
 #include "Brushes/SlateRoundedBoxBrush.h"
 #include "Components/CapsuleComponent.h"
@@ -9,19 +10,25 @@
 #include "Components/StaticMeshComponent.h"
 #include "Components/WidgetComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "Framework/Application/SlateApplication.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/GameStateBase.h"
+#include "Misc/ScopeExit.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "NavigationSystem.h"
 #include "Net/UnrealNetwork.h"
 #include "Props/ColaPropActor.h"
 #include "Props/InteractablePropManager.h"
+#include "Props/PropAssemblyMesh.h"
 #include "Props/PropProductCatalog.h"
+#include "Shop/ColaTableQueueComponent.h"
 #include "Shop/SharedTeamWalletComponent.h"
 #include "Shop/ShopCheckoutComponent.h"
+#include "Shop/ShopClock.h"
 #include "Styling/CoreStyle.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Widgets/Layout/SBorder.h"
@@ -33,6 +40,10 @@ namespace
 	constexpr float ApproachAcceptance = 36.f;
 	constexpr float ApproachClearance = 45.f;
 	constexpr float ScanInterval = .5f;
+	constexpr double ShelfScanInterval = .8;
+	constexpr double RushWaitMultiplier = .5;
+	constexpr float QueueAcceptance = 28.f;
+	constexpr double QueueStallSeconds = 4.0;
 	constexpr double LiftSeconds = .60;
 	constexpr double DrinkSeconds = .55;
 	constexpr double HeadTiltSeconds = .22;
@@ -71,14 +82,92 @@ namespace
 		return Character.GetActorLocation() + FVector(0, 0, Character.GetSimpleCollisionHalfHeight() * .8);
 	}
 
-	bool HasSightOfBottle(const ACharacter& Character, const FISIDRuntimeIndex& Bottle, FVector Target)
+	double TableCustomerReach(const ACharacter& Character)
+	{
+		// Allow room for the scaled character's body and arm when reaching over the counter.
+		return 2.0 * Character.GetSimpleCollisionRadius();
+	}
+
+	bool HasSightOfBottle(const ACharacter& Character, const APropManager& Manager,
+		const UColaTableQueueComponent* Queue, const AActor& Shelf, const FISIDRuntimeIndex& Bottle, FVector Target)
 	{
 		FHitResult Hit;
-		const FCollisionQueryParams Query(SCENE_QUERY_STAT(ColaTableSight), false, &Character);
+		FCollisionQueryParams Query(SCENE_QUERY_STAT(ColaTableSight), false, &Character);
+		if (Queue) Queue->IgnoreCustomers(Query);
+		for (const UCapsuleComponent* PlacementGuide : TInlineComponentArray<UCapsuleComponent*>(&Shelf))
+			Query.AddIgnoredComponent(PlacementGuide);
 		if (!Character.GetWorld()->LineTraceSingleByChannel(Hit, HeadLocation(Character), Target, ECC_Visibility, Query)) return true;
 		if (Bottle.ActiveActor && Hit.GetActor() == Bottle.ActiveActor.Get()) return true;
+		if (const auto* Part = Cast<UPropAssemblyMesh>(Hit.GetComponent())) return Manager.ResolveRootISID(Part->ISID) == Bottle.ISID;
 		const auto* Instances = Cast<UInteractableISMComponent>(Hit.GetComponent());
-		return Instances && Instances->FindISID(Hit.Item) == Bottle.ISID;
+		return Instances && Manager.ResolveRootISID(Instances->FindISID(Hit.Item)) == Bottle.ISID;
+	}
+
+	struct FAvailableCola
+	{
+		FTransform Pose;
+		FBox MeshBounds;
+		FColaServingBottle Target;
+	};
+
+	bool ReadAvailableCola(const APropManager& Manager, int32 ID, const FISIDRuntimeIndex& Record,
+		int32 RequestedID, double ReachBonus, FAvailableCola& Out, FShopProductScanData& Quote)
+	{
+		if (ID <= 0 || Record.State == EPropState::Held || Record.State == EPropState::InMotion
+			|| Record.RuntimeData.bInteractionLock || !Record.PackedRuntimeData.bIsGrabbable) return false;
+		const auto* Contents = Manager.FindUniqueData(ID);
+		const auto* Product = Manager.FindProductDefinition(Record.ProductID);
+		if (!Contents || Contents->EventData.ContentLevel <= UE_SMALL_NUMBER || !Product || !Product->StaticMesh
+			|| Manager.CanonicalProductPID(Contents->EventData.ContentID) != RequestedID
+			|| !Product->InteractionProfile.bCanConsume || Product->ConsumableProfile.ConsumableType != EConsumablePropType::Drink
+			|| Product->bIsBottleCap || Product->bLiquidVisualOnly || Manager.ResolveRootISID(ID) != ID) return false;
+		const auto* Active = Record.ActiveActor.Get();
+		if (Active && (Active->IsSeatedInFiller() || Active->GetVelocity().SizeSquared() > FMath::Square(65.f))) return false;
+		FShopStockEntry Stock;
+		if (Manager.ShopCheckout && (Manager.ShopCheckout->IsReserved(ID) || Manager.ShopCheckout->GetStockEntry(ID, Stock))) return false;
+		if (!Manager.GetProductScanData(ID, Quote) || Quote.Price.bExpired || Quote.Price.SaleCents <= 0) return false;
+
+		Out.Pose = Active ? Active->GetActorTransform() : Manager.GetTransform(ID);
+		Out.MeshBounds = Product->StaticMesh->GetBoundingBox();
+		const double MaxReach = Product->InteractionProfile.MaxInteractionDistance;
+		Out.Target = {Out.Pose.GetLocation(), MaxReach > 0.0 ? MaxReach * 1.5 + ReachBonus : TNumericLimits<double>::Max(), ID};
+		return true;
+	}
+
+	double ShelfContactDistance(UStaticMeshComponent& Surface, const FAvailableCola& Bottle)
+	{
+		constexpr double NoContact = TNumericLimits<double>::Max();
+		const UStaticMesh* Mesh = Surface.GetStaticMesh();
+		if (!Mesh) return NoContact;
+		const FTransform Transform = Surface.GetComponentTransform();
+		const FBox SurfaceBounds = Mesh->GetBoundingBox();
+		const FBox BottleOnShelf = Bottle.MeshBounds.TransformBy(Bottle.Pose.ToMatrixWithScale() * Transform.ToInverseMatrixWithScale());
+		const FVector Center = BottleOnShelf.GetCenter();
+		if (Center.X < SurfaceBounds.Min.X || Center.X > SurfaceBounds.Max.X
+			|| Center.Y < SurfaceBounds.Min.Y || Center.Y > SurfaceBounds.Max.Y) return NoContact;
+
+		const FBox WorldBottle = Bottle.MeshBounds.TransformBy(Bottle.Pose);
+		FVector Bottom = WorldBottle.GetCenter();
+		Bottom.Z = WorldBottle.Min.Z;
+		const auto& Bounds = Surface.Bounds;
+		if (Bottom.Z < Bounds.Origin.Z - Bounds.BoxExtent.Z - TableContactTolerance
+			|| Bottom.Z > Bounds.Origin.Z + Bounds.BoxExtent.Z + TableContactTolerance) return NoContact;
+		const FVector Travel(0, 0, TableContactTolerance);
+		FCollisionQueryParams Query(SCENE_QUERY_STAT(ColaShelfSupport), true);
+		FHitResult Hit;
+		for (bool bComplex : {true, false})
+		{
+			Query.bTraceComplex = bComplex;
+			if (Surface.LineTraceComponent(Hit, Bottom + Travel, Bottom - Travel, Query) && Hit.ImpactNormal.Z > .45)
+				return FMath::Abs(Hit.ImpactPoint.Z - Bottom.Z);
+		}
+		// Keep support for a flat authored placement surface without query collision.
+		if (Surface.GetCollisionEnabled() == ECollisionEnabled::NoCollision)
+		{
+			const double Distance = FMath::Abs(BottleOnShelf.Min.Z - SurfaceBounds.Max.Z) * FMath::Abs(Transform.GetScale3D().Z);
+			if (Distance <= TableContactTolerance) return Distance;
+		}
+		return NoContact;
 	}
 }
 
@@ -140,6 +229,7 @@ void UColaTableCustomerComponent::BeginPlay()
 	TInlineComponentArray<UStaticMeshComponent*> Meshes(ServingTable);
 	for (UStaticMeshComponent* Mesh : Meshes)
 		if (Mesh->GetFName() == TabletopMeshName && Mesh->GetStaticMesh()) { Tabletop = Mesh; break; }
+	DefaultTabletop = Tabletop;
 	if (!Tabletop.IsValid() || !Customer->GetMesh())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("%s needs a skeletal mesh and a configured tabletop mesh."), *GetPathName());
@@ -163,12 +253,19 @@ void UColaTableCustomerComponent::BeginPlay()
 	UCharacterMovementComponent* Movement = Customer->GetCharacterMovement();
 	Movement->GetNavMovementProperties()->bUseAccelerationForPaths = false;
 	Movement->bRequestedMoveUseAcceleration = false;
+	Customer->bUseControllerRotationYaw = false;
+	Movement->bUseControllerDesiredRotation = false;
+	Movement->bOrientRotationToMovement = false;
+	Movement->AvoidanceConsiderationRadius = FMath::Max(Movement->AvoidanceConsiderationRadius,
+		6.f * Customer->GetSimpleCollisionRadius());
+	Movement->SetAvoidanceEnabled(true);
 }
 
 void UColaTableCustomerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	ClearClientBottleGrip();
 	if (IsValid(RequestLabel)) RequestLabel->DestroyComponent();
+	if (TableQueue.IsValid() && Customer.IsValid()) TableQueue->Leave(*Customer);
 	if (EndPlayReason == EEndPlayReason::Destroyed && Customer.IsValid() && GetOwner()->HasAuthority() && BottleISID > 0)
 	{
 		if (auto* Manager = APropManager::Get(this); Manager && VisitState != EColaTableCustomerState::ThrowingBottle)
@@ -345,12 +442,24 @@ void UColaTableCustomerComponent::SyncClientBottleRelease()
 
 void UColaTableCustomerComponent::ChangeState(EColaTableCustomerState NextState, double Now)
 {
+	if (NextState == EColaTableCustomerState::ApproachingTable || NextState == EColaTableCustomerState::WaitingForShop)
+	{
+		if (TableQueue.IsValid()) TableQueue->Leave(*Customer);
+		TableQueue.Reset();
+		ShelfBottles.Reset();
+		NextShelfScan = Now;
+	}
 	VisitState = NextState;
 	SipStartedAt = -1.0;
 	if (NextState != EColaTableCustomerState::PreparingThrow && NextState != EColaTableCustomerState::ThrowingBottle)
 		ThrowStartedAt = -1.0;
 	NextActionTime = Now;
 	bHasApproachTarget = false;
+	WalkTarget.Reset();
+	SidestepGoal.Reset();
+	PassBlockerGoal.Reset();
+	SidestepStartYaw.Reset();
+	if (!IsCarryingBottle(NextState)) TableExit.Reset();
 	SetBottleCarryMovement(IsCarryingBottle(NextState));
 	OnRep_VisitState();
 	GetOwner()->ForceNetUpdate();
@@ -372,16 +481,9 @@ void UColaTableCustomerComponent::SetBottleCarryMovement(bool bCarrying)
 	}
 }
 
-void UColaTableCustomerComponent::Face(FVector Target) const
+bool UColaTableCustomerComponent::Approach(AAIController& AI, const FBox& Bounds, double Now)
 {
-	const FVector Direction = Target - Customer->GetActorLocation();
-	if (!Direction.IsNearlyZero()) Customer->SetActorRotation(FRotator(0, Direction.Rotation().Yaw, 0));
-}
-
-bool UColaTableCustomerComponent::Approach(AAIController& AI, const FBox& Bounds, double Now, const FVector* BottleLocation)
-{
-	const float Acceptance = BottleLocation ? 16.f : ApproachAcceptance;
-	if (bHasApproachTarget && FVector::DistSquared2D(ApproachTarget, Customer->GetActorLocation()) <= FMath::Square(Acceptance + 4.f))
+	if (bHasApproachTarget && FVector::DistSquared2D(ApproachTarget, Customer->GetActorLocation()) <= FMath::Square(ApproachAcceptance + 4.f))
 	{
 		AI.StopMovement();
 		Customer->GetCharacterMovement()->StopMovementImmediately();
@@ -393,34 +495,204 @@ bool UColaTableCustomerComponent::Approach(AAIController& AI, const FBox& Bounds
 	if (!Nav) return false;
 
 	const FVector Center = Bounds.GetCenter();
-	const FVector Reference = BottleLocation ? *BottleLocation : Center;
 	const float Z = Customer->GetNavAgentLocation().Z;
 	const float Offset = Customer->GetSimpleCollisionRadius() + ApproachClearance;
-	const float X = FMath::Clamp(Reference.X, Bounds.Min.X, Bounds.Max.X);
-	const float Y = FMath::Clamp(Reference.Y, Bounds.Min.Y, Bounds.Max.Y);
 	TArray<FVector, TInlineAllocator<4>> Goals = {
-		FVector(Bounds.Min.X - Offset, Y, Z), FVector(Bounds.Max.X + Offset, Y, Z),
-		FVector(X, Bounds.Min.Y - Offset, Z), FVector(X, Bounds.Max.Y + Offset, Z)
+		FVector(Bounds.Min.X - Offset, Center.Y, Z), FVector(Bounds.Max.X + Offset, Center.Y, Z),
+		FVector(Center.X, Bounds.Min.Y - Offset, Z), FVector(Center.X, Bounds.Max.Y + Offset, Z)
 	};
 	const FVector CustomerLocation = Customer->GetActorLocation();
-	const auto Score = [&](const FVector& Goal)
+	Goals.Sort([&](const FVector& A, const FVector& B)
 	{
-		const double Travel = FVector::Dist2D(Goal, CustomerLocation);
-		return BottleLocation ? FVector::Dist2D(Goal, *BottleLocation) + .2 * Travel : Travel;
-	};
-	Goals.Sort([&](const FVector& A, const FVector& B) { return Score(A) < Score(B); });
+		return FVector::DistSquared2D(A, CustomerLocation) < FVector::DistSquared2D(B, CustomerLocation);
+	});
 	for (const FVector& Goal : Goals)
 	{
 		FNavLocation Projected;
 		if (!Nav->ProjectPointToNavigation(Goal, Projected, FVector(100, 100, 180), &Customer->GetNavAgentPropertiesRef())) continue;
 		if (FVector::DistSquared2D(Projected.Location, Goal) > FMath::Square(ApproachClearance)) continue;
-		const auto Result = AI.MoveToLocation(Projected.Location, Acceptance, false, true, false, false, nullptr, false);
+		const auto Result = RequestWalk(AI, Projected.Location, ApproachAcceptance, Now);
 		if (Result == EPathFollowingRequestResult::Failed) continue;
 		ApproachTarget = Projected.Location;
 		bHasApproachTarget = true;
 		return Result == EPathFollowingRequestResult::AlreadyAtGoal;
 	}
 	return false;
+}
+
+bool UColaTableCustomerComponent::MoveToQueuePoint(AAIController& AI, const FVector& Goal, double Now, bool& bStalled)
+{
+	bStalled = false;
+	const FVector Feet = Customer->GetNavAgentLocation();
+	const bool bNewGoal = !bHasApproachTarget || !ApproachTarget.Equals(Goal, 6.f);
+	if (bNewGoal)
+	{
+		ApproachTarget = Goal;
+		bHasApproachTarget = true;
+		NextQueueMoveAt = Now;
+	}
+	if (FVector::DistSquared2D(Feet, Goal) <= FMath::Square(QueueAcceptance + 4.f)
+		&& FMath::Abs(Feet.Z - Goal.Z) <= 80.f)
+	{
+		if (AI.GetMoveStatus() != EPathFollowingStatus::Idle) AI.StopMovement();
+		WalkTarget.Reset();
+		LastQueueProgressAt = Now;
+		return true;
+	}
+	if (bNewGoal || FVector::DistSquared(Feet, LastQueueProgressLocation) > FMath::Square(24.f))
+	{
+		LastQueueProgressLocation = Feet;
+		LastQueueProgressAt = Now;
+	}
+	if (Now - LastQueueProgressAt >= QueueStallSeconds)
+	{
+		AI.StopMovement();
+		bHasApproachTarget = false;
+		WalkTarget.Reset();
+		bStalled = true;
+		return false;
+	}
+	if (Now < NextQueueMoveAt || (!bNewGoal && AI.GetMoveStatus() != EPathFollowingStatus::Idle)) return false;
+	NextQueueMoveAt = Now + ScanInterval;
+	return RequestWalk(AI, Goal, QueueAcceptance, Now) == EPathFollowingRequestResult::AlreadyAtGoal;
+}
+
+void UColaTableCustomerComponent::RefreshServingShelf(AAIController& AI, const APropManager& Manager, double Now)
+{
+	NextShelfScan = Now + ShelfScanInterval;
+	if (!DefaultTabletop.IsValid() || !IsValid(ServingTable) || !RequestedCola) return;
+	const int32 RequestedID = Manager.CanonicalProductPID(RequestedCola->Properties.ContentID);
+	const UStaticMesh* AnchorMesh = DefaultTabletop->GetStaticMesh();
+	if (RequestedID <= 0 || !AnchorMesh) return;
+
+	struct FShelfOffer
+	{
+		UStaticMeshComponent* Surface;
+		TArray<FColaServingBottle> Bottles;
+	};
+	TArray<FShelfOffer, TInlineAllocator<8>> Shelves;
+	const UClass* TableClass = ServingTable->GetClass();
+	const bool bDiscoverSameClass = TableClass != AActor::StaticClass() && TableClass != AStaticMeshActor::StaticClass();
+	static const FName RackMeshName(TEXT("SM_StoreRack"));
+	static const FName ShelfTag(TEXT("ColaServingShelf"));
+	static const FName SurfaceTag(TEXT("ColaServingSurface"));
+	const bool bDiscoverRackMeshes = AnchorMesh->GetFName() == RackMeshName;
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		AActor* Actor = *It;
+		const bool bSameTableType = Actor == ServingTable || (bDiscoverSameClass && Actor->IsA(TableClass));
+		const bool bMarkedShelf = Actor->ActorHasTag(ShelfTag);
+		if (!bSameTableType && !bMarkedShelf && !bDiscoverRackMeshes) continue;
+		for (UStaticMeshComponent* Mesh : TInlineComponentArray<UStaticMeshComponent*>(Actor))
+			if (Mesh->IsRegistered() && Mesh->GetStaticMesh()
+				&& (Mesh->GetStaticMesh() == AnchorMesh || Mesh->ComponentHasTag(SurfaceTag)))
+				Shelves.Add({Mesh, {}});
+	}
+	if (Shelves.IsEmpty()) return;
+
+	const double ReachBonus = TableCustomerReach(*Customer);
+	for (const auto& Pair : Manager.ISIDData)
+	{
+		FAvailableCola Bottle;
+		FShopProductScanData Quote;
+		if (!ReadAvailableCola(Manager, Pair.Key, Pair.Value, RequestedID, ReachBonus, Bottle, Quote)) continue;
+		FShelfOffer* Support = nullptr;
+		double ClosestContact = TNumericLimits<double>::Max();
+		for (auto& Shelf : Shelves)
+		{
+			const double Contact = ShelfContactDistance(*Shelf.Surface, Bottle);
+			if (Contact >= ClosestContact) continue;
+			ClosestContact = Contact;
+			Support = &Shelf;
+		}
+		if (Support) Support->Bottles.Add(Bottle.Target);
+	}
+
+	const auto IndexOf = [&](const UStaticMeshComponent* Surface)
+	{
+		return Shelves.IndexOfByPredicate([Surface](const FShelfOffer& Shelf) { return Shelf.Surface == Surface; });
+	};
+	const auto QueueFor = [](const FShelfOffer& Shelf)
+	{
+		return UColaTableQueueComponent::GetOrCreate(*Shelf.Surface->GetOwner(), *Shelf.Surface);
+	};
+	const int32 CurrentIndex = IndexOf(Tabletop.Get());
+	if (Shelves.IsValidIndex(CurrentIndex) && TableQueue.IsValid() && !Shelves[CurrentIndex].Bottles.IsEmpty()
+		&& TableQueue->GetServiceCost(*Customer, Shelves[CurrentIndex].Bottles) < TNumericLimits<double>::Max())
+	{
+		ShelfBottles = MoveTemp(Shelves[CurrentIndex].Bottles);
+		return;
+	}
+
+	int32 BestIndex = INDEX_NONE;
+	double BestCost = TNumericLimits<double>::Max();
+	for (int32 Index = 0; Index < Shelves.Num(); ++Index)
+	{
+		const auto& Shelf = Shelves[Index];
+		if (Shelf.Bottles.IsEmpty()) continue;
+		auto* Queue = QueueFor(Shelf);
+		const double Cost = Queue ? Queue->GetServiceCost(*Customer, Shelf.Bottles) : TNumericLimits<double>::Max();
+		if (Cost >= BestCost) continue;
+		BestIndex = Index;
+		BestCost = Cost;
+	}
+	if (BestIndex == INDEX_NONE) BestIndex = CurrentIndex != INDEX_NONE ? CurrentIndex : IndexOf(DefaultTabletop.Get());
+	if (!Shelves.IsValidIndex(BestIndex)) return;
+	auto& Shelf = Shelves[BestIndex];
+	auto* Queue = QueueFor(Shelf);
+	if (!Queue) return;
+	if (TableQueue.IsValid() && TableQueue.Get() != Queue)
+	{
+		AI.StopMovement();
+		ChangeState(EColaTableCustomerState::ApproachingTable, Now);
+		NextShelfScan = Now + ShelfScanInterval;
+	}
+	Tabletop = Shelf.Surface;
+	TableQueue = Queue;
+	ShelfBottles = MoveTemp(Shelf.Bottles);
+}
+
+void UColaTableCustomerComponent::VisitTable(AAIController& AI, double Now, bool bRush)
+{
+	auto* Manager = APropManager::Get(this);
+	if (Manager && Now >= NextShelfScan) RefreshServingShelf(AI, *Manager, Now);
+	if (!TableQueue.IsValid() && Tabletop.IsValid())
+		TableQueue = UColaTableQueueComponent::GetOrCreate(*Tabletop->GetOwner(), *Tabletop.Get());
+	auto* Queue = TableQueue.Get();
+	if (!Queue) return;
+	FVector Goal, Exit;
+	bool bAtCounter = false;
+	if (!Queue->GetStand(*Customer, Goal, Exit, bAtCounter, ShelfBottles))
+	{
+		if (bHasApproachTarget) AI.StopMovement();
+		bHasApproachTarget = false;
+		WalkTarget.Reset();
+		return;
+	}
+	bool bStalled = false;
+	if (!MoveToQueuePoint(AI, Goal, Now, bStalled))
+	{
+		if (VisitState == EColaTableCustomerState::WaitingAtTable)
+		{
+			VisitState = EColaTableCustomerState::ApproachingTable;
+			GetOwner()->ForceNetUpdate();
+		}
+		if (bStalled) Queue->RejectStand(*Customer);
+		return;
+	}
+	const double WaitMultiplier = bRush ? RushWaitMultiplier : 1.0;
+	if (VisitState != EColaTableCustomerState::WaitingAtTable)
+	{
+		ChangeState(EColaTableCustomerState::WaitingAtTable, Now);
+		NextActionTime = Now + TableWaitSeconds * WaitMultiplier;
+	}
+	if (!bAtCounter || Now < NextActionTime) return;
+	NextActionTime = Now + ScanInterval * WaitMultiplier;
+	FShopProductScanData Quote;
+	if (!Manager || !FindBottle(*Manager, Quote) || !BuyBottle(*Manager, Quote)) return;
+	Queue->Leave(*Customer);
+	ChangeState(EColaTableCustomerState::Drinking, Now);
+	TableExit = Exit;
 }
 
 void UColaTableCustomerComponent::WalkAround(AAIController& AI, double Now)
@@ -438,49 +710,30 @@ void UColaTableCustomerComponent::WalkAround(AAIController& AI, double Now)
 		if (!Nav->GetRandomReachablePointInRadius(Start, WanderRadius, Goal, NavData)) return;
 		if (FVector::DistSquared2D(Start, Goal.Location) < FMath::Square(Customer->GetSimpleCollisionRadius() + 90.f)) continue;
 		if (FVector::DistSquared2D(Goal.Location, Tabletop->Bounds.Origin) > FMath::Square(2.f * WanderRadius)) continue;
-		if (AI.MoveToLocation(Goal.Location, ApproachAcceptance, false, true, false, false, nullptr, false)
-			== EPathFollowingRequestResult::RequestSuccessful) return;
+		if (RequestWalk(AI, Goal.Location, ApproachAcceptance, Now) == EPathFollowingRequestResult::RequestSuccessful) return;
 	}
 }
 
 int32 UColaTableCustomerComponent::FindBottle(const APropManager& Manager, FShopProductScanData& OutQuote) const
 {
-	if (!RequestedCola || RequestedCola->Properties.ContentID <= 0) return 0;
+	auto* Shelf = Tabletop.Get();
+	if (!Shelf || !RequestedCola || RequestedCola->Properties.ContentID <= 0) return 0;
 	const int32 RequestedID = Manager.CanonicalProductPID(RequestedCola->Properties.ContentID);
-	const FTransform SurfaceTransform = Tabletop->GetComponentTransform();
-	const FBox Surface = Tabletop->GetStaticMesh()->GetBoundingBox();
-	const double ZTolerance = TableContactTolerance / FMath::Max(.01, FMath::Abs(SurfaceTransform.GetScale3D().Z));
+	const double ReachBonus = TableCustomerReach(*Customer);
 	int32 BestID = 0;
 	double Nearest = TNumericLimits<double>::Max();
-	for (const auto& Pair : Manager.ISIDData)
+	for (const auto& Cached : ShelfBottles)
 	{
-		const int32 ID = Pair.Key;
-		const FISIDRuntimeIndex& Record = Pair.Value;
-		if (ID <= 0 || Record.State == EPropState::Held || Record.State == EPropState::InMotion
-			|| Record.RuntimeData.bInteractionLock || !Record.PackedRuntimeData.bIsGrabbable) continue;
-		const auto* Contents = Manager.FindUniqueData(ID);
-		const auto* Product = Manager.FindProductDefinition(Record.ProductID);
-		if (!Contents || Contents->EventData.ContentLevel <= UE_SMALL_NUMBER || !Product || !Product->StaticMesh
-			|| Manager.CanonicalProductPID(Contents->EventData.ContentID) != RequestedID
-			|| !Product->InteractionProfile.bCanConsume || Product->ConsumableProfile.ConsumableType != EConsumablePropType::Drink
-			|| Product->bIsBottleCap || Product->bLiquidVisualOnly || Manager.ResolveRootISID(ID) != ID) continue;
-		const auto* Active = Record.ActiveActor.Get();
-		if (Active && (Active->IsSeatedInFiller() || Active->GetVelocity().SizeSquared() > FMath::Square(65.f))) continue;
-
-		const FTransform BottleTransform = Active ? Active->GetActorTransform() : Manager.GetTransform(ID);
-		const FBox MeshBounds = Product->StaticMesh->GetBoundingBox();
-		const FBox BottleOnTable = MeshBounds.TransformBy(BottleTransform.ToMatrixWithScale() * SurfaceTransform.ToInverseMatrixWithScale());
-		const FVector Center = BottleOnTable.GetCenter();
-		if (Center.X < Surface.Min.X || Center.X > Surface.Max.X || Center.Y < Surface.Min.Y || Center.Y > Surface.Max.Y
-			|| FMath::Abs(BottleOnTable.Min.Z - Surface.Max.Z) > ZTolerance) continue;
-
-		const FVector SightTarget = BottleTransform.TransformPosition(MeshBounds.GetCenter());
-		const double Distance = FVector::DistSquared(Customer->GetActorLocation(), SightTarget);
-		if (Distance >= Nearest || !HasSightOfBottle(*Customer, Record, SightTarget)) continue;
-		FShopStockEntry Stock;
-		if (Manager.ShopCheckout && (Manager.ShopCheckout->IsReserved(ID) || Manager.ShopCheckout->GetStockEntry(ID, Stock))) continue;
+		const int32 ID = Cached.ISID;
+		const auto* Record = Manager.FindISIDData(ID);
+		FAvailableCola Bottle;
 		FShopProductScanData Quote;
-		if (!Manager.GetProductScanData(ID, Quote) || Quote.Price.bExpired || Quote.Price.SaleCents <= 0) continue;
+		if (!Record || !ReadAvailableCola(Manager, ID, *Record, RequestedID, ReachBonus, Bottle, Quote)) continue;
+		const FVector SightTarget = Bottle.Pose.TransformPosition(Bottle.MeshBounds.GetCenter());
+		const double Distance = FVector::DistSquared(Customer->GetActorLocation(), SightTarget);
+		if (Distance >= Nearest || !Manager.ValidateGrabWithReach(ID, Customer.Get(), ReachBonus)
+			|| ShelfContactDistance(*Shelf, Bottle) == TNumericLimits<double>::Max()
+			|| !HasSightOfBottle(*Customer, Manager, TableQueue.Get(), *Shelf->GetOwner(), *Record, SightTarget)) continue;
 		BestID = ID;
 		Nearest = Distance;
 		OutQuote = MoveTemp(Quote);
@@ -494,7 +747,7 @@ bool UColaTableCustomerComponent::BuyBottle(APropManager& Manager, const FShopPr
 	const int32 ID = Quote.ISID;
 	const auto Result = Manager.SharedWallet->CommitWithResources(FGuid::NewGuid(), Quote.Price.SaleCents, TEXT("TableColaSale"), [&]
 	{
-		auto* Bottle = Manager.ReserveGrabForTravel(ID, Customer.Get());
+		auto* Bottle = Manager.ReserveGrabWithReach(ID, Customer.Get(), TableCustomerReach(*Customer));
 		if (!Bottle) return false;
 		bool bReady = Bottle->OnPlayerGrab(Customer->GetMesh(), GripSocket);
 		if (bReady) Bottle->SetDrinkingCarry(true);
@@ -529,7 +782,7 @@ bool UColaTableCustomerComponent::BuyBottle(APropManager& Manager, const FShopPr
 	return true;
 }
 
-void UColaTableCustomerComponent::Drink(APropManager& Manager, AAIController& AI, double Now)
+void UColaTableCustomerComponent::Drink(APropManager& Manager, AAIController& AI, double Now, bool bRecovering)
 {
 	const auto* DrinkData = Manager.FindUniqueData(BottleISID);
 	auto* Bottle = Manager.GetActiveActorFromISID(BottleISID);
@@ -542,7 +795,12 @@ void UColaTableCustomerComponent::Drink(APropManager& Manager, AAIController& AI
 		return;
 	}
 
-	WalkAround(AI, Now);
+	if (!bRecovering && TableExit.IsSet())
+	{
+		bool bStalled = false;
+		if (MoveToQueuePoint(AI, *TableExit, Now, bStalled) || bStalled) TableExit.Reset();
+	}
+	else if (!bRecovering) WalkAround(AI, Now);
 	if (SipStartedAt < 0)
 	{
 		SipStartedAt = Now + FMath::Max(0.8f, SecondsBetweenSips);
@@ -651,17 +909,38 @@ void UColaTableCustomerComponent::TickComponent(float DeltaSeconds, ELevelTick T
 		Controller = AI;
 		if (auto* Brain = AI->GetBrainComponent()) Brain->StopLogic(TEXT("Table customer component controls this visit"));
 		AI->StopMovement();
+		WalkTarget.Reset();
+		SidestepGoal.Reset();
+		PassBlockerGoal.Reset();
+		SidestepStartYaw.Reset();
 	}
 	const double Now = GetWorld()->GetTimeSeconds();
-	const FBox TableBounds = Tabletop->Bounds.GetBox();
-	if (VisitState == EColaTableCustomerState::ApproachingTable)
+	const auto* ShopClock = AShopClock::Find(GetWorld());
+	const bool bShopOpen = !ShopClock || ShopClock->IsShopOpen();
+	const bool bQueuedForPurchase = VisitState == EColaTableCustomerState::ApproachingTable
+		|| VisitState == EColaTableCustomerState::WaitingAtTable;
+	if (!bShopOpen && bQueuedForPurchase)
 	{
-		if (Approach(*AI, TableBounds, Now))
-		{
-			Face(TableBounds.GetCenter());
-			ChangeState(EColaTableCustomerState::WaitingAtTable, Now);
-			NextActionTime = Now + TableWaitSeconds;
-		}
+		AI->StopMovement();
+		ChangeState(EColaTableCustomerState::WaitingForShop, Now);
+	}
+	else if (bShopOpen && VisitState == EColaTableCustomerState::WaitingForShop)
+	{
+		AI->StopMovement();
+		ChangeState(EColaTableCustomerState::ApproachingTable, Now);
+	}
+
+	ON_SCOPE_EXIT { UpdateWalkingFacing(DeltaSeconds); };
+	const bool bRecovering = UpdateCollisionRecovery(*AI, Now);
+	if (bRecovering && VisitState != EColaTableCustomerState::Drinking) return;
+	if (VisitState == EColaTableCustomerState::WaitingForShop)
+	{
+		WalkAround(*AI, Now);
+		return;
+	}
+	if (VisitState == EColaTableCustomerState::ApproachingTable || VisitState == EColaTableCustomerState::WaitingAtTable)
+	{
+		VisitTable(*AI, Now, ShopClock && ShopClock->IsRush());
 		return;
 	}
 
@@ -669,32 +948,8 @@ void UColaTableCustomerComponent::TickComponent(float DeltaSeconds, ELevelTick T
 	if (!Manager) return;
 	switch (VisitState)
 	{
-	case EColaTableCustomerState::WaitingAtTable:
-		if (Now >= NextActionTime && AI->GetMoveStatus() == EPathFollowingStatus::Idle)
-		{
-			FShopProductScanData Quote;
-			if (const int32 ID = FindBottle(*Manager, Quote))
-			{
-				if (Manager->ValidateGrab(ID, Customer.Get()))
-				{
-					if (BuyBottle(*Manager, Quote))
-					{
-						ChangeState(EColaTableCustomerState::Drinking, Now);
-						break;
-					}
-				}
-				else
-				{
-					const FVector Location = Manager->GetTransform(ID).GetLocation();
-					bHasApproachTarget = false;
-					Approach(*AI, TableBounds, Now, &Location);
-				}
-			}
-			NextActionTime = Now + ScanInterval;
-		}
-		break;
 	case EColaTableCustomerState::Drinking:
-		Drink(*Manager, *AI, Now);
+		Drink(*Manager, *AI, Now, bRecovering);
 		break;
 	case EColaTableCustomerState::ApproachingBin:
 	{
@@ -709,7 +964,7 @@ void UColaTableCustomerComponent::TickComponent(float DeltaSeconds, ELevelTick T
 		{
 			AI->StopMovement();
 			Customer->GetCharacterMovement()->StopMovementImmediately();
-			Face(BottleBin->GetOpeningLocation());
+			if (!Face(BottleBin->GetOpeningLocation(), DeltaSeconds)) break;
 			ThrowStartedAt = Now + ThrowStartLead;
 			ChangeState(EColaTableCustomerState::PreparingThrow, Now);
 		}

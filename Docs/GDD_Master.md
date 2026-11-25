@@ -1,5 +1,7 @@
 # Game Design Document (GDD) — Master
 
+**Shop progression and daily schedule — 24 November 2026.** Players carry finished bottles to shelves and NPC pickup credits the shared bank automatically. Section 2 describes the current sales loop. Section 7 defines demo and full-version hours, upgrade rules, and proposed playtest values. [Shop Upgrades and Daily Schedule](https://chatgpt.com/space/page_a732c3017920819184f9220f2fbfabfd#bea5a902-5b45-46f6-ba79-ee1587fa3e63)
+
 **Modular product architecture — 15 November 2026:** [Approved Bottle / Content / Cap specification](Modular_Product_Databases_2026-11-15.md) supersedes flavor-owned capacity and filled-SKU replacement rules. Maximum portions belong to the bottle type; current portions and immediate ownership belong to individual instances. Contents/caps select supported bottle products by stable named PID references. Preserve the Plastic + five Normal Colas + Manual Twist prototype scope and current sizes. [Implementation evidence and remaining acceptance](Modular_Product_Databases_Implementation_2026-11-15.md) are recorded separately.
 
 **Design Name:** Colossal Fizz Co
@@ -32,7 +34,7 @@ the older physical-flight tests do not accept the new default.
 
 **Scale and mass decision — 11 November 2026:** The current NPC, player and Cola sizes in `/Game/FirstPerson/Lvl_FirstPerson` are approved and must remain unchanged. The player retains the existing default character size to preserve movement, collision, camera and interaction mechanics. The small-player feeling comes from the surrounding giant world. Earlier 25 cm player targets and fixed patron/player multipliers are superseded by Section 3. NPCs and movable actors use gameplay masses below the player's mass; visible size does not imply greater mass.
 
-**Browser-chat reconciliation — 11 November 2026:** [Chat decisions and conflict register](Chat_Design_Decisions_2026-11-11.md) records the source evidence, new Normal Bulk Cola Container requirements, closure distinctions, art direction and unresolved details. Direct designer decisions take precedence over older assistant recaps. This is a design update, not a claim that the new container, cooling or corrected-scale prototype has been implemented or tested. Preserve the approved scanner, physical-cash/ATM and persistence rules. The eleven excluded legacy PSOs, including PSO_FoodContainer, remain outside current scope.
+**Browser-chat reconciliation — 11 November 2026:** The decision record covers the Normal Bulk Cola Container, closure distinctions, art direction, persistence and the earlier scanner and physical cash flow. The eleven excluded legacy PSOs, including PSO_FoodContainer, remain outside current scope. [Chat decisions and conflict register](Chat_Design_Decisions_2026-11-11.md)
 
 **Latest prototype scope — 11 November 2026, flight mode updated 12 November:** **Plastic Bottles + the five Normal Colas + Normal Caps (Manual Twist) only.** All other bottle materials, cola categories and cap types are excluded from the prototype. Hits, shaking, drops and physical impacts increase internal pressure; exceeding the bottle's maximum tolerance triggers a cola rocket release. The current powered-flight path is the original BP_Cola Rocket Projectile Component behavior, per the decision above; the fully physics-driven option is retained. See [the approved pressure-system scope and acceptance requirements](Prototype_Plastic_Bottle_Pressure_2026-11-11.md). This resolves the earlier prototype material/closure question in favor of plastic/manual twist without changing current bottle, player or NPC sizes. Other material/cap descriptions below are full-game reference only.
 
@@ -61,11 +63,11 @@ Your customers are **towering Mountain Giants, sinister Bog Witches, ironbound G
 2. **The "David & Goliath" Scale Twist:**  
    Preserve the current player, NPC and Cola sizes from `Lvl_FirstPerson`. Scale and arrange most of the environment for giant customers, while the default-sized player remains visibly small by comparison. Transport equipment addresses distance, stability and handling; NPCs and movable props remain lighter than the player.
 3. **Micro-Vehicles & Shop Logistics:**  
-   To conquer the vast distances of the giant shop floor, players operate miniature motorized carts, forklifts, flatbed tuggers, and mobile capping rigs to haul massive bulk cylinders, transport crates of bottles, and close bottles on the move.
+   In the full version, players use miniature carts, forklifts, tuggers and mobile capping rigs to haul bulk cylinders, move crates and close bottles on the move.
 4. **Cooperative Production and Service:**
-   Coordinate dispensing, compatible bottle sealing, cooling, shelf stocking and customer checkout. Manual, automatic and material-specific closures follow their own rules; a universal F1 torque minigame or capping deadline is not a demo requirement.
+   Coordinate dispensing, compatible bottle sealing, cooling and physical shelf stocking so NPCs can collect finished drinks. Manual, automatic and material-specific closures follow their own rules. The demo uses the Manual Wheel Rotator in Section 2.5.
 5. **Shared Prosperity & Shared Chaos:**  
-   Multiplayer features a **100% shared shop, shared bank account, and shared inventory**. A teammate's mistake is everyone's disaster; a successful rush allows the crew to upgrade cylinders, buy faster forklift buggies, unlock automatic bottle washers, or procure exotic enchanted colas.
+   Multiplayer features a **100% shared shop, shared bank account and shared inventory**. A teammate's mistake is everyone's disaster. A successful rush funds supplies and upgrades to equipment, shelves and handling. The full version adds vehicle progression and more products.
 
 ---
 
@@ -79,27 +81,23 @@ Use semi-realistic stylized 3D with **Victorian steampunk, dark fantasy and alch
 flowchart TD
     A["1. Buy empty bottles, compatible caps and pre-mixed Normal Cola"] --> B["2. Container to hose/nozzle to filling equipment to bottle"]
     B --> C["3. Seal with compatible closure and cool hot cola"]
-    C --> D["4. Stock shop shelves"]
-    D --> E["5. NPC collects bottles and joins checkout queue"]
-    E --> F["6. Scan, review/save products and lock bill"]
-    F --> G["7. Accept physical tender and provide exact change"]
-    G --> H["8. Complete sale and retain cash in register"]
-    H --> I["9. Resolve any post-sale expiry penalties and compensation"]
-    I --> J["10. Deposit cash at ATM into shared bank"]
-    J --> A
+    C --> D["4. Carry finished bottles to shelves"]
+    D --> E["5. NPC collects displayed stock"]
+    E --> F["6. Credit the shared bank automatically"]
+    F --> G["7. Reinvest in supplies and upgrades"]
+    G --> A
 ```
 
 ### 2.1 Step-by-Step Breakdown
 
-1. **Purchase supplies:** Keep the approved $0 starting shared bank, empty register and existing starter-stock count. Prototype supplies are empty plastic bottles, Normal manual twist caps and pre-mixed Normal Cola at configurable prototype supply costs. Existing prototype product/material settings and labels need alignment without changing bottle size or resetting identity/ownership. Raw-ingredient processing belongs to the full game.
+1. **Purchase supplies:** Keep the approved $0 starting shared bank and existing starter-stock count. Prototype supplies are empty plastic bottles, Normal manual twist caps and pre-mixed Normal Cola at configurable prototype supply costs. Existing prototype product/material settings and labels need alignment without changing bottle size or resetting identity/ownership. Raw-ingredient processing belongs to the full game.
 2. **Fill bottles:** Route supply through the Normal Bulk Cola Container, hose/dispenser and separate filling-equipment stage. Transfer fractional quantities under server authority and deduct only accepted transfer. Preserve bottle identity, Strength/damage and container history; initialize the new liquid's own creation/expiry lifecycle.
 3. **Seal and cool:** Two players operate the Manual Wheel Rotator to secure the Normal manual twist cap on the plastic bottle. One repeatedly presses G to apply downward holding force, whose effectiveness declines with time even under continued pressing; the other progressively rotates the cap closed. Insufficient holding before closure permits cola escape through existing pressure/leakage mechanics. Releasing hold after proper sealing does not reopen the cap. Cool the hot product toward its configured optimum temperature. There is no mandatory uncapped eruption countdown. Exact station inputs/tuning and practical cooling remain open; no new warm-product sale lock is implied.
-4. **Stock shelves:** Place finished bottles on shop shelves using the existing Prop Manager and shelf services, at the approved bottle dimensions.
-5. **Serve shopping NPCs:** Customers enter, find matching Normal Cola, collect physical bottles into their buckets and join the shared checkout queue.
-6. **Scan and finalize:** Live scanner entries follow bottles in/out; Save retains entries, and individual ISIDs prevent duplicates. Players may remove/replace bottles before locking the bill. Group display rows while retaining per-bottle pricing and expiry data.
-7. **Collect cash and give change:** Any teammate may continue the shared transaction. Physical $1/$2/$5/$10/$20/$50/$100 coins are finite. Incorrect change blocks completion. Prototype customers may round up tender only when real coins can supply change; otherwise they pay exactly. Keep detailed prices in cents and round only the aggregate bill to the nearest $1, half-dollar ties up.
-8. **Complete and reinvest:** Successfully completed sales retain physical cash in the register. ATM deposits, not sale completion, credit the shared bank for those coins. Expired bottles sold trigger a once-only full-base-price penalty and either a full, fresh same-cola/same-capacity replacement or another base-price deduction. Record adjustments separately from the locked receipt; retain unpaid obligations. Use bank funds to purchase more supplies.
-9. **Finish the visit:** The approved prototype returns the bucket, lets the customer leave, then recycles the NPC and retires purchased physical goods while retaining receipt/ownership history. Physical empty-bottle returns, washing infrastructure and further progression are later work, not a replacement for this prototype departure policy.
+4. **Stock shelves:** Players physically carry finished bottles from production to shelves and place them using the existing Prop Manager and shelf services at the approved bottle dimensions. Players carry one full bottle at a time.
+5. **Sell through NPC pickup:** During opening hours, NPCs find the products they want and collect displayed bottles. Each completed pickup finishes the sale at the shelf and credits the shared bank once. The existing bucket return, departure, NPC recycling and purchased-goods retirement lifecycle follows, with sale and ownership history retained.
+6. **Reinvest:** Spend shared bank funds on supplies and the equipment, shelf and handling upgrades in Section 7.
+
+Scanner interaction, locked bills, physical tender, change and ATM deposit are retired from this shop loop. Final bank-credit rounding and how the existing post-sale expiry adjustments apply to a direct shelf pickup remain open. [Earlier scanner and checkout design](Scanner_Checkout_Design_Update_2026-11-10.md) · [Earlier ATM accounting](ATM_Cash_Accounting_Proposal.md)
 
 ### 2.2 Normal Bulk Cola Container
 
@@ -111,7 +109,7 @@ For the full game, electricity-dependent container cooling, low-voltage conseque
 
 ### 2.3 Pricing and Quality Boundary
 
-At matching nominal capacity, the full-bottle base price comes from configured nominal portions and the fixed portion rate. Apply `Clamp(ContentLevel, 0, 1)` proportionally, then the approved symmetric temperature discount, capped at 20%, relative to the cola's configured optimum. Overfill has no extra selling value or larger expiry penalty. Bottle purchase cost and recycling value are separate; do not add a bottle-cost rebate. Underfill reduces revenue but does not guarantee a net loss under every configurable balance. Warm bottles remain subject to the approved discount rather than an invented rejection rule. See [scanner rules](Scanner_Checkout_Design_Update_2026-11-10.md).
+At matching nominal capacity, the full-bottle base price comes from configured nominal portions and the fixed portion rate. Apply `Clamp(ContentLevel, 0, 1)` proportionally, then the approved symmetric temperature discount, capped at 20%, relative to the cola's configured optimum. Nominal fill caps selling value, and the existing expiry penalty uses the full-bottle base price. Account for bottle purchase cost and recycling value separately. Underfill reduces revenue, and warm bottles remain eligible for purchase at the temperature-adjusted price. [Pricing rules](Scanner_Checkout_Design_Update_2026-11-10.md)
 
 ### 2.4 Plastic Bottle Pressure and Rocket Prototype
 
@@ -152,7 +150,7 @@ Measured reference values are verification aids, not instructions to resize an a
 | `SM_PlasticBottle` supplied plastic shell | Approximately 186 cm tall at native mesh scale 1; replaces the historical `Cola1` mesh without changing placed actor scales |
 | Existing reference bottles | Actor scale 1 in `Lvl_FirstPerson` |
 
-**Giant-scale environment:** bottles and matching caps, cash and coins, scanners, checkout equipment and counters, storage/display racks, shop furniture, structures and most other environmental props. Use the reference bottles and giant characters to determine proportions, spacing and capacity.
+**Giant-scale environment:** bottles and matching caps, counters, storage/display racks, shop furniture, structures and most other environmental props. The earlier prototype's cash, coins, scanners and checkout equipment also use giant scale. Use the reference bottles and giant characters to determine proportions, spacing and capacity.
 
 **Player-scale exceptions:** player vehicles/cars, bottle-filling controls and equipment, cleaning equipment, specialized tools and machinery intended for direct player operation. Their controls, seats, grips and working positions fit the unchanged player while their hoses, mounts and delivery interfaces can reach giant bottles.
 
@@ -172,7 +170,7 @@ Because the environment is built for giants around the unchanged player:
 - Player tools fit the existing character. Hoses can reach giant fittings; tension limits and reactions are tuned independently of visible size.
 
 ### 3.2 Vast Workshop Navigation & Micro-Vehicle Logistics
-The tavern workshop is large relative to the unchanged player. Vehicles improve traversal, bulk transport and throughput across counters, floors, cellars and serving tables; they are not justified by obsolete 25 cm character or overweight-cylinder assumptions.
+In the full version, vehicles improve traversal, bulk transport and throughput across the giant workshop, including its counters, floors, cellars and serving tables. Section 7 covers vehicle upgrades, tanker hauling and deliveries.
 - **The Vehicle Fleet:** The team uses motorized micro-machinery:
   - **Flatbed Mules / Karts:** Drivable transport karts with magnetized beds to securely carry crates of empty bottles, ice blocks, and finished products across the shop.
   - **Micro-Forklifts:** Player-sized hydraulic lifters used to transport, hoist and dock bulky Cola cylinders. Gameplay mass stays below the player baseline; final values are configurable tuning.
@@ -194,17 +192,17 @@ The tavern workshop is large relative to the unchanged player. Vehicles improve 
 ## 4. Multiplayer Co-op Systems
 
 ### 4.1 Shared Architecture
-- **Shared Bank and Finite Cash:** The server owns the shared bank, physical coin identities and transaction history. Physical sale cash remains in the register until ATM deposit. Withdrawals debit the bank and issue physical coins atomically; deposits credit once and retire/bank those coins. Never credit bank funds while leaving the same sale cash independently spendable. See [approved ATM accounting](ATM_Cash_Accounting_Proposal.md).
-- **Shared Storage & Vehicle Pool:** Crates of empty bottles, gas tanks, caps, and vehicles are accessible by all teammates.
+- **Shared Bank:** The server owns the bank and transaction history. Each completed NPC pickup is paired with one authoritative bank credit, including when a notification is delivered twice. Placing a bottle on a shelf makes it available for sale. The earlier prototype's physical coin identities and deposit/withdrawal rules are documented in the [ATM accounting design](ATM_Cash_Accounting_Proposal.md).
+- **Shared Storage & Vehicle Pool:** Supplies such as empty bottles, gas tanks and caps are accessible to all teammates. The full version also shares vehicles.
 - **Shared Customer Anger Meter:** If orders back up, the tavern reputation plummets, causing giants to smash tables or walk out.
 
 ### 4.2 Natural Emergent Player Roles
 While any player can perform any task, high efficiency requires spontaneous specialization:
 1. **The Pumpmaster:** Operates the cola cylinders and fuel nozzles, mastering precision fill cutoffs.
-2. **The Pit-Stop Capper / Mobile Mechanist:** Operates the stationary capping bench or pilots the Mobile Capper Buggy down assembly lines.
-3. **The Logistics Driver / Forklift Pilot:** Hauls heavy bulk cylinders from delivery chutes, docks tanks, and transports bottle crates across the giant shop floor.
+2. **The Pit-Stop Capper / Mobile Mechanist:** Operates the stationary capping bench. The full version adds mobile capping on the assembly line.
+3. **The Logistics Driver / Forklift Pilot:** In the full version, hauls bulk cylinders from delivery chutes, docks tanks and transports bottle crates across the giant shop floor.
 4. **The Cryo-Runner:** Manages ice supplies, dips bottles into coolers, and monitors temperature dials.
-5. **The Cashier & Sanitizer:** Scans bottles, collects payments, loads bottles onto giant trays, and washes dirty returns.
+5. **The Stocker & Prep Runner:** Replaces empty bottles at stations, carries finished bottles to shelves and replenishes supplies for the next rush.
 
 ---
 
@@ -247,13 +245,134 @@ Only plastic and the Normal manual twist cap are included in the prototype. Othe
 
 ---
 
-## 7. Win, Loss & Shift Progression
+## 7. Daily Schedule and Shop Progression
 
-The following wider progression concepts remain future scope; this update does not make them requirements for accepting the Normal-only purchase/production/shopping/payment/reinvestment slice. Numeric serving temperatures do not replace each cola's configured optimum or the capped temperature discount.
+### 7.1 Demo Day
 
-- **Daily Quota:** Every day/shift has a target revenue quota and a set queue of giant customers.
-- **Shift Rating (1 to 5 Stars):** Evaluated based on:
-  - Fill accuracy (avoiding underfill loss).
-  - Serving temperature (achieving the frosty $\le 4^\circ\text{C}$ sweet spot).
-  - Order speed and zero shop damage.
-- **Bankruptcy / Loss Condition:** Failing to make the daily rent payment or having your tavern completely trashed by rampaging giants results in game over.
+The demo uses the five Normal Colas. Give players three game hours to prepare and ten game hours to trade. Customer demand peaks around noon.
+
+| Game time | Shop state | Player activity |
+| --- | --- | --- |
+| 06:00–09:00 | Closed for preparation | Clean, obtain supplies, prepare bottles and stock shelves. |
+| 09:00–19:00 | Open | Fill and prepare bottles, replace filled bottles at stations with empties, carry finished stock to shelves and replenish supplies as NPCs buy. |
+| Around 12:00 | Peak demand | Keep shelves stocked through the busiest part of trading. |
+| 19:00 | Closing | Pause new purchases. Customers who already paid can finish drinking and dispose of their bottles. |
+
+In the opening level, the demo day runs for three hours of play including a 10-second closing transition. The clock holds at 19:00 during the transition, then advances to 06:00 the next day in the same shop. The noon rush runs from 12:00 to 13:00.
+
+### 7.2 Full-Version Day and Night Cleanup
+
+The shop opens at 09:00 and trades for nineteen game hours, passing through midnight before closing at 04:00 the next day. Customers predominantly seek the drinks listed for each time band. Keep arrival intensity and product preferences configurable. Preview upcoming demand so players can prepare shelf stock ahead of a change.
+
+| Game time | Duration | Main demand or activity |
+| --- | --- | --- |
+| 09:00–12:00 | 3 hours | Healthy drinks |
+| 12:00–16:00 | 4 hours | Cold drinks |
+| 16:00–19:00 | 3 hours | Shakes and smoothies |
+| 19:00–00:00 | 5 hours | Liquor and beer |
+| 00:00–04:00 | 4 hours | Witch potions, nuclear, ghost and toxic drinks |
+| 04:00–09:00 | 5 hours | Closed for night cleanup and morning preparation |
+
+Before the 09:00 opening, players must clear evidence of the night business. Decontaminate radiation, capture escaped ghosts, kill or remove spiders, and clean toxic spills and other hazardous residue. A proposed readiness check uses editable thresholds for each hazard and a compact indicator that shows the amount or count left. The consequence of discovery at 09:00 is open.
+
+### 7.3 Upgrade Purchases
+
+Players use money from the shared bank to buy upgrades. Rank 0 is the starting state. Each purchase requires the previous rank in its branch and the displayed cost. Branches progress independently. Equipment ranks belong to the upgraded instance, handling ranks belong to the player profile, and the shelf limit belongs to the shop.
+
+The values below are proposed playtest settings. Every purchasable rank needs a money price based on actual sales margin and time saved. Percentage increments are additive against the original base value. Rates use the existing liquid portion unit.
+
+### 7.4 Proposed Equipment and Shelf Balance
+
+| Equipment | Branch | UI | Starting value | Per purchase | Proposed maximum |
+| --- | --- | --- | --- | --- | --- |
+| Flow controller | Supply Manifold | IN | 1 input | +1 input | 4 inputs |
+| Flow controller | Distribution Manifold | OUT | 1 output | +1 output | 12 outputs |
+| Flow controller | Flow Chamber | FLOW | 1 portion/s each for total intake and total output | +1 portion/s to each total | 8 portions/s each |
+| Flow controller | Intake Assist | SUCTION | 0 strength | +0.25 strength | 1.50 strength |
+| Flow controller | Lever Mechanism | LEVER | Hold to run | Next control behavior | Independent Valve Control |
+| Single-bottle filling table | Filling Nozzle | FILL | 1 portion/s | +1 portion/s | 4 portions/s |
+| Hose | Inlet Coupling | IN | 1 portion/s | +1 portion/s | 8 portions/s |
+| Hose | Outlet Coupling | OUT | 1 portion/s | +1 portion/s | 8 portions/s |
+| Hose | Pipe Reinforcement | PRESSURE | Base pressure tolerance | +20% of base | 200% of base |
+| Tanker | Pressure Vessel | STORAGE | Base pressure rating and storage capacity | +25% of each base | 200% of each base |
+| Shop | Shelf Expansion | SHELVES | 1 placeable shelf | +1 placeable shelf | 4 shelves in the first demo test |
+
+- **Flow controller.** The five proposed branches contain 30 total purchases. Tune the proposed Flow Chamber inlet-tolerance bonus independently of throughput at +10% of base per rank, up to 170%. The proposed Intake Assist rule uses `OriginalLoad / (1 + Strength)` once on the connected inlet path, leaving 40% of the original modeled pressure load at strength 1.50. Availability of cola and rated throughput still govern transfer.
+- **Flow limits.** Delivered flow is constrained by the source output, the controller's allocated share, both hose endpoint limits and filling-table acceptance. Keep total allocation within the controller's shared flow budget. Hose inlet and outlet coupling upgrades each change throughput. Show the smaller endpoint limit in the upgrade UI and track pressure tolerance separately.
+- **Tanker.** Higher pressure capability permits more stored liquid through the game's compressed-storage rule. Store pressure rating and maximum portions as paired values per rank. A purchase raises allowed capacity while retaining the actual liquid amount. Derive actual pressure from the existing fill and pressure rules. The same hose throughput and demo bulk-source protections described in Section 2.2 apply at higher storage ranks.
+- **Shelves.** Progression raises the maximum number of physical shelves the shop can place. Bottle slots are defined per shelf. Keep the shop limit editable for available floor space and NPC paths. The map-supported limit and whether a rank includes a physical shelf remain open.
+
+#### Flow Controller Lever Ranks
+
+| Rank | Name | Behavior |
+| --- | --- | --- |
+| 0 | Manual Lever | Hold to run. Release to close. |
+| 1 | Locking Lever | Press E to run. Press E again to close. |
+| 2 | Bottle Cutoff | When any active bottle reaches its fill target, close the whole controller. A player restarts it manually. |
+| 3 | Independent Valve Control | Each outlet closes when its bottle is full and reopens when a valid replacement is correctly seated and ready. Other outlets can continue filling. |
+
+Offer the first toggle early in the playtest so a player can restock shelves while filling continues. Lever upgrades govern filling. Players still replace empties, replenish supplies and carry finished bottles to shelves.
+
+#### Manual Cola Filling Machine Upgrades
+
+`BP_ManualColaFillingMachine` has four upgrade branches alongside nozzle throughput. The cap and seal capacities apply to each machine's trays. Player carrying limits are defined in Section 7.5.
+
+| Upgrade | Starting value | Effect | Maximum |
+| --- | --- | --- | --- |
+| Cap Tray Capacity | 1 cap | Increase the number of caps the machine can hold | 100 caps |
+| Seal Tray Capacity | 1 seal | Increase the number of seals the machine can store | 100 seals |
+| Built-in Pressure Regulator | Rank 0 with base filling pressure | Each purchase adds 0.05 gameplay pressure units of reduction in the bottle during filling | 100 purchasable ranks, for 5.00 units of configured reduction |
+| Built-in Temperature Regulator | Base filling behavior | Reduce the cola temperature by 0.02 per upgrade while filling | Open |
+
+Each pressure regulator rank costs more money than the previous rank. The starting price and price increases are open balance decisions. Section 2.5 covers the standalone full-game pressure regulator. The tray capacity increases per rank and the temperature regulator's units and maximum are also open.
+
+### 7.5 Player Handling
+
+Each player can buy 15 ranks across four independent paths. Rank 0 is the free starting state. Each price below is the starting playtest cost for the rank shown.
+
+| Rank | Empty Bottle Handling · EMPTY | Cap Handling · CAPS | Seal Handling · SEALS | Hand Stability · STABILITY |
+| --- | --- | --- | --- | --- |
+| 0 | 1 empty bottle | 1 cap | 1 seal | 0% less movement shake · ×1.00 |
+| 1 | 2 empty bottles · $20 | 3 caps · $15 | 3 seals · $15 | 10% less · ×0.90 · $15 |
+| 2 | 3 empty bottles · $45 | 6 caps · $30 | 6 seals · $30 | 20% less · ×0.80 · $30 |
+| 3 | — | 9 caps · $50 | 9 seals · $50 | 30% less · ×0.70 · $50 |
+| 4 | — | 12 caps · $75 | 12 seals · $75 | 40% less · ×0.60 · $75 |
+| 5 | — | — | — | 50% less · ×0.50 · $105 |
+
+**Carrying.** The player carries one hand group at a time. Empty bottles, caps and seals form groups of their own type. A partially filled or full bottle takes the hand by itself. Use the bottle's existing empty-state tolerance to identify loaded bottles. Hold **G** while aiming at another bottle, another cap while holding caps, or another seal while holding seals to attempt a pickup. Capacity checks reject extra items and keep them in the world. Holding **G** toward a placement point places the current item, and double-tapping **G** drops it. At a filling station, **E** seats one bottle at a time. A successful placement, drop or station handoff makes the next item available in hand. Check the hand group before liquid transfer so a held batch cannot become multiple loaded bottles. Placing or using a cap or seal reduces the held count. Capacity purchases take effect immediately and retain items already held. Seal duration and strength come from the seal itself.
+
+**Stability.** Multiply movement-induced carrying shake by the rank's multiplier once. The resulting shake feeds the bottle's movement agitation and the associated pressure gain. Maximum rank halves that shake under identical movement. Collision impulses, drops, existing internal pressure and other pressure sources follow their own rules. The menu shows the percentage of shake removed.
+
+**Purchases and saves.** The shared shop bank pays for ranks owned by the purchasing player. The server validates the next rank, prerequisite, configured price and available funds, then charges and grants the rank once. Replicated PlayerState ranks drive the player's effective values and menu. Save the four ranks under the player's stable profile identity in the shop save and recalculate their effects on load. Profiles without saved ranks start at rank 0. Each rank definition records the branch, required previous rank, editable price and resulting capacity or stability multiplier.
+
+**Player menu.** Press **H** to open the player upgrade menu. Select one of the four tabs to see its current value, next value and price, or its maximum rank. The menu displays `FULL: 1` as a fixed carrying rule.
+
+### 7.6 Proposed Full-Version Vehicle Balance
+
+The full version adds suspension, engine and fuel upgrades to support heavier tanker hauling and cola deliveries.
+
+| Upgrade | UI | Per purchase | Proposed maximum rank effect |
+| --- | --- | --- | --- |
+| Suspension | SUSPENSION | Reduce transmitted movement shock by 10 percentage points of base | 50% of original movement shock |
+| Engine Power | POWER | +20% of base engine output | 200% of base output |
+| Fuel Mileage | MILEAGE | +10% of base distance per fuel unit | 150% of base mileage |
+
+Tune engine power, permitted loaded-tanker mass and fuel mileage independently. Set any change to permitted mass explicitly on the rank. Loaded weight and route conditions can affect fuel consumption. Suspension reduces shock transmitted to the tanker or cargo during movement, with crashes governed by the separate collision rules.
+
+### 7.7 Implementation and Playtesting
+
+The opening level defaults to the three-hour demo clock. Set `ClockMode=RealWorld` in `Config/DefaultGame.ini` to use the host's local time at its normal pace. Full-version trading continues through midnight until the 04:00 close, when the next business day begins with cleanup and preparation.
+
+- Expose a small set of useful equipment, shelf and handling ranks in the first demo playtest. Measure the full route from empty bottle to NPC pickup before tuning higher ranks. Compare preparation time, shelf space, walking and restocking time, peak arrivals and output backlog. Time the full-version cleanup window independently of the demo day.
+- Store editable upgrade definitions with branch, rank, cost, prerequisite and stat effects. Save purchased ranks with the relevant equipment identity, player or shop, plus the clock phase and unresolved cleanup state. Use server-authoritative purchases and sale credits.
+- Store demo and full-version time bands separately with shop state, arrival intensity and product weights. Treat midnight as part of the same full-version trading day until the 04:00 closing event. Represent the bands as wraparound intervals or as elapsed time since the 09:00 business-day start.
+
+| Proposed Blueprint data or asset | Responsibility |
+| --- | --- |
+| `ST_EquipmentUpgradeRow`, `DT_EquipmentUpgrades`, `ST_PurchasedUpgradeState` | Define upgrade ranks and track purchases. |
+| `ST_ShopTimeBand`, `DT_DemoShopSchedule`, `DT_FullShopSchedule` | Define shop hours, demand and product preferences by time band. |
+| `BP_ShopTimeManager`, `BP_ShopDemandManager`, `BP_NightCleanupManager` | Track clock and rollover, customer arrivals and preferences, and full-version cleanup progress. |
+
+### 7.8 Future Win and Loss Conditions
+
+Revenue quotas, one-to-five-star shift ratings, rent and loss from bankruptcy or shop destruction remain future concepts. Potential rating inputs include fill accuracy, each drink's configured optimum temperature, restocking speed and shop damage.

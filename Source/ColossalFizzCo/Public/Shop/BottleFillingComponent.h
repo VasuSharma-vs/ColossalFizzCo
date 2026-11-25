@@ -47,4 +47,5 @@ private:
 	TWeakObjectPtr<UResourceTransferEndpointComponent> ActiveReceivingPort;
 	bool bRestoreHoseTick=false;
 	bool ConnectionsInRange() const;
+	float GetEffectiveTargetContentLevel() const;
 };

@@ -1,4 +1,5 @@
 #include "Shop/ManualColaFillingMachine.h"
+#include "Shop/SocketColaFillingMachine.h"
 #include "Shop/ShopProductionStationComponent.h"
 #include "Shop/BottleFillingComponent.h"
 #include "Shop/ShopProcurementComponent.h"
@@ -9,6 +10,7 @@
 #include "Props/ColaPropActor.h"
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/TextRenderComponent.h"
 #include "Components/StaticMeshPhysicsSimulationComponent.h"
 #include "Components/HoseSocketComponent.h"
 #include "Components/HoseTransferComponent.h"
@@ -48,15 +50,26 @@ AManualColaFillingMachine::AManualColaFillingMachine()
 	CradleVisual(TEXT("NeckClampLeft"),FVector(-14,0,90),FVector(.06,.18,.10),Cube.Object);
 	CradleVisual(TEXT("NeckClampRight"),FVector(14,0,90),FVector(.06,.18,.10),Cube.Object);
 	CradleVisual(TEXT("BottleHolderRing"),FVector(0,0,-87),FVector(.78,.78,.04),Cylinder.Object);
-	Visual(TEXT("TemporarySealButton"),FVector(-35,-40,58),FVector(.12,.12,.08),Cylinder.Object);
+	AutoSealSwitch=Visual(TEXT("TemporarySealButton"),FVector(-35,-40,58),FVector(.16,.16,.08),Cylinder.Object);
+	AutoSealSwitch->SetCollisionResponseToAllChannels(ECR_Ignore);
+	AutoSealSwitch->SetCollisionResponseToChannel(ECC_Visibility,ECR_Block);
+	AutoSealSwitch->SetGenerateOverlapEvents(false);
+	AutoSealSwitch->ComponentTags.Add(TEXT("ShopInteractionPoint"));
+	AutoSealLabel=CreateDefaultSubobject<UTextRenderComponent>(TEXT("AutoSealLabel"));
+	AutoSealLabel->SetupAttachment(AutoSealSwitch);
+	AutoSealLabel->SetAbsolute(false,false,true);
+	AutoSealLabel->SetRelativeLocation(FVector(0,-68,0));
+	AutoSealLabel->SetRelativeRotation(FRotator(0,-90,0));
+	AutoSealLabel->SetHorizontalAlignment(EHTA_Center);
+	AutoSealLabel->SetWorldSize(8.f);
 	Lever=Visual(TEXT("ManualFillingLever"),FVector(45,-35,125),FVector(.04,.04,.55),Cylinder.Object);
 	Lever->SetRelativeRotation(FRotator(0,0,35));
-	Pipe=Visual(TEXT("SingleLiquidSupplyPipe"),FVector::ZeroVector,FVector(.025,.025,1),Cylinder.Object);
-	Pipe->SetVisibility(false);
+	Pipe=Visual(TEXT("SingleLiquidSupplyPipe"),FVector::ZeroVector,FVector::OneVector,nullptr);
 	Production=CreateDefaultSubobject<UShopProductionStationComponent>(TEXT("ManualProduction"));
 	BottleFiller=CreateDefaultSubobject<UBottleFillingComponent>(TEXT("ManualBottleFiller"));
 	BottleFiller->PortionsPerSecond=1; BottleFiller->MaxConnectionDistance=400; BottleFiller->TargetContentLevel=0;
 	Production->Filler=BottleFiller; Production->bManualLeverMode=true; Production->bAllowSoloCap=true;
+	Production->CapTrayCapacity=1; Production->SealTrayCapacity=1;
 	Production->bRequiresCooperativeCap=false;
 	Production->bOffersSupplies=false;
 	ContentSelectorDial=Visual(TEXT("ContentSelectorDial"),FVector(0,-51,105),FVector(.26,.26,.06),Cylinder.Object);
@@ -74,10 +87,9 @@ AManualColaFillingMachine::AManualColaFillingMachine()
 		Part->SetCollisionEnabled(ECollisionEnabled::NoCollision); return Part;
 	};
 	BottleInputVolume=Box(TEXT("BottleInput"),TEXT("ShopBottleInput"),FVector(0,0,145),FVector(135,60,110));
-	SupplyInputVolume=Box(TEXT("SupplyPort"),TEXT("ShopCylinderInput"),FVector(100,0,50),FVector(25,25,45));
 	CapInputVolume=Box(TEXT("CapInput"),TEXT("ShopCapInput"),FVector(85,-60,70),FVector(80,80,35));
 	SealInputVolume=Box(TEXT("SealInput"),TEXT("ShopSealInput"),FVector(-65,-25,70),FVector(30,40,35));
-	Production->BottleInput=BottleInputVolume; Production->CylinderInput=SupplyInputVolume; Production->CapInput=CapInputVolume;
+	Production->BottleInput=BottleInputVolume; Production->CapInput=CapInputVolume;
 	Production->SealInput=SealInputVolume;
 	auto TrayBase=[&](const TCHAR* Name,UBoxComponent* Volume,FVector Scale)
 	{
@@ -97,10 +109,16 @@ AManualColaFillingMachine::AManualColaFillingMachine()
 	BottleHolderPoint->SetupAttachment(CradlePivot);
 	SupplyDeliveryPoint=Point(TEXT("SupplyOutput"),TEXT("ShopSupplyOutput"),FVector(-500,0,60));
 	HoseConnections=Point(TEXT("HoseConnections"),TEXT("ManualHoseConnections"),FVector::ZeroVector);
-	// Moving the supply receiving volume moves every hose socket with it while
-	// retaining the existing default socket layout in machine space.
-	HoseConnections->SetupAttachment(SupplyInputVolume);
-	HoseConnections->SetRelativeLocation(FVector(-100,0,-50));
+	FlowControllerInlet=CreateDefaultSubobject<UHoseSocketComponent>(TEXT("FlowControllerInlet"));
+	FlowControllerInlet->SetupAttachment(PropMesh);
+	FlowControllerInlet->SetRelativeLocation(FVector(112,85,39));
+	FlowControllerInlet->SetRelativeRotation(FRotationMatrix::MakeFromZ(FVector(1,0,0)).Rotator());
+	FlowControllerInlet->TraceBoxExtent=FVector(13.f);
+	FlowControllerInlet->TraceBoxOffset=FVector(0,0,7);
+	FlowControllerInlet->ComponentTags.Add(TEXT("ShopInteractionPoint"));
+	FlowInletCollar=Visual(TEXT("FlowInletCollar"),FVector::ZeroVector,FVector(.22,.22,.18),Cylinder.Object);
+	FlowInletCollar->SetupAttachment(FlowControllerInlet);
+	FlowInletCollar->SetRelativeLocation(FVector(0,0,4));
 	Production->BottleHolder=BottleHolderPoint; Production->SupplyOutput=SupplyDeliveryPoint;
 	Point(TEXT("ManualControls"),TEXT("ShopInteractionPoint"),FVector(0,-100,45));
 	RefreshHosePortLayout();
@@ -133,7 +151,7 @@ void AManualColaFillingMachine::OnConstruction(const FTransform& Transform)
 	Super::OnConstruction(Transform);
 	if (CradlePivot) CradlePivot->SetRelativeRotation(FRotator(FMath::Lerp(RestCradlePitch,FillingCradlePitch,CradleAlpha),0,0));
 	RebuildHoseSockets();
-	Pipe->SetVisibility(false);
+	UpdateControlLayout();
 }
 
 void AManualColaFillingMachine::RebuildHoseSockets()
@@ -158,9 +176,18 @@ void AManualColaFillingMachine::RebuildHoseSockets()
 			Authored.Add(Socket);
 	}
 	Authored.Sort([](const UHoseSocketComponent& A, const UHoseSocketComponent& B) { return A.GetFName().LexicalLess(B.GetFName()); });
-	HoseSockets.Reset(SupportedContentCount);
-	ConnectedNozzles.SetNum(SupportedContentCount);
-	for (int32 Index = 0; Index < SupportedContentCount; ++Index)
+	const int32 PortCount=GetActiveHosePortCount();
+	HoseSockets.Reset(PortCount);
+	ConnectedNozzles.SetNum(PortCount);
+	if (auto* Volume=FlowControllerInlet->GetTraceVolume())
+		Volume->SetCollisionEnabled(bUseFlowController ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
+	if (bUseFlowController)
+	{
+		ConfigureReceivingHosePort(*FlowControllerInlet,true);
+		HoseSockets.Add(FlowControllerInlet);
+	}
+	const int32 LegacyPortCount=bUseFlowController ? 0 : PortCount;
+	for (int32 Index = 0; Index < LegacyPortCount; ++Index)
 	{
 		const bool bGenerated = !Authored.IsValidIndex(Index);
 		auto* Socket = bGenerated ? NewObject<UHoseSocketComponent>(this, *FString::Printf(TEXT("GeneratedHoseSocket_%02d"), Index+1),
@@ -189,7 +216,7 @@ void AManualColaFillingMachine::RebuildHoseSockets()
 			}
 		}
 	}
-	for (int32 Index = SupportedContentCount; Index < Authored.Num(); ++Index)
+	for (int32 Index = LegacyPortCount; Index < Authored.Num(); ++Index)
 		if (auto* Volume = Authored[Index]->GetTraceVolume()) Volume->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 }
 
@@ -213,18 +240,19 @@ bool AManualColaFillingMachine::AttachSupplyNozzle(const FHitResult& Hit,USceneC
 {
 	int32 Index; FTransform Mount;
 	if (!HasAuthority() || !IsValid(Nozzle) || Nozzle->GetWorld()!=GetWorld() || !GetHosePortFromHit(Hit,Index,Mount)) return false;
+	if (const auto* Layout = Cast<ASocketColaFillingMachine>(this); Layout && Layout->IsMachinePlacementActive()) return false;
 	auto* Port = GetHoseSocket(Index);
 	if (!Port || Port->ConnectedHose || Port->GetReceivingHose() || Port->bIsBroken) return false;
 	auto* Registry=APropManager::Get(this); auto* Source=Registry ? Registry->GetActiveActorFromISID(SourceISID) : nullptr;
-	if (Source && HosePortContentIDs.IsValidIndex(Index) && HosePortContentIDs[Index]>0
-		&& Source->LocalUniqueData.EventData.ContentID!=HosePortContentIDs[Index]) return false;
+	const int32 RequiredID=GetRequiredHoseContentID(Index);
+	if (Source && RequiredID>0 && Source->LocalUniqueData.EventData.ContentID!=RequiredID) return false;
 	if (!Source || Nozzle==Source->GetRootComponent() || !Nozzle->ComponentHasTag(TEXT("ManualFillingSupplyNozzle"))
 		|| (Nozzle->GetOwner()!=Source && Nozzle->GetOwner()->GetOwner()!=Source) || !IsValid(Player)
 		|| FVector::DistSquared(Player->GetActorLocation(),Nozzle->GetComponentLocation())>FMath::Square(400.f)
 		|| Production->View.bLeverHeld || (ConnectedNozzles.IsValidIndex(Index) && IsValid(ConnectedNozzles[Index]) && ConnectedNozzles[Index]!=Nozzle)) return false;
 	if (const auto* Parent=Nozzle->GetAttachParent(); Parent && Parent->GetOwner()!=Source && Parent->GetOwner()!=this) return false;
 	for (int32 Other=0;Other<ConnectedNozzles.Num();++Other) if (Other!=Index && ConnectedNozzles[Other]==Nozzle) return false;
-	if (ConnectedNozzles.Num()!=SupportedContentCount) ConnectedNozzles.SetNum(SupportedContentCount);
+	if (ConnectedNozzles.Num()!=GetActiveHosePortCount()) ConnectedNozzles.SetNum(GetActiveHosePortCount());
 	bool Attached=false;
 	if (auto* Container=Cast<AColaSupplyContainer>(Source)) Attached=Container->MountHose(Port);
 	else Attached=Nozzle->AttachToComponent(Port,FAttachmentTransformRules::SnapToTargetNotIncludingScale);
@@ -255,7 +283,7 @@ void AManualColaFillingMachine::RestoreSupplyNozzles()
 	auto* Registry=APropManager::Get(this); const auto* Equipment=Registry ? Registry->FindUniqueData(ISID) : nullptr;
 	if (!Equipment) return;
 	const auto Connections=Equipment->EventData.ConnectedSupplyISIDs;
-	ConnectedNozzles.SetNum(SupportedContentCount);
+	ConnectedNozzles.SetNum(GetActiveHosePortCount());
 	for (int32 I=0;I<Connections.Num() && I<HoseSockets.Num();++I)
 	{
 		auto* Socket = GetHoseSocket(I);
@@ -286,10 +314,33 @@ void AManualColaFillingMachine::DisconnectSupplyNozzle(int32 PortIndex)
 void AManualColaFillingMachine::BeginPlay()
 {
 	ContentDialRestRotation = ContentSelectorDial->GetRelativeRotation().Quaternion();
-	if (HoseSockets.Num() != SupportedContentCount || HoseSockets.ContainsByPredicate([this](const auto& Socket)
+	if (HoseSockets.Num() != GetActiveHosePortCount() || HoseSockets.ContainsByPredicate([this](const auto& Socket)
 		{ return !IsValid(Socket) || Socket->GetOwner() != this || !Socket->IsRegistered(); })) RebuildHoseSockets();
+	UpdateControlLayout();
 	Super::BeginPlay();
 	if (bIsActive) SetActorTickEnabled(true);
+}
+
+void AManualColaFillingMachine::UpdateControlLayout()
+{
+	// Old blueprints can still carry the placeholder mesh on this inherited component.
+	Pipe->SetStaticMesh(nullptr);
+	ContentSelectorDial->SetVisibility(!bUseFlowController,true);
+	if (ContentSelectorDial->ComponentHasTag(TEXT("ShopInteractionPoint")))
+		ContentSelectorDial->SetCollisionEnabled(bUseFlowController ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryOnly);
+	Lever->SetVisibility(!bUseFlowController);
+	FlowInletCollar->SetVisibility(bUseFlowController);
+	AutoSealSwitch->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	UpdateAutoSealLabel();
+}
+
+void AManualColaFillingMachine::UpdateAutoSealLabel()
+{
+	const bool bOn=Production && Production->bAutoApplySealOnRelease;
+	if (DisplayedAutoSeal.IsSet() && DisplayedAutoSeal.GetValue()==bOn) return;
+	DisplayedAutoSeal=bOn;
+	AutoSealLabel->SetText(FText::FromString(bOn ? TEXT("AUTO SEAL ON") : TEXT("AUTO SEAL OFF")));
+	AutoSealLabel->SetTextRenderColor(bOn ? FColor(131,239,207) : FColor(245,186,111));
 }
 
 void AManualColaFillingMachine::OnApplySharedDefinitions(const FPropProductDefinition* Product,const FPropContentDefinition* Content)
@@ -318,6 +369,7 @@ bool AManualColaFillingMachine::IsCradleInFillPosition() const
 void AManualColaFillingMachine::UpdateCradleMotion(float Dt)
 {
 	if (!Production || !CradlePivot || !BottleHolderPoint || !FMath::IsFinite(Dt) || Dt<=0) return;
+	if (const auto* Layout = Cast<ASocketColaFillingMachine>(this); Layout && Layout->IsMachinePlacementActive()) return;
 	auto* Manager=APropManager::Get(this);
 	auto* Bottle=Manager ? Cast<AColaPropActor>(Manager->GetActiveActorFromISID(Production->View.SeatedBottleISID)) : nullptr;
 	const bool OwnsBottle=IsValid(Bottle) && Bottle->bIsActive && Bottle->ISID==Production->View.SeatedBottleISID
@@ -363,7 +415,10 @@ void AManualColaFillingMachine::UpdateLeverVisual(float DeltaSeconds)
 void AManualColaFillingMachine::Tick(float Dt)
 {
 	Super::Tick(Dt);
-	if (!bIsActive || !Production || !Pipe) return;
+	if (!bIsActive || !Production) return;
+	// Reactivating a pooled prop makes all of its child meshes visible.
+	if (bUseFlowController && (ContentSelectorDial->IsVisible() || Lever->IsVisible())) UpdateControlLayout();
+	UpdateAutoSealLabel();
 	if (HasAuthority() && ISID<=0 && !PropDataAsset)
 		if (auto* Registry=APropManager::Get(this); Registry && Registry->ShopSupplies)
 			if (const auto* Catalog=Registry->ShopSupplies->Catalog.LoadSynchronous())
@@ -393,7 +448,7 @@ void AManualColaFillingMachine::Tick(float Dt)
 			Location.X=FMath::FInterpTo(float(Location.X),Side*(Production->View.bLeverHeld ? 6.f : 14.f),Dt,12.f);
 			Jaw->SetRelativeLocation(Location);
 		}
-	if (ContentSelectorDial) ContentSelectorDial->SetRelativeRotation(ContentDialRestRotation
+	if (ContentSelectorDial && !bUseFlowController) ContentSelectorDial->SetRelativeRotation(ContentDialRestRotation
 		* FQuat(FVector::UpVector, 2.f * PI * Production->View.SelectedContentPort / Production->GetSupportedContentCount()));
 	auto* Manager=APropManager::Get(this);
 	for (int32 I=0; I<SupplyPipes.Num(); ++I)

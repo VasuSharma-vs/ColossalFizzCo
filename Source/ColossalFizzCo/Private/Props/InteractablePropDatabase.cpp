@@ -598,12 +598,23 @@ bool FPropEventSyncDelta::NetSerialize(FArchive& Ar, class UPackageMap* Map, boo
 		Ar << SelectedSupplyPort; Ar << TemporarySealCharges;
 		for (TArray<int32>* IDs:{&LoadedCapISIDs,&LoadedSealISIDs})
 		{
-			uint8 SupplyCount=uint8(FMath::Min(IDs->Num(),64)); Ar << SupplyCount;
-			if (SupplyCount>64) { bOutSuccess=false; return false; }
+			constexpr int32 Limit=FFillingMachineUpgradeState::MaxTrayCapacity;
+			if (Ar.IsSaving() && IDs->Num()>Limit) { bOutSuccess=false; return false; }
+			uint8 SupplyCount=Ar.IsSaving() ? uint8(IDs->Num()) : 0;
+			Ar << SupplyCount;
+			if (SupplyCount>Limit) { bOutSuccess=false; return false; }
 			if (Ar.IsLoading()) IDs->SetNum(SupplyCount);
 			for (int32 I=0; I<SupplyCount; ++I) Ar << (*IDs)[I];
 		}
 		Ar << StoredInMachineISID;
+	}
+	if (ExtendedDirtyMask & EPropExtendedEventMask::FillingMachineUpgrades)
+	{
+		Ar << FillingMachineUpgrades.CapTrayRank;
+		Ar << FillingMachineUpgrades.SealTrayRank;
+		Ar << FillingMachineUpgrades.PressureRegulatorRank;
+		Ar << FillingMachineUpgrades.TemperatureRegulatorRank;
+		if (!FillingMachineUpgrades.IsValid()) { bOutSuccess=false; return false; }
 	}
 
 	if (HasFlag(EPropEventDirtyMask::ContentLevel))

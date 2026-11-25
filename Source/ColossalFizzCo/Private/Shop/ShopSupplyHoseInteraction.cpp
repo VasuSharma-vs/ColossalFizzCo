@@ -19,6 +19,7 @@
 #include "Engine/World.h"
 #include "InputCoreTypes.h"
 #include "TimerManager.h"
+#include "UI/SettingsControls.h"
 #include "WorldInteractionCarry.h"
 
 namespace
@@ -166,7 +167,7 @@ bool UShopPlayerInteractionComponent::BeginSocketUnplugFromView()
 	if (!Socket) return false;
 	if (!IsValid(Socket->ConnectedHose)) return !IsCableGrabActive() && !Cast<APressurizedColaContainer>(Socket->GetOwner());
 	const auto* Controller = SocketController(GetOwner());
-	if (Controller && Controller->IsInputKeyDown(EKeys::E))
+	if (Controller && Controller->IsInputKeyDown(SettingsControls::InteractKey(Controller->GetLocalPlayer())))
 	{
 		PendingUnplugSocket = Socket;
 		PendingUnplugHose = Socket->ConnectedHose.Get();
@@ -187,13 +188,14 @@ void UShopPlayerInteractionComponent::UpdateSocketUnplugHold()
 	auto* Socket = PendingUnplugSocket.Get();
 	auto* Hose = PendingUnplugHose.Get();
 	const auto* Controller = SocketController(GetOwner());
-	if (!Socket || !Hose || Socket->ConnectedHose!=Hose || !Controller || !Controller->IsInputKeyDown(EKeys::E)
+	const FKey InteractKey = SettingsControls::InteractKey(Controller ? Controller->GetLocalPlayer() : nullptr);
+	if (!Socket || !Hose || Socket->ConnectedHose!=Hose || !Controller || !Controller->IsInputKeyDown(InteractKey)
 		|| FindHoseSocketInView()!=Socket)
 	{
 		CancelSocketUnplugHold();
 		return;
 	}
-	if (Controller->GetInputKeyTimeDown(EKeys::E) >= UnplugHoldSeconds)
+	if (Controller->GetInputKeyTimeDown(InteractKey) >= UnplugHoldSeconds)
 	{
 		CancelSocketUnplugHold();
 		RemoveSocketHoseFromView(Socket, Hose, false);

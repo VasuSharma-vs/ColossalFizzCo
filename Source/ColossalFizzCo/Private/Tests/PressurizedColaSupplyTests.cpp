@@ -747,11 +747,22 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPressurizedManualDeliveryTest,"ColossalFizzCo.
 bool FPressurizedManualDeliveryTest::RunTest(const FString& Parameters)
 {
     using namespace PressurizedColaTests;
-    double LowDelivery=0,HighDelivery=0;
-    for (float Opening:{.1f,.25f})
+    struct FDeliveryCase
+    {
+        float ValveOpening;
+        float SupplyRate;
+        float BottlePressure=0.f;
+        double Delivered=0.;
+    };
+    FDeliveryCase LowPressure{.1f,8.f};
+    FDeliveryCase HighPressure{.25f,8.f};
+    FDeliveryCase RestrictedFlow{.25f,3.2f};
+    for (FDeliveryCase* Delivery:{&LowPressure,&HighPressure,&RestrictedFlow})
     {
         FFixture F; if (!F.World) return false;
         auto* Source=F.Source(); AManualColaFillingMachine* Machine=nullptr; AColaPropActor* Bottle=nullptr;
+        const float Opening=Delivery->ValveOpening;
+        Source->MaxOutletUnitsPerSecond=Delivery->SupplyRate;
         if (!TestTrue(TEXT("Manual cradle holds a compatible receiving bottle"),F.ManualStation(Source->SupplyPort->ResourceID,Machine,Bottle))) return false;
         auto* Port=Machine->GetReceivingHosePort(0); auto* Hose=F.Hose(); auto* Filler=Machine->BottleFiller.Get();
         const bool MachineFirst=Opening>.2f;
@@ -765,8 +776,15 @@ bool FPressurizedManualDeliveryTest::RunTest(const FString& Parameters)
         if (!TestTrue(TEXT("Held lever starts external-hose filling without a managed source ISID"),Filler->StartFilling(0,Bottle->ISID))) return false;
         TestTrue(TEXT("Manual filler selects hose delivery"),Filler->IsHoseFilling());
         TestTrue(TEXT("Starting the filling stroke opens the selected socket"),Port->bRequestsFlow);
-        for (int32 I=0;I<20 && Filler->bIsFilling;++I) Filler->TickComponent(.05f,LEVELTICK_All,nullptr);
-        const double Actual=F.ManagedUnits(Bottle),Expected=8.0*Opening;
+        Filler->TickComponent(.05f,LEVELTICK_All,nullptr);
+        const float FirstPressure=F.Manager->FindUniqueData(Bottle->ISID)->ContinuousData.SealedPressure;
+        TestTrue(TEXT("The first delivered step starts building pressure without snapping to the hose pressure"),
+            FirstPressure>0.f && FirstPressure<Filler->DeliveredSupplyPressure);
+        for (int32 I=1;I<20 && Filler->bIsFilling;++I) Filler->TickComponent(.05f,LEVELTICK_All,nullptr);
+        const double Actual=F.ManagedUnits(Bottle),Expected=double(Delivery->SupplyRate)*Opening;
+        Delivery->Delivered=Actual;
+        Delivery->BottlePressure=F.Manager->FindUniqueData(Bottle->ISID)->ContinuousData.SealedPressure;
+        TestTrue(TEXT("Bottle pressure keeps building while the nozzle delivers liquid"),Delivery->BottlePressure>FirstPressure);
         AddInfo(FString::Printf(TEXT("Manual valve %.2f received %.5f expected %.5f telemetry %.5f pressure %.5f source %.5f buffer %.5f"),Opening,Actual,Expected,Filler->DeliveredPortionsPerSecond,Filler->DeliveredSupplyPressure,Source->GetRemainingUnits(),Hose->Transfer->Buffer.Units));
         TestTrue(TEXT("Actual one-second bottle fill follows the source and hose delivered rate"),FMath::IsNearlyEqual(Actual,Expected,.005));
         TestTrue(TEXT("Filler telemetry reports actual received units per second"),FMath::IsNearlyEqual(Filler->DeliveredPortionsPerSecond,float(Expected),.005f));
@@ -780,11 +798,15 @@ bool FPressurizedManualDeliveryTest::RunTest(const FString& Parameters)
         Filler->StopFilling(); Hose->Transfer->TransferForDuration(.5f);
         TestFalse(TEXT("Stopping the filling stroke closes the selected socket"),Port->bRequestsFlow);
         TestEqual(TEXT("Stopped lever demand prevents further bottle filling"),float(F.ManagedUnits(Bottle)),BottleBeforeStop);
+        TestEqual(TEXT("Charging the upstream hose without bottle flow adds no pressure to the bottle"),
+            F.Manager->FindUniqueData(Bottle->ISID)->ContinuousData.SealedPressure,Delivery->BottlePressure);
         TestTrue(TEXT("An open valve charges the hose behind the closed machine inlet"),Source->GetRemainingUnits()<BeforeStop);
         TestTrue(TEXT("Stopping flow keeps the physical hose available at the socket"),(MachineFirst ? Hose->StartPort : Hose->EndPort)==Port);
-        if (Opening<.2f) LowDelivery=Actual; else HighDelivery=Actual;
     }
-    TestTrue(TEXT("Opening the valve farther produces meaningfully faster actual bottle filling"),HighDelivery>LowDelivery*2);
+    TestTrue(TEXT("Opening the valve farther produces meaningfully faster actual bottle filling"),HighPressure.Delivered>LowPressure.Delivered*2);
+    TestTrue(TEXT("At the same delivered flow, higher hose pressure raises bottle pressure more"),
+        FMath::IsNearlyEqual(RestrictedFlow.Delivered,LowPressure.Delivered,.005) && RestrictedFlow.BottlePressure>LowPressure.BottlePressure);
+    TestTrue(TEXT("At the same hose pressure, higher delivered flow builds bottle pressure faster"),HighPressure.BottlePressure>RestrictedFlow.BottlePressure);
     return true;
 }
 

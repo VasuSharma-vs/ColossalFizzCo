@@ -8,8 +8,10 @@
 #include "InteractablePropManager.generated.h"
 
 class AActivePropActor;
+class AColaFlowController;
 class UASMComponent;
 class USharedTeamWalletComponent;
+class UColaTableCustomerComponent;
 class UShopCheckoutComponent;
 class UShopProcurementComponent;
 class UPropBatchUpdateComponent;
@@ -1643,6 +1645,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Prop Manager|SaveLoad")
 	bool LoadPropDatabase(const FString& SlotName = TEXT("PropManagerSaveSlot"), int32 UserIndex = 0);
 
+	static FString GetFlowControllerUpgradeKey(const AColaFlowController& Controller);
+	const FFlowControllerUpgradeState* FindFlowControllerUpgrades(const AColaFlowController& Controller) const;
+	bool RecordFlowControllerUpgrades(const AColaFlowController& Controller, const FFlowControllerUpgradeState& State);
+	const FPlayerUpgradeState* FindPlayerUpgrades(const FString& ProfileKey) const;
+	bool RecordPlayerUpgrades(const FString& ProfileKey, const FPlayerUpgradeState& State);
+
 	UFUNCTION(BlueprintPure, Category = "Prop Manager|SaveLoad")
 	bool SerializeInstance(int32 InISID, FPropSerializedInstance& OutSerialized) const;
 
@@ -1761,6 +1769,15 @@ protected:
 	FPropInstanceDelta BuildDeltaForRecord(const FISIDRuntimeIndex& Record) const;
 
 private:
+	friend class UColaTableCustomerComponent;
+	friend class UShopTableOfferComponent;
+	UPROPERTY(Replicated) TArray<FName> PurchasedTableOffers;
+	TMap<FString, FFlowControllerUpgradeState> FlowControllerUpgrades;
+	TMap<FString, FPlayerUpgradeState> PlayerUpgrades;
+	bool ValidateInteractionWithReach(int32 InISID, EPropInteractionType InteractionType, AActor* InstigatorActor,
+		int32 ExpectedVersion, double AdditionalReach) const;
+	bool ValidateGrabWithReach(int32 InISID, AActor* InstigatorActor, double AdditionalReach) const;
+	AActivePropActor* ReserveGrabWithReach(int32 InISID, AActor* Grabber, double AdditionalReach);
 	AActivePropActor* PrepareGrab(int32 InISID, AActor* Grabber, bool bEnableReplication);
 	bool AllowsPlayerGrab(const FISIDRuntimeIndex& Record) const;
 	void StoreContentDefinition(FPropContentDefinition Definition);

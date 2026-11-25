@@ -136,6 +136,7 @@ void AActivePropActor::EmitPropEventUpdate(uint8 DirtyMask, uint8 ExtendedDirtyM
 		Delta.TemporarySealDurationSeconds = E.TemporarySealDurationSeconds;
 		Delta.ConnectedSupplyISIDs=E.ConnectedSupplyISIDs; Delta.SelectedSupplyPort=E.SelectedSupplyPort; Delta.TemporarySealCharges=E.TemporarySealCharges;
 		Delta.LoadedCapISIDs=E.LoadedCapISIDs; Delta.LoadedSealISIDs=E.LoadedSealISIDs; Delta.StoredInMachineISID=E.StoredInMachineISID;
+		Delta.FillingMachineUpgrades=E.FillingMachineUpgrades;
 		PropManagerReference->SubmitInstanceEventUpdate(ISID, Delta);
 	}
 	else LocalUniqueData.EventData.EventSequence++;

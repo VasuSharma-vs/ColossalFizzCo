@@ -9,7 +9,7 @@ UENUM(BlueprintType)
 enum class EShopPurchaseResult : uint8
 {
 	Success, AlreadyPurchased, NotAuthority, InvalidOffer, InvalidQuantity,
-	InsufficientFunds, OperationConflict, DeliveryFailed
+	InsufficientFunds, OperationConflict, DeliveryFailed, DropAreaBlocked
 };
 
 /** Trusted server service on Prop Manager. An owned-player adapter must validate station access first. */
@@ -34,7 +34,17 @@ public:
 	bool IsTemporarySealProduct(int32 ProductID) const;
 	bool IsNormalPrototypeActive() const { return bCatalogInitialized; }
 	EShopPurchaseResult Purchase(FGuid OperationID, FName OfferID, int32 Quantity, const FTransform& DeliveryTransform, TArray<int32>& DeliveredISIDs);
+	/** Dispenses one physical bottle at the outlet without reserving a depot delivery slot. */
+	EShopPurchaseResult PurchaseDispensedBottle(const FTransform& SpawnTransform, int32& DeliveredISID, const AActor* Dispenser = nullptr);
+	/** Dispenses one standard twist cap at the outlet. */
+	EShopPurchaseResult PurchaseDispensedCap(const FTransform& SpawnTransform, int32& DeliveredISID, const AActor* Dispenser = nullptr);
+	/** Dispenses one temporary pressure seal at the outlet. */
+	EShopPurchaseResult PurchaseDispensedSeal(const FTransform& SpawnTransform, int32& DeliveredISID, const AActor* Dispenser = nullptr);
+	/** Rechecks the same outlet geometry using a product registered by a dispense attempt. */
+	bool IsDispenserDropAreaBlocked(FName OfferID, FTransform SpawnTransform, const AActor* Dispenser) const;
 private:
+	EShopPurchaseResult PurchaseDispensedSupply(FName OfferID, EShopSupplyKind Kind, FName Reason, const FTransform& SpawnTransform,
+		int32& DeliveredISID, const AActor* Dispenser);
 	/** A soft asset path does not retain the initialized catalog across garbage collection. */
 	UPROPERTY(Transient) TObjectPtr<UShopSupplyCatalog> RuntimeCatalog;
 	bool bCatalogInitialized=false;

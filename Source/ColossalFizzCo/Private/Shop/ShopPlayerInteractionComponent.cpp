@@ -2,17 +2,27 @@
 #include "Shop/ShopScannerComponent.h"
 #include "Shop/ShopCheckoutComponent.h"
 #include "Shop/ShopATMComponent.h"
+#include "Components/BoxComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/PropGrabInputComponent.h"
+#include "UI/SettingsControls.h"
 #include "UI/ShopTerminalWidget.h"
 #include "Props/InteractablePropManager.h"
 #include "Resources/PressurizedColaContainer.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Shop/ShopInteractionGeometry.h"
+#include "Shop/ColaFlowController.h"
+#include "Shop/ShopBottleDispenser.h"
+#include "Shop/ShopTableUpgradeTerminal.h"
 #include "Shop/SocketColaFillingMachine.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
+#include "EnhancedInputComponent.h"
+#include "InputAction.h"
 #include "InputCoreTypes.h"
 #include "Net/NetPushModelHelpers.h"
+#include "Net/UnrealNetwork.h"
 #include "UObject/StructOnScope.h"
 #include "UObject/UnrealType.h"
 #include "WorldInteractionCarry.h"
@@ -56,6 +66,7 @@ namespace
 	void ClearTakenItemFromHand(APawn& Pawn, const AActor* TakenActor, const UPrimitiveComponent* TakenComponent)
 	{
 		if (!TakenActor && !TakenComponent) return;
+		const bool bRemovedPrimary = TakenActor && WorldInteractionCarry::GetCarryReference(Pawn, TEXT("Holding Actor")) == TakenActor;
 		auto ClearIfTaken = [&Pawn](FName Name, const UObject* Taken) -> UObject*
 		{
 			const auto* Property = FindFProperty<FObjectPropertyBase>(Pawn.GetClass(), Name);
@@ -89,6 +100,12 @@ namespace
 				State->SetPropertyValue_InContainer(&Pawn, 0);
 				MarkCarryPropertyDirty(Pawn, *State);
 			}
+
+		if (auto* Grab = Pawn.FindComponentByClass<UPropGrabInputComponent>(); Pawn.HasAuthority() && Grab)
+		{
+			if (bRemovedPrimary) Grab->NotifyPrimaryCarryRemoved(*TakenActor);
+			Grab->RestorePrimaryCarry(TakenActor);
+		}
 	}
 }
 
@@ -105,21 +122,23 @@ bool WorldInteractionCarry::PublishHeldActor(APawn& Player, AActor& Item)
 		State->SetPropertyValue_InContainer(&Player, 1);
 		MarkCarryPropertyDirty(Player, *State);
 	}
+	IgnoreHeldActor(Player, Item);
+	Player.ForceNetUpdate();
+	return true;
+}
+
+void WorldInteractionCarry::IgnoreHeldActor(APawn& Player, AActor& Item)
+{
 	const auto* TraceIgnore = FindFProperty<FArrayProperty>(Player.GetClass(), TEXT("trace  ignore"));
 	if (const auto* Element = TraceIgnore ? CastField<FObjectPropertyBase>(TraceIgnore->Inner) : nullptr)
 	{
 		FScriptArrayHelper Entries(TraceIgnore, TraceIgnore->ContainerPtrToValuePtr<void>(&Player));
 		for (int32 Index = 0; Index < Entries.Num(); ++Index)
 			if (Element->GetObjectPropertyValue(Entries.GetRawPtr(Index)) == &Item)
-			{
-				Player.ForceNetUpdate();
-				return true;
-			}
+				return;
 		Element->SetObjectPropertyValue(Entries.GetRawPtr(Entries.AddValue()), &Item);
 		MarkCarryPropertyDirty(Player, *TraceIgnore);
 	}
-	Player.ForceNetUpdate();
-	return true;
 }
 
 void WorldInteractionCarry::ClearHeldActor(APawn& Player, const AActor& Item)
@@ -159,6 +178,12 @@ UShopPlayerInteractionComponent::UShopPlayerInteractionComponent()
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.bStartWithTickEnabled = false;
 	SetIsReplicatedByDefault(true);
+}
+
+void UShopPlayerInteractionComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME_CONDITION(UShopPlayerInteractionComponent,ActiveFlowLever,COND_OwnerOnly);
 }
 
 void UShopPlayerInteractionComponent::CompleteCarryHandoff(AActor* TakenActor, UPrimitiveComponent* TakenComponent)
@@ -218,10 +243,16 @@ EShopCheckoutResult UShopPlayerInteractionComponent::ExecuteATMWithdrawal(UShopA
 	return ATM->Withdraw(ID, Values);
 }
 
-void UShopPlayerInteractionComponent::Client_OpenTerminal_Implementation(AActor* Station) { OpenTerminal(Station); }
+void UShopPlayerInteractionComponent::Client_OpenTerminal_Implementation(AActor* Station)
+{
+	const auto* Pawn = GetCarryPawn(GetOwner());
+	const auto* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : Cast<APlayerController>(GetOwner());
+	if (PC && PC->IsLocalController()) OpenTerminal(Station);
+}
 
 AActor* UShopPlayerInteractionComponent::FindTerminalInView(const FVector& ViewLocation, const FVector& ViewDirection, FHitResult* StationHit) const
 {
+	if (StationHit) *StationHit=FHitResult();
 	const APawn* Pawn=Cast<APawn>(GetOwner());
 	if (const auto* PC=Cast<APlayerController>(GetOwner())) Pawn=PC->GetPawn();
 	if (!Pawn || !GetWorld() || ViewLocation.ContainsNaN() || ViewDirection.ContainsNaN()
@@ -232,18 +263,25 @@ AActor* UShopPlayerInteractionComponent::FindTerminalInView(const FVector& ViewL
 	// offset in the ray budget so a raised giant counter can actually be hit.
 	const double TraceDistance=MaxInteractionDistance+FVector::Distance(ViewLocation,Pawn->GetActorLocation());
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(ShopTerminalInteraction),false,Pawn);
+	TArray<AActor*> HeldActors;
+	Pawn->GetAttachedActors(HeldActors);
+	Params.AddIgnoredActors(HeldActors);
 	FHitResult Hit;
 	if (!GetWorld()->LineTraceSingleByChannel(Hit,ViewLocation,ViewLocation+Direction*TraceDistance,ECC_Visibility,Params)) return nullptr;
+	if (StationHit) *StationHit=Hit;
 	AActor* Station=Hit.GetActor();
 	if (!IsValid(Station) || (!Station->FindComponentByClass<UShopScannerComponent>()
-		&& !Station->FindComponentByClass<UShopATMComponent>() && !Station->FindComponentByClass<UShopProductionStationComponent>())) return nullptr;
+		&& !Station->FindComponentByClass<UShopATMComponent>() && !Station->FindComponentByClass<UShopProductionStationComponent>()
+		&& !Station->IsA<AColaFlowController>() && !Station->IsA<AShopTableUpgradeTerminal>())) return nullptr;
 	if (!CanReach(Station)) return nullptr;
-	if (StationHit) *StationHit = Hit;
 	return Station;
 }
 
 bool UShopPlayerInteractionComponent::TryOpenTerminalFromView()
 {
+	if (LocalPlacementMachine.IsValid()) return true;
+	if (IsTableUpgradePickerOpen()) return true;
+	if (IsTerminalOpen() && TerminalWidget->IsUpgradeMenu()) return true;
 	CancelSocketUnplugHold();
 	APawn* Pawn=Cast<APawn>(GetOwner());
 	APlayerController* PC=Cast<APlayerController>(GetOwner());
@@ -268,24 +306,103 @@ bool UShopPlayerInteractionComponent::TryOpenTerminalFromView()
 	}
 	if (IsCableGrabActive()) { if (!TryConnectSupplyHoseFromView()) RequestCableRelease(); return true; }
 	if (TryTurnColaContainerValveFromView(!bCloseValve)) return true;
-	const auto* Trace = FindFProperty<FStructProperty>(Pawn->GetClass(), TEXT("Hit Result On tick"));
-	if (Trace && Trace->Struct == FHitResult::StaticStruct()
-		&& TryUseSocketMachineControl(*Pawn, *Trace->ContainerPtrToValuePtr<FHitResult>(Pawn))) return true;
 	FVector Location; FRotator Rotation;
 	PC->GetPlayerViewPoint(Location,Rotation);
 	FHitResult Hit;
 	AActor* Station=FindTerminalInView(Location,Rotation.Vector(),&Hit);
+	if (auto* TableTerminal = Cast<AShopTableUpgradeTerminal>(Station))
+		return OpenTableUpgradePicker(*PC, *TableTerminal);
+	bool bAimingAtDispenserLever = false;
+	if (auto* Dispenser = FindAimedBottleDispenser(*Pawn, Hit, Location, Rotation.Vector(), bAimingAtDispenserLever);
+		Dispenser && bAimingAtDispenserLever)
+	{
+		if (Pawn->HasAuthority()) Dispenser->TryDispense(Pawn, MaxInteractionDistance);
+		else Server_UseBottleDispenser(Dispenser);
+		return true;
+	}
+	if (auto* Flow=Cast<AColaFlowController>(Station))
+	{
+		if (TryUseSocketMachineControl(*Pawn,Hit)) return true;
+		const bool bHitHousing=Hit.GetComponent()==Flow->Housing;
+		// A simple housing collider can cover a handle. Test the visible mesh at
+		// the same viewpoint instead of reusing a hit from the previous frame.
+		FCollisionQueryParams Query(SCENE_QUERY_STAT(FlowControllerInteraction),true,Pawn);
+		TArray<AActor*> HeldActors;
+		Pawn->GetAttachedActors(HeldActors);
+		Query.AddIgnoredActors(HeldActors);
+		const double Distance=MaxInteractionDistance+FVector::Distance(Location,Pawn->GetActorLocation());
+		if (GetWorld()->LineTraceSingleByChannel(Hit,Location,Location+Rotation.Vector()*Distance,ECC_Visibility,Query)
+			&& Hit.GetActor()==Flow && TryUseSocketMachineControl(*Pawn,Hit)) return true;
+		// The pulled lever can leave the original sight line over the housing.
+		return bHitHousing && Flow->UsesLatchedLever() && Flow->IsLeverHeldBy(Pawn) && BeginFlowLeverInput(*Pawn,*Flow);
+	}
+	const auto* HitTable=Cast<ASocketColaFillingMachine>(Hit.GetActor());
+	// Prefer the current cap input over the cached Blueprint control hit.
+	if (HitTable && Hit.GetComponent()==HitTable->CapInputVolume && TryUseSocketMachineControl(*Pawn,Hit)) return true;
+	const auto* ForegroundProp=HitTable ? nullptr : Cast<AActivePropActor>(Hit.GetActor());
+	const bool bHitBottleTrigger=HitTable && Hit.GetComponent()==HitTable->BottleInputVolume;
+	if (bHitBottleTrigger || (ForegroundProp && ForegroundProp->ISID>0))
+	{
+		const auto* Carried=Cast<AActivePropActor>(WorldInteractionCarry::GetCarryReference(*Pawn,TEXT("Holding Actor")));
+		if (!Carried)
+			if (const auto* Component=Cast<UPrimitiveComponent>(WorldInteractionCarry::GetCarryReference(*Pawn,TEXT("Holding Component"))))
+				Carried=Cast<AActivePropActor>(Component->GetOwner());
+		const auto* Product=bHitBottleTrigger && Carried ? Carried->ResolveProductDefinition() : nullptr;
+		// Keep the empty cradle usable when holding a bottle. A seated bottle is
+		// identified by the table view, which can arrive before the prop's own state.
+		if (Carried && (ForegroundProp || (Product && Product->bIsBottleCap && HitTable->SupportsCapType(Product->DefaultCapType))))
+		{
+			FCollisionQueryParams Query(SCENE_QUERY_STAT(FillingMachineCapInput),false,Pawn);
+			TArray<AActor*> HeldActors;
+			Pawn->GetAttachedActors(HeldActors);
+			Query.AddIgnoredActors(HeldActors);
+			Query.AddIgnoredActor(Carried);
+			if (ForegroundProp) Query.AddIgnoredActor(ForegroundProp);
+			else Query.AddIgnoredComponent(HitTable->BottleInputVolume.Get());
+			const double Distance=MaxInteractionDistance+FVector::Distance(Location,Pawn->GetActorLocation());
+			FHitResult CapHit;
+			if (GetWorld()->LineTraceSingleByChannel(CapHit,Location,Location+Rotation.Vector()*Distance,ECC_Visibility,Query))
+			{
+				const auto* Table=Cast<ASocketColaFillingMachine>(CapHit.GetActor());
+				if (Table && CapHit.GetComponent()==Table->CapInputVolume
+					&& (ForegroundProp ? Table->Production && Table->Production->View.SeatedBottleISID==ForegroundProp->ISID
+						: Table==HitTable)
+					&& TryUseSocketMachineControl(*Pawn,CapHit)) return true;
+			}
+		}
+	}
+	const auto* Trace=FindFProperty<FStructProperty>(Pawn->GetClass(),TEXT("Hit Result On tick"));
+	if (Trace && Trace->Struct==FHitResult::StaticStruct())
+	{
+		const auto& CachedHit=*Trace->ContainerPtrToValuePtr<FHitResult>(Pawn);
+		const auto* HitActor=CachedHit.GetActor();
+		if (HitActor && !HitActor->IsA<AColaFlowController>() && TryUseSocketMachineControl(*Pawn,CachedHit)) return true;
+	}
 	if (!Station) return false;
 	if (TryUseSocketMachineControl(*Pawn, Hit)) return true;
+	const auto* Table=Cast<ASocketColaFillingMachine>(Station);
+	if (Table && Table->bUseFlowController) return false;
 	// The terminal query uses the controller's simple collision, which can mask the lever
 	// in front of the housing. Leave the Blueprint's world interaction enabled for the whole machine.
-	const bool bWorldFillingDisplay = Station->IsA<ASocketColaFillingMachine>();
 	OpenTerminal(Station);
-	return !bWorldFillingDisplay && IsTerminalOpen();
+	return !Table && IsTerminalOpen();
 }
 
 bool UShopPlayerInteractionComponent::TryUseSocketMachineControl(APawn& Pawn, const FHitResult& Hit)
 {
+	if (auto* Flow=Cast<AColaFlowController>(Hit.GetActor()))
+	{
+		if (Flow->UpgradeControl && Hit.GetComponent()==Flow->UpgradeControl)
+		{
+			ShowTerminal(Flow,true,true);
+			return true;
+		}
+		if (Hit.GetComponent()==Flow->Lever) return BeginFlowLeverInput(Pawn,*Flow);
+		if (Hit.GetComponent()!=Flow->SelectorDial) return false;
+		if (Pawn.HasAuthority()) Flow->UseSelector(&Pawn,MaxInteractionDistance);
+		else Server_UseFlowSelector(Flow);
+		return true;
+	}
 	auto* Machine = Cast<ASocketColaFillingMachine>(Hit.GetActor());
 	auto* Control = Hit.GetComponent();
 	if (!IsValid(Machine) || !Machine->bIsActive || Machine->ISID <= 0 || !Machine->IsSocketInteractionComponent(Control, false)
@@ -293,8 +410,229 @@ bool UShopPlayerInteractionComponent::TryUseSocketMachineControl(APawn& Pawn, co
 	// These controls apply on press. The Blueprint continues to pair the lever's press and release.
 	if (Pawn.HasAuthority()) Machine->BeginSocketInteraction(&Pawn, Control);
 	else Server_UseSocketMachineControl(Machine->ISID, Control->GetFName());
-	OpenTerminal(Machine);
+	if (!Machine->bUseFlowController) OpenTerminal(Machine);
 	return true;
+}
+
+AShopBottleDispenser* UShopPlayerInteractionComponent::FindAimedBottleDispenser(const APawn& Pawn, const FHitResult& Hit,
+	const FVector& Eye, const FVector& Direction, bool& bAimingAtLever) const
+{
+	bAimingAtLever = false;
+	auto* Dispenser = Cast<AShopBottleDispenser>(Hit.GetActor());
+	const FVector PawnLocation = Pawn.GetActorLocation();
+	const double ReachSquared = FMath::Square(double(MaxInteractionDistance));
+	if (!Dispenser || FVector::DistSquared(PawnLocation, Hit.ImpactPoint) > ReachSquared) return nullptr;
+	bAimingAtLever = Dispenser->IsLeverComponent(Hit.GetComponent());
+	if (!bAimingAtLever)
+	{
+		// The dispenser's simple housing hull can cover its visible lever.
+		const double TraceDistance = MaxInteractionDistance + FVector::Distance(Eye, PawnLocation);
+		const FCollisionQueryParams Query(SCENE_QUERY_STAT(BottleDispenserAim), true, &Pawn);
+		FHitResult LeverHit;
+		bAimingAtLever = GetWorld()->LineTraceSingleByChannel(LeverHit, Eye, Eye + Direction * TraceDistance, ECC_Visibility, Query)
+			&& LeverHit.GetActor() == Dispenser && Dispenser->IsLeverComponent(LeverHit.GetComponent())
+			&& FVector::DistSquared(PawnLocation, LeverHit.ImpactPoint) <= ReachSquared;
+	}
+	return Dispenser;
+}
+
+void UShopPlayerInteractionComponent::Server_UseBottleDispenser_Implementation(AShopBottleDispenser* Dispenser)
+{
+	auto* Pawn = GetCarryPawn(GetOwner());
+	if (!IsValid(Pawn) || !Pawn->HasAuthority() || !IsValid(Dispenser) || Dispenser->GetWorld() != GetWorld()) return;
+	Dispenser->TryDispense(Pawn, MaxInteractionDistance);
+}
+
+bool UShopPlayerInteractionComponent::BeginFlowLeverInput(APawn& Pawn, AColaFlowController& FlowController)
+{
+	if (PressedFlowLever.IsValid()) return true;
+	auto* PC=Cast<APlayerController>(Pawn.GetController());
+	if (!PC || !PC->IsLocalController()) return false;
+	if (!FlowControlInput || FlowControlInput->GetOwner()!=PC)
+	{
+		if (FlowControlInput) CleanupFlowLeverInput();
+		const auto* Interact=LoadObject<UInputAction>(nullptr,TEXT("/Game/Input/Actions/IA_Intract.IA_Intract"));
+		if (!Interact) return false;
+		auto* Input=NewObject<UEnhancedInputComponent>(PC);
+		Input->RegisterComponent();
+		Input->BindAction(Interact,ETriggerEvent::Completed,this,&UShopPlayerInteractionComponent::EndFlowLeverInput);
+		Input->BindAction(Interact,ETriggerEvent::Canceled,this,&UShopPlayerInteractionComponent::EndFlowLeverInput);
+		FlowControlInput=Input;
+	}
+	PressedFlowLever=&FlowController;
+	PC->PushInputComponent(FlowControlInput);
+	Server_SetFlowLever(&FlowController,true);
+	return true;
+}
+
+void UShopPlayerInteractionComponent::EndFlowLeverInput()
+{
+	auto* Flow=PressedFlowLever.Get();
+	PressedFlowLever.Reset();
+	if (FlowControlInput)
+		if (auto* PC=Cast<APlayerController>(FlowControlInput->GetOwner())) PC->PopInputComponent(FlowControlInput);
+	if (Flow) Server_SetFlowLever(Flow,false);
+	UpdateStationReadoutsFromView();
+}
+
+void UShopPlayerInteractionComponent::CleanupFlowLeverInput()
+{
+	PressedFlowLever.Reset();
+	CloseFlowReadout();
+	if (FlowControlInput)
+	{
+		if (auto* PC=Cast<APlayerController>(FlowControlInput->GetOwner())) PC->PopInputComponent(FlowControlInput);
+		FlowControlInput->DestroyComponent();
+		FlowControlInput=nullptr;
+	}
+	if (GetOwner()->HasAuthority())
+	{
+		if (IsValid(ActiveFlowLever)) ActiveFlowLever->EndLever(GetCarryPawn(GetOwner()));
+		ActiveFlowLever=nullptr;
+	}
+}
+
+AColaFlowController* UShopPlayerInteractionComponent::GetLocalFlowLever() const
+{
+	auto* Flow=ActiveFlowLever.Get();
+	return IsValid(Flow) && Flow->IsLeverHeldBy(GetCarryPawn(GetOwner())) ? Flow : PressedFlowLever.Get();
+}
+
+void UShopPlayerInteractionComponent::UpdateStationReadoutsFromView()
+{
+	const auto* Pawn=GetCarryPawn(GetOwner());
+	auto* PC=Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
+	if (PC && PC->GetLocalPlayer()) EnsureShopBalanceWidget(*PC);
+	if (!PC || !PC->GetLocalPlayer() || LocalPlacementMachine.IsValid() || IsTableUpgradePickerOpen()
+		|| (IsTerminalOpen() && !TerminalWidget->IsWorldReadout()))
+	{
+		CloseFlowReadout();
+		CloseFillingTableReadout();
+		CloseBottleDispenserReadout();
+		return;
+	}
+
+	FVector Eye;
+	FRotator View;
+	PC->GetPlayerViewPoint(Eye,View);
+	FHitResult Hit;
+	auto* Station=FindTerminalInView(Eye,View.Vector(),&Hit);
+	bool bAimingAtDispenserLever = false;
+	const auto* Dispenser = FindAimedBottleDispenser(*Pawn, Hit, Eye, View.Vector(), bAimingAtDispenserLever);
+	UpdateBottleDispenserReadout(*PC, Dispenser, bAimingAtDispenserLever);
+
+	auto* Flow=GetLocalFlowLever();
+	if (!Flow || !Flow->IsLeverHeldBy(Pawn) || !CanReach(Flow))
+		Flow=Cast<AColaFlowController>(Station);
+	if (Flow) ShowTerminal(Flow,false);
+	else CloseFlowReadout();
+
+	auto* AimedTable=FindAimedFillingTable(Hit);
+	if (DismissedFillingTable.Get()!=AimedTable) DismissedFillingTable.Reset();
+	if (!IsFillingTableReachable(PinnedFillingTable.Get())) PinnedFillingTable.Reset();
+	auto* Table=AimedTable ? AimedTable : PinnedFillingTable.Get();
+	if (Table && Table!=DismissedFillingTable.Get()) ShowTerminal(Table,false);
+	else CloseFillingTableReadout();
+}
+
+void UShopPlayerInteractionComponent::CloseFlowReadout()
+{
+	if (!FlowReadoutWidget) return;
+	FlowReadoutWidget->Close();
+	FlowReadoutWidget=nullptr;
+}
+
+void UShopPlayerInteractionComponent::CloseFillingTableReadout()
+{
+	if (!TerminalWidget || !TerminalWidget->IsWorldReadout()) return;
+	TerminalWidget->Close(false);
+	TerminalWidget=nullptr;
+}
+
+void UShopPlayerInteractionComponent::RequestFlowControllerPause(bool bPaused)
+{
+	if (auto* Flow=GetLocalFlowLever()) Server_SetFlowPaused(Flow,bPaused);
+}
+
+void UShopPlayerInteractionComponent::Server_SetFlowLever_Implementation(AColaFlowController* Flow, bool bPressed)
+{
+	auto* Pawn=GetCarryPawn(GetOwner());
+	if (!IsValid(Pawn) || !Pawn->HasAuthority() || !IsValid(Flow) || Flow->GetWorld()!=GetWorld()) return;
+	if (!bPressed)
+	{
+		if (ActiveFlowLever!=Flow) return;
+		Flow->ReleaseLeverInput(Pawn);
+	}
+	else
+	{
+		const auto* Current=ActiveFlowLever.Get();
+		if (IsValid(Current) && Current!=Flow && Current->IsLeverHeldBy(Pawn)) return;
+		if (!Flow->BeginLever(Pawn,MaxInteractionDistance)) return;
+	}
+	ActiveFlowLever=Flow->IsLeverHeldBy(Pawn) ? Flow : nullptr;
+	GetOwner()->ForceNetUpdate();
+}
+
+void UShopPlayerInteractionComponent::Server_SetFlowPaused_Implementation(AColaFlowController* Flow, bool bPaused)
+{
+	auto* Pawn=GetCarryPawn(GetOwner());
+	if (IsValid(Pawn) && Pawn->HasAuthority() && IsValid(Flow) && ActiveFlowLever==Flow)
+		Flow->SetFlowPaused(Pawn,bPaused);
+}
+
+bool UShopPlayerInteractionComponent::RequestFlowControllerUpgrade(AColaFlowController* Flow, EFlowControllerUpgradeType Upgrade, int32 ExpectedRank, FGuid OperationID)
+{
+	if (!IsValid(Flow) || Flow->GetWorld()!=GetWorld() || !OperationID.IsValid()) return false;
+	Server_UpgradeFlowController(Flow,Upgrade,ExpectedRank,OperationID);
+	return true;
+}
+
+void UShopPlayerInteractionComponent::Server_UpgradeFlowController_Implementation(AColaFlowController* Flow, EFlowControllerUpgradeType Upgrade,
+	int32 ExpectedRank, FGuid OperationID)
+{
+	const auto* Pawn=GetCarryPawn(GetOwner());
+	const auto Result=IsValid(Pawn) && Pawn->HasAuthority() && CanReach(Flow)
+		? Flow->PurchaseUpgrade(Pawn,MaxInteractionDistance,Upgrade,ExpectedRank,OperationID)
+		: EFlowControllerPurchaseResult::Unavailable;
+	Client_FlowControllerUpgradeResult(Flow,OperationID,Result);
+}
+
+void UShopPlayerInteractionComponent::Client_FlowControllerUpgradeResult_Implementation(AColaFlowController*, FGuid OperationID,
+	EFlowControllerPurchaseResult Result)
+{
+	if (IsTerminalOpen() && TerminalWidget->IsFlowUpgradeMenu())
+		TerminalWidget->FlowUpgradePurchaseResult(OperationID,Result);
+}
+
+bool UShopPlayerInteractionComponent::RequestFillingMachineUpgrade(ASocketColaFillingMachine* Table, EFillingMachineUpgradeType Upgrade,
+	int32 ExpectedRank, FGuid OperationID)
+{
+	if (!IsFillingTableReachable(Table) || !OperationID.IsValid()) return false;
+	Server_UpgradeFillingMachine(Table,Upgrade,ExpectedRank,OperationID);
+	return true;
+}
+
+void UShopPlayerInteractionComponent::Server_UpgradeFillingMachine_Implementation(ASocketColaFillingMachine* Table,
+	EFillingMachineUpgradeType Upgrade, int32 ExpectedRank, FGuid OperationID)
+{
+	const auto* Pawn=GetCarryPawn(GetOwner());
+	const auto Result=IsValid(Pawn) && Pawn->HasAuthority() && IsFillingTableReachable(Table)
+		? Table->PurchaseUpgrade(Pawn,MaxInteractionDistance,Upgrade,ExpectedRank,OperationID)
+		: EFillingMachinePurchaseResult::Unavailable;
+	Client_FillingMachineUpgradeResult(OperationID,Result);
+}
+
+void UShopPlayerInteractionComponent::Client_FillingMachineUpgradeResult_Implementation(FGuid OperationID, EFillingMachinePurchaseResult Result)
+{
+	if (IsTerminalOpen() && TerminalWidget->IsFillingUpgradeMenu())
+		TerminalWidget->FillingUpgradePurchaseResult(OperationID,Result);
+}
+
+void UShopPlayerInteractionComponent::Server_UseFlowSelector_Implementation(AColaFlowController* FlowController)
+{
+	auto* Pawn=GetCarryPawn(GetOwner());
+	if (IsValid(Pawn) && Pawn->HasAuthority() && IsValid(FlowController) && FlowController->GetWorld()==GetWorld())
+		FlowController->UseSelector(Pawn,MaxInteractionDistance);
 }
 
 void UShopPlayerInteractionComponent::Server_UseSocketMachineControl_Implementation(int32 MachineISID, FName ControlName)
@@ -316,35 +654,91 @@ bool UShopPlayerInteractionComponent::IsTerminalOpen() const
 
 void UShopPlayerInteractionComponent::OpenTerminal(AActor* Station)
 {
-	if (!IsValid(Station) || Station->GetWorld() != GetWorld() || !CanReach(Station)
-		|| (!Station->FindComponentByClass<UShopScannerComponent>() && !Station->FindComponentByClass<UShopATMComponent>() && !Station->FindComponentByClass<UShopProductionStationComponent>())) return;
+	ShowTerminal(Station,true);
+}
+
+void UShopPlayerInteractionComponent::OpenPlayerUpgrades()
+{
+	if (IsTableUpgradePickerOpen() || (IsTerminalOpen() && !TerminalWidget->IsWorldReadout())
+		|| LocalPlacementMachine.IsValid() || GetLocalFlowLever()) return;
+	const auto* Pawn = GetCarryPawn(GetOwner());
+	auto* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
+	if (!PC || !PC->GetLocalPlayer() || PC->GetPawn() != Pawn) return;
+	// The input mode change must not swallow a release needed by an active interaction.
+	const auto* LocalPlayer=PC->GetLocalPlayer();
+	if (PC->IsInputKeyDown(SettingsControls::GrabKey(LocalPlayer)) || PC->IsInputKeyDown(SettingsControls::InteractKey(LocalPlayer))) return;
+
+	CloseFlowReadout();
+	CloseFillingTableReadout();
+	CloseBottleDispenserReadout();
+	TerminalWidget = CreateWidget<UShopTerminalWidget>(PC, UShopTerminalWidget::StaticClass());
+	if (!TerminalWidget) return;
+	TerminalWidget->ConfigurePlayerUpgrades(this);
+	if (!TerminalWidget->AddToPlayerScreen(50))
+	{
+		TerminalWidget = nullptr;
+		return;
+	}
+	TerminalWidget->SetPositionInViewport(FVector2D::ZeroVector, false);
+	TerminalWidget->SetAnchorsInViewport(FAnchors(0,0,1,1));
+	TerminalWidget->SetAlignmentInViewport(FVector2D::ZeroVector);
+	FInputModeUIOnly Mode;
+	Mode.SetWidgetToFocus(TerminalWidget->TakeWidget());
+	PC->SetInputMode(Mode);
+	PC->SetShowMouseCursor(true);
+}
+
+void UShopPlayerInteractionComponent::ShowTerminal(AActor* Station, bool bManualOpen, bool bOpenUpgrades)
+{
+	if (IsTableUpgradePickerOpen() || !IsValid(Station) || Station->GetWorld()!=GetWorld() || !CanReach(Station)) return;
+	const bool bFlowController=Station->IsA<AColaFlowController>();
+	const bool bFlowReadout=bFlowController && !bOpenUpgrades;
+	const bool bProduction=Station->FindComponentByClass<UShopProductionStationComponent>()!=nullptr;
+	if (!bFlowController && !bProduction && !Station->FindComponentByClass<UShopScannerComponent>() && !Station->FindComponentByClass<UShopATMComponent>()) return;
 	APlayerController* PC = Cast<APlayerController>(GetOwner());
 	if (!PC) if (const auto* Pawn = Cast<APawn>(GetOwner())) PC = Cast<APlayerController>(Pawn->GetController());
 	if (!PC) return;
 	if (!PC->IsLocalController()) { if (GetOwner()->HasAuthority()) Client_OpenTerminal(Station); return; }
+	if (IsTerminalOpen() && TerminalWidget->IsPlayerUpgradeMenu()) return;
+	if (bManualOpen && !bFlowController && !bOpenUpgrades)
+	{
+		PinnedFillingTable=Cast<ASocketColaFillingMachine>(Station);
+		DismissedFillingTable.Reset();
+	}
 	// Local E and the server's interaction callback can both open this station.
 	// Keep the live widget and its focus instead of flashing a replacement.
-	if (IsTerminalOpen() && TerminalWidget->IsShowingStation(Station)) return;
-	if (TerminalWidget) TerminalWidget->Close();
-	TerminalWidget = CreateWidget<UShopTerminalWidget>(PC, UShopTerminalWidget::StaticClass());
-	if (!TerminalWidget) return;
-	TerminalWidget->Configure(this, Station);
-	const bool bWorldFillingDisplay = Station->IsA<ASocketColaFillingMachine>();
-	if (bWorldFillingDisplay) TerminalWidget->AddToPlayerScreen(50);
-	else TerminalWidget->AddToViewport(50);
-	if (Station->FindComponentByClass<UShopProductionStationComponent>())
+	if (bOpenUpgrades) CloseFlowReadout();
+	auto& Widget=bFlowReadout ? FlowReadoutWidget : TerminalWidget;
+	if (Widget && Widget->IsInViewport() && Widget->IsShowingStation(Station) && Widget->IsUpgradeMenu()==bOpenUpgrades) return;
+	if (Widget) Widget->Close(bManualOpen && !bOpenUpgrades);
+	Widget=CreateWidget<UShopTerminalWidget>(PC,UShopTerminalWidget::StaticClass());
+	if (!Widget) return;
+	Widget->Configure(this,Station,bOpenUpgrades);
+	const bool bPassive=Widget->IsWorldReadout();
+	if (bPassive || bOpenUpgrades)
 	{
-		TerminalWidget->SetPositionInViewport(FVector2D::ZeroVector,false);
-		TerminalWidget->SetAnchorsInViewport(FAnchors(0,0,1,1)); TerminalWidget->SetAlignmentInViewport(FVector2D::ZeroVector);
-		if (bWorldFillingDisplay) return;
-		FInputModeGameAndUI Mode; Mode.SetWidgetToFocus(TerminalWidget->TakeWidget()); Mode.SetHideCursorDuringCapture(false);
-		PC->SetInputMode(Mode); PC->SetShowMouseCursor(true); return;
+		if (!Widget->AddToPlayerScreen(50)) { Widget=nullptr; return; }
 	}
-	TerminalWidget->SetPositionInViewport(FVector2D::ZeroVector, false);
-	// Position resets the viewport anchors; set the centered anchors afterward.
-	TerminalWidget->SetAnchorsInViewport(FAnchors(.5f,.5f));
-	TerminalWidget->SetAlignmentInViewport(FVector2D(.5,.5));
-	FInputModeUIOnly Mode; Mode.SetWidgetToFocus(TerminalWidget->TakeWidget()); PC->SetInputMode(Mode); PC->SetShowMouseCursor(true);
+	else Widget->AddToViewport(50);
+	Widget->SetPositionInViewport(FVector2D::ZeroVector,false);
+	if (bPassive || bProduction || bOpenUpgrades)
+	{
+		Widget->SetAnchorsInViewport(FAnchors(0,0,1,1));
+		Widget->SetAlignmentInViewport(FVector2D::ZeroVector);
+		if (bPassive) return;
+		if (!bOpenUpgrades)
+		{
+			FInputModeGameAndUI Mode; Mode.SetWidgetToFocus(Widget->TakeWidget()); Mode.SetHideCursorDuringCapture(false);
+			PC->SetInputMode(Mode); PC->SetShowMouseCursor(true); return;
+		}
+	}
+	else
+	{
+		// Position resets the viewport anchors; set the centered anchors afterward.
+		Widget->SetAnchorsInViewport(FAnchors(.5f,.5f));
+		Widget->SetAlignmentInViewport(FVector2D(.5,.5));
+	}
+	FInputModeUIOnly Mode; Mode.SetWidgetToFocus(Widget->TakeWidget()); PC->SetInputMode(Mode); PC->SetShowMouseCursor(true);
 }
 
 EShopCheckoutResult UShopPlayerInteractionComponent::ExecuteScannerAction(UShopScannerComponent* Scanner, FGuid ExpectedSession, EShopScannerAction Action, int32 ISID, FGuid CaseID, int64 Sequence)

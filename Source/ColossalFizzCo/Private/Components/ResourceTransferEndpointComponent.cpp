@@ -67,6 +67,7 @@ void UResourceTransferEndpointComponent::GetLifetimeReplicatedProps(TArray<FLife
 	DOREPLIFETIME(UResourceTransferEndpointComponent,ConnectedMotor);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,CapacityUnits);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,StoredUnits);
+	DOREPLIFETIME(UResourceTransferEndpointComponent,LocalContentSupply);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,bManagedContent);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,bManagedReceivingProxy);
 	DOREPLIFETIME(UResourceTransferEndpointComponent,ContentManager);
@@ -247,7 +248,30 @@ bool UResourceTransferEndpointComponent::HasValidStore() const
 
 bool UResourceTransferEndpointComponent::SupportsResource(EResourceTransportCategory InCategory,int32 InResourceID) const
 {
-	return Category==InCategory && ResourceID==InResourceID && HasValidStore();
+	const bool bUntypedInlet = bAcceptAnyContentWhenEmpty && Category==EResourceTransportCategory::Content
+		&& !bManagedContent && !bCanSupply && StoredUnits<=0 && InResourceID>0;
+	return Category==InCategory && (ResourceID==InResourceID || bUntypedInlet) && HasValidStore();
+}
+
+void UResourceTransferEndpointComponent::SetLocalContentSupply(UResourceTransferEndpointComponent* Store)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority()) return;
+	if (Store && (Store==this || Store->GetOwner()!=GetOwner() || Store->bManagedContent
+		|| Store->Category!=EResourceTransportCategory::Content || Store->LocalContentSupply)) return;
+	if (LocalContentSupply==Store) return;
+	LocalContentSupply=Store;
+	GetOwner()->ForceNetUpdate();
+}
+
+const UResourceTransferEndpointComponent* UResourceTransferEndpointComponent::GetLocalContentSupply() const
+{
+	const auto* Store=LocalContentSupply.Get();
+	return IsValid(Store) && Store->ResourceID==ResourceID && Store->HasValidStore() ? Store : nullptr;
+}
+
+UResourceTransferEndpointComponent* UResourceTransferEndpointComponent::GetLocalContentSupply()
+{
+	return const_cast<UResourceTransferEndpointComponent*>(AsConst(*this).GetLocalContentSupply());
 }
 
 bool UResourceTransferEndpointComponent::SetStoredUnits(float Units)
@@ -260,6 +284,7 @@ bool UResourceTransferEndpointComponent::SetStoredUnits(float Units)
 float UResourceTransferEndpointComponent::GetStoredUnits() const
 {
 	if (!HasValidStore()) return 0;
+	if (const auto* Store=GetLocalContentSupply()) return Store->StoredUnits;
 	if (!bManagedContent) return StoredUnits;
 	if (ContentISID<=0) return 0;
 	const auto* Record=ContentManager->FindISIDData(ContentISID);

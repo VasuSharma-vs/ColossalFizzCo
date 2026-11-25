@@ -9,8 +9,7 @@
 
 namespace
 {
-	// Both stores are floats. Quantize to a delta both can represent so a tiny
-	// transfer can never credit one store while rounding away the other's debit.
+	// Prefer a transfer that both float inventories can represent exactly.
 	float MoveLocalResourceUnits(float& Source,float& Target,float Capacity,float Requested)
 	{
 		const double Limit=FMath::Min3(double(Requested),double(Source),FMath::Max(0.,double(Capacity)-Target));
@@ -23,11 +22,24 @@ namespace
 		const double Quantum=FMath::Max(SourceQuantum,TargetQuantum);
 		if (Quantum<=0) return 0;
 		const double Amount=std::floor(Limit/Quantum)*Quantum;
-		const float NewSource=float(double(Source)-Amount),NewTarget=float(double(Target)+Amount);
-		const double Debit=double(Source)-NewSource,Credit=double(NewTarget)-Target;
-		if (Debit<=0 || Debit!=Credit || Debit>Limit || NewTarget>Capacity) return 0;
+		float NewSource=float(double(Source)-Amount),NewTarget=float(double(Target)+Amount);
+		double Debit=double(Source)-NewSource,Credit=double(NewTarget)-Target;
+		if (Debit!=Credit || Debit>Limit || NewTarget>Capacity)
+		{
+			// Across a float spacing boundary there may be no shared delta.
+			// Round the debit within the request and the credit within the debit.
+			const double SourceLimit=double(Source)-Limit;
+			NewSource=float(SourceLimit);
+			if (NewSource<SourceLimit) NewSource=std::nextafter(NewSource,Source);
+			Debit=double(Source)-NewSource;
+			const double TargetLimit=double(Target)+Debit;
+			NewTarget=float(TargetLimit);
+			if (NewTarget>TargetLimit) NewTarget=std::nextafter(NewTarget,Target);
+			Credit=double(NewTarget)-Target;
+		}
+		if (Credit<=0 || Credit>Debit || Debit>Limit || NewTarget>Capacity) return 0;
 		Source=NewSource; Target=NewTarget;
-		return float(Debit);
+		return float(Credit);
 	}
 }
 
@@ -75,6 +87,7 @@ bool UHoseTransferComponent::CanConnect(const UResourceTransferEndpointComponent
 		|| !Source->SupportsResource(Category,ResourceID) || !Target->SupportsResource(Category,ResourceID)) return false;
 	const bool Flexible=Category==EResourceTransportCategory::Content
 		&& (Source->bUseSignedPressure || Target->bUseSignedPressure || GetOwner()->IsA<AHoseCableActor>());
+	if ((Source->bUseFixedHoseDirection && !Source->bCanSupply) || (Target->bUseFixedHoseDirection && !Target->bCanReceive)) return false;
 	if (Flexible ? (!Source->bCanSupply && !Source->bCanReceive) || (!Target->bCanSupply && !Target->bCanReceive)
 		: !Source->bCanSupply || !Target->bCanReceive) return false;
 	if (Source->bManagedContent!=Target->bManagedContent
@@ -348,13 +361,15 @@ float UHoseTransferComponent::IntakeFrom(UResourceTransferEndpointComponent* Por
 		Accepted=Port->ContentManager->IntakeHoseContent(Port->ContentISID,Buffer,BufferCapacityUnits,Units);
 	else
 	{
+		auto* Store=Port->GetLocalContentSupply();
+		if (!Store) Store=Port;
 		const float Previous=Buffer.Units;
-		Accepted=MoveLocalResourceUnits(Port->StoredUnits,Buffer.Units,BufferCapacityUnits,Units);
+		Accepted=MoveLocalResourceUnits(Store->StoredUnits,Buffer.Units,BufferCapacityUnits,Units);
 		if (Accepted>0.f && Category==EResourceTransportCategory::Content)
 		{
-			if (Previous<=0.f) Buffer.SourceProductID=Port->ContentProductID>0 ? Port->ContentProductID : ResourceID;
-			Buffer.ContentTemperature=float((double(Previous)*Buffer.ContentTemperature+double(Accepted)*Port->ContentTemperature)/Buffer.Units);
-			Buffer.ContentCreationTime=Previous>0 ? FMath::Min(Buffer.ContentCreationTime,Port->ContentCreationTime) : Port->ContentCreationTime;
+			if (Previous<=0.f) Buffer.SourceProductID=Store->ContentProductID>0 ? Store->ContentProductID : ResourceID;
+			Buffer.ContentTemperature=float((double(Previous)*Buffer.ContentTemperature+double(Accepted)*Store->ContentTemperature)/Buffer.Units);
+			Buffer.ContentCreationTime=Previous>0 ? FMath::Min(Buffer.ContentCreationTime,Store->ContentCreationTime) : Store->ContentCreationTime;
 		}
 	}
 	if (Accepted>0.f && IsValid(Port) && IsValid(Port->GetOwner()))
@@ -376,6 +391,11 @@ float UHoseTransferComponent::DeliverTo(UResourceTransferEndpointComponent* Port
 		Delivered=MoveLocalResourceUnits(Buffer.Units,Port->StoredUnits,Port->CapacityUnits,Units);
 		if (Delivered>0.f && Category==EResourceTransportCategory::Content)
 		{
+			if (Previous<=0.f && Port->bAcceptAnyContentWhenEmpty)
+			{
+				Port->ResourceID=Buffer.ResourceID;
+				Port->ContentProductID=Buffer.SourceProductID;
+			}
 			Port->ContentTemperature=float((double(Previous)*Port->ContentTemperature+double(Delivered)*Buffer.ContentTemperature)/Port->StoredUnits);
 			Port->ContentCreationTime=Previous>0 ? FMath::Min(Port->ContentCreationTime,Buffer.ContentCreationTime) : Buffer.ContentCreationTime;
 		}

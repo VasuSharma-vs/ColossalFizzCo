@@ -2,7 +2,7 @@
 from pathlib import Path
 import argparse,json,os,subprocess,sys
 
-def prepare(project,online=True,low=True):
+def prepare(project,online=True,low=False):
     root=Path(project).resolve().parent
     source=root/'Config/Custom/Epic/DefaultEngine.ini'
     if online and not source.is_file():raise ValueError('Epic profile is missing. Use --offline or complete the multiplayer setup.')
@@ -23,7 +23,8 @@ def prepare(project,online=True,low=True):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--project');p.add_argument('--editor');p.add_argument('--offline',action='store_true')
-    p.add_argument('--quality',choices=('low','project'),default='low')
+    p.add_argument('--quality',choices=('low','project'),default='project',
+                   help='Use saved graphics by default or force a low-resource launch.')
     p.add_argument('--user-dir',help='Optional separate data directory for testing.')
     p.add_argument('--dry-run',action='store_true');a=p.parse_args()
     project=Path(a.project).resolve() if a.project else Path(__file__).resolve().parents[1]/'ColossalFizzCo.uproject'
@@ -34,8 +35,10 @@ def main():
     if not editor.is_file():raise ValueError('Unreal Editor was not found. Supply --editor with your installed executable.')
     profile=prepare(project,not a.offline,a.quality=='low')
     command=[str(editor),str(project),'/Game/NormalColaPrototype/Lvl_PrototypeMainMenu','-game',
-             '-CustomConfig='+profile,'-windowed','-ResX=1280','-ResY=720','-NoLiveCoding','-nop4']
-    if a.quality=='low':command+=['-noraytracing','-ExecCmds=t.MaxFPS 30,r.Streaming.PoolSize 256,sg.ViewDistanceQuality 0,sg.ShadowQuality 0,sg.PostProcessQuality 0,sg.EffectsQuality 0,sg.FoliageQuality 0,sg.GlobalIlluminationQuality 0,sg.ReflectionQuality 0']
+             '-CustomConfig='+profile,'-NoLiveCoding','-nop4']
+    if a.quality=='low':
+        command+=['-windowed','-ResX=1280','-ResY=720','-noraytracing',
+                  '-ExecCmds=t.MaxFPS 30,r.Streaming.PoolSize 256,sg.ViewDistanceQuality 0,sg.ShadowQuality 0,sg.PostProcessQuality 0,sg.EffectsQuality 0,sg.FoliageQuality 0,sg.GlobalIlluminationQuality 0,sg.ReflectionQuality 0']
     if a.user_dir:command+=['-UserDir='+str(Path(a.user_dir).resolve())]
     if a.dry_run:print('Prototype launch configuration validated. '+profile+'; '+a.quality+' graphics. No credentials printed.');return
     subprocess.Popen(command,cwd=project.parent,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)

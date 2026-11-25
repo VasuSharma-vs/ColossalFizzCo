@@ -2,11 +2,14 @@
 #include "Props/PropProductCatalog.h"
 #include "Props/PropDeliveryChannel.h"
 #include "Props/PropAssemblyMesh.h"
+#include "Shop/ColaFlowController.h"
 #include "Shop/ManualColaFillingMachine.h"
+#include "Shop/PlayerUpgradesComponent.h"
 #include "Props/InteractableProp.h"
 #include "Props/InteractablePropDataAsset.h"
 #include "Components/ASMComponent.h"
 #include "Components/PropBatchUpdateComponent.h"
+#include "Components/PropGrabInputComponent.h"
 #include "Components/InteractablePropSenseSightComponent.h"
 #include "Components/InteractableInstancedStaticMeshComponent.h"
 #include "Components/StaticMeshPhysicsSimulationComponent.h"
@@ -27,13 +30,16 @@
 #include "Net/UnrealNetwork.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
+#include "Engine/Level.h"
 #include "EngineUtils.h"
 #include "Async/Async.h"
 #include "TimerManager.h"
+#include "UObject/Package.h"
 #include "Shop/SharedTeamWalletComponent.h"
 #include "Shop/ShopCheckoutComponent.h"
 #include "Shop/ShopProcurementComponent.h"
 #include "Props/FragmentDestructionActor.h"
+#include "../Shop/WorldInteractionCarry.h"
 
 namespace
 {
@@ -124,6 +130,7 @@ void APropManager::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 	DOREPLIFETIME(APropManager, LoadState);
 	DOREPLIFETIME(APropManager, PropManagerReady);
 	DOREPLIFETIME(APropManager, bDebugPrintInstanceHit);
+	DOREPLIFETIME(APropManager, PurchasedTableOffers);
 }
 
 void APropManager::SetLoadState(EPropManagerLoadState NewState)
@@ -4644,6 +4651,12 @@ bool APropManager::Server_RequestInteraction_Validate(int32 InISID, EPropInterac
 
 bool APropManager::ValidateInteraction(int32 InISID, EPropInteractionType InteractionType, AActor* InstigatorActor, int32 ExpectedVersion) const
 {
+	return ValidateInteractionWithReach(InISID, InteractionType, InstigatorActor, ExpectedVersion, 0.0);
+}
+
+bool APropManager::ValidateInteractionWithReach(int32 InISID, EPropInteractionType InteractionType, AActor* InstigatorActor,
+	int32 ExpectedVersion, double AdditionalReach) const
+{
 	InISID = ResolveRootISID(InISID);
 	// Exact 10-step Validation Checklist from Section 25 (Steps 31-40):
 	// 31. ISID exists?
@@ -4672,7 +4685,7 @@ bool APropManager::ValidateInteraction(int32 InISID, EPropInteractionType Intera
 		const FVector PropLocation = GetTransform(InISID).GetLocation();
 		const float DistSq = FVector::DistSquared(InstigatorActor->GetActorLocation(), PropLocation);
 		const float MaxDist = ProductDef->InteractionProfile.MaxInteractionDistance;
-		if (DistSq > FMath::Square(MaxDist * 1.5f)) // 1.5x tolerance for network latency
+		if (DistSq > FMath::Square(MaxDist * 1.5 + AdditionalReach)) // 1.5x tolerance for network latency
 		{
 			return false;
 		}
@@ -4962,6 +4975,11 @@ bool APropManager::AllowsPlayerGrab(const FISIDRuntimeIndex& Record) const
 
 bool APropManager::ValidateGrab(int32 InISID, AActor* InstigatorActor) const
 {
+	return ValidateGrabWithReach(InISID, InstigatorActor, 0.0);
+}
+
+bool APropManager::ValidateGrabWithReach(int32 InISID, AActor* InstigatorActor, double AdditionalReach) const
+{
 	if (ResolveRootISID(InISID) != InISID) return false;
 	const FISIDRuntimeIndex* Record = FindISIDData(InISID);
 	if (!Record || !AllowsPlayerGrab(*Record)) return false;
@@ -4978,7 +4996,7 @@ bool APropManager::ValidateGrab(int32 InISID, AActor* InstigatorActor) const
 		}
 	}
 
-	return ValidateInteraction(InISID, EPropInteractionType::Grab, InstigatorActor, -1);
+	return ValidateInteractionWithReach(InISID, EPropInteractionType::Grab, InstigatorActor, -1, AdditionalReach);
 }
 
 bool APropManager::BeginGrab(int32 InISID, AActor* InstigatorActor, USceneComponent* AttachParent, FName SocketName)
@@ -4988,6 +5006,9 @@ bool APropManager::BeginGrab(int32 InISID, AActor* InstigatorActor, USceneCompon
 
 bool APropManager::ExecuteGrab(int32 InISID, AActor* InstigatorActor, USceneComponent* AttachParent, FName SocketName)
 {
+	if (const auto* Grab = IsValid(InstigatorActor) ? InstigatorActor->FindComponentByClass<UPropGrabInputComponent>() : nullptr;
+		Grab && (!AttachParent || AttachParent->GetOwner() == InstigatorActor)
+			&& !Grab->CanCarryProduct(*this, ResolveRootISID(InISID), false)) return false;
 	AActivePropActor* ASM = PrepareGrab(InISID, InstigatorActor, false);
 	if (!ASM) return false;
 
@@ -4999,7 +5020,12 @@ bool APropManager::ExecuteGrab(int32 InISID, AActor* InstigatorActor, USceneComp
 
 AActivePropActor* APropManager::ReserveGrabForTravel(int32 InISID, AActor* Grabber)
 {
-	if (!HasAuthority() || GetNetMode() == NM_Client || !IsValid(Grabber) || !ValidateGrab(InISID, Grabber)) return nullptr;
+	return ReserveGrabWithReach(InISID, Grabber, 0.0);
+}
+
+AActivePropActor* APropManager::ReserveGrabWithReach(int32 InISID, AActor* Grabber, double AdditionalReach)
+{
+	if (!HasAuthority() || GetNetMode() == NM_Client || !IsValid(Grabber) || !ValidateGrabWithReach(InISID, Grabber, AdditionalReach)) return nullptr;
 	return PrepareGrab(InISID, Grabber, true);
 }
 
@@ -5104,7 +5130,11 @@ bool APropManager::ReleaseGrab(int32 InISID, AActor* InstigatorActor, FVector Re
 		return false;
 	}
 
-	if (AActivePropActor* ASM = GetActiveActorFromISID(InISID))
+	auto* Player = Cast<APawn>(Record->RuntimeData.InteractionOwner.Get());
+	auto* Grab = Player ? Player->FindComponentByClass<UPropGrabInputComponent>() : nullptr;
+	auto* ASM = GetActiveActorFromISID(InISID);
+	const bool bBatchRelease = IsValid(ASM) && Grab && Grab->UsesBatchActor(*ASM);
+	if (ASM)
 	{
 		ASM->OnPlayerRelease(ReleaseVelocity);
 		Record->ActiveTransform = ASM->GetActorTransform();
@@ -5119,6 +5149,7 @@ bool APropManager::ReleaseGrab(int32 InISID, AActor* InstigatorActor, FVector Re
 	// Publish the free registry state after the representation has completed that work.
 	SetGrabber(InISID, nullptr);
 	MarkInstanceDirty(InISID, EPropDirtyFlags::State | EPropDirtyFlags::Transform | EPropDirtyFlags::RuntimeData);
+	if (bBatchRelease && IsValid(ASM) && IsValid(Player)) WorldInteractionCarry::ClearHeldActor(*Player, *ASM);
 	return true;
 }
 
@@ -7990,6 +8021,42 @@ void APropManager::ProcessPendingTasks(float DeltaSeconds)
 // =========================================================================
 // 37.M, 66.E & Sections 36, 48–52 — Save / Load & Persistence Functions
 // =========================================================================
+FString APropManager::GetFlowControllerUpgradeKey(const AColaFlowController& Controller)
+{
+	const auto* Level = Controller.GetLevel();
+	if (!Level) return {};
+	const UPackage* Package = Level->GetOutermost();
+	return UWorld::RemovePIEPrefix(Package->GetName()) + TEXT(".") + Controller.GetPathName(Package);
+}
+
+const FFlowControllerUpgradeState* APropManager::FindFlowControllerUpgrades(const AColaFlowController& Controller) const
+{
+	return Controller.GetWorld() == GetWorld() ? FlowControllerUpgrades.Find(GetFlowControllerUpgradeKey(Controller)) : nullptr;
+}
+
+bool APropManager::RecordFlowControllerUpgrades(const AColaFlowController& Controller, const FFlowControllerUpgradeState& State)
+{
+	if (!HasAuthority() || GetNetMode() == NM_Client || Controller.GetWorld() != GetWorld() || !State.IsValid()) return false;
+	FString Key = GetFlowControllerUpgradeKey(Controller);
+	if (Key.IsEmpty()) return false;
+	if (State == FFlowControllerUpgradeState{}) FlowControllerUpgrades.Remove(Key);
+	else FlowControllerUpgrades.Add(MoveTemp(Key), State);
+	return true;
+}
+
+const FPlayerUpgradeState* APropManager::FindPlayerUpgrades(const FString& ProfileKey) const
+{
+	return PlayerUpgrades.Find(ProfileKey);
+}
+
+bool APropManager::RecordPlayerUpgrades(const FString& ProfileKey, const FPlayerUpgradeState& State)
+{
+	if (!HasAuthority() || GetNetMode()==NM_Client || ProfileKey.IsEmpty() || ProfileKey.Len()>64 || !State.IsValid()) return false;
+	if (State==FPlayerUpgradeState{}) PlayerUpgrades.Remove(ProfileKey);
+	else PlayerUpgrades.Add(ProfileKey,State);
+	return true;
+}
+
 bool APropManager::SavePropDatabase(const FString& SlotName, int32 UserIndex)
 {
 	if (!HasAuthority() || SlotName.IsEmpty()) return false;
@@ -7999,6 +8066,9 @@ bool APropManager::SavePropDatabase(const FString& SlotName, int32 UserIndex)
 	WorldSaveData.SchemaVersion = SchemaVersion;
 	WorldSaveData.WorldElapsedSeconds = WorldElapsedSeconds;
 	WorldSaveData.SharedWallet = SharedWallet ? SharedWallet->ExportCommittedState() : FSharedWalletSaveData();
+	WorldSaveData.FlowControllerUpgrades = FlowControllerUpgrades;
+	WorldSaveData.PlayerUpgrades = PlayerUpgrades;
+	WorldSaveData.PurchasedTableOffers = PurchasedTableOffers;
 	WorldSaveData.ReleasedLiquids = ReleasedLiquids;
 	WorldSaveData.ShopCheckout = ShopCheckout ? ShopCheckout->ExportCommittedState() : FShopCheckoutSaveData();
 	ProductDefinitions.GenerateValueArray(WorldSaveData.ProductDefinitions);
@@ -8057,6 +8127,16 @@ bool APropManager::LoadPropDatabase(const FString& SlotName, int32 UserIndex)
 	}
 	if (!ValidateReleasedLiquids(LoadedObj->WorldSaveData.ReleasedLiquids, LoadedObj->WorldSaveData.WorldElapsedSeconds)) return false;
 	if (!UShopCheckoutComponent::ValidateCashWorldSaveData(LoadedObj->WorldSaveData)) return false;
+	for (const auto& Entry : LoadedObj->WorldSaveData.FlowControllerUpgrades)
+		if (Entry.Key.IsEmpty() || !Entry.Value.IsValid()) return false;
+	for (const auto& Entry : LoadedObj->WorldSaveData.PlayerUpgrades)
+		if (Entry.Key.IsEmpty() || Entry.Key.Len()>64 || !Entry.Value.IsValid()) return false;
+	TSet<FName> SavedTableOffers;
+	for (const FName OfferID : LoadedObj->WorldSaveData.PurchasedTableOffers)
+	{
+		if (OfferID.IsNone() || SavedTableOffers.Contains(OfferID)) return false;
+		SavedTableOffers.Add(OfferID);
+	}
 	if (ShopCheckout) ShopCheckout->CancelAllCheckouts();
 	CancelLiquidTransfers();
 	WorldSaveData = LoadedObj->WorldSaveData;
@@ -8100,7 +8180,28 @@ bool APropManager::LoadPropDatabase(const FString& SlotName, int32 UserIndex)
 	for (const FPropContentDefinition& Definition : WorldSaveData.ContentDefinitions) RegisterContentDefinition(Definition);
 	for (const FPropProductDefinition& Definition : WorldSaveData.ProductDefinitions) RegisterProductDefinition(Definition);
  if(ProductCatalog.LoadSynchronous() && !InitializeProductCatalog())return false;
-	if (SharedWallet && !SharedWallet->RestoreCommittedState(WorldSaveData.SharedWallet)) return false;
+	// Wallet listeners can take a snapshot during restore. Install the shop upgrades
+	// and table ownership first so that any such save sees the matching balance.
+	auto PreviousFlowControllerUpgrades = MoveTemp(FlowControllerUpgrades);
+	auto PreviousPlayerUpgrades = MoveTemp(PlayerUpgrades);
+	auto PreviousPurchasedTableOffers = MoveTemp(PurchasedTableOffers);
+	FlowControllerUpgrades = WorldSaveData.FlowControllerUpgrades;
+	PlayerUpgrades = WorldSaveData.PlayerUpgrades;
+	PurchasedTableOffers = WorldSaveData.PurchasedTableOffers;
+	if (SharedWallet && !SharedWallet->RestoreCommittedState(WorldSaveData.SharedWallet))
+	{
+		FlowControllerUpgrades = MoveTemp(PreviousFlowControllerUpgrades);
+		PlayerUpgrades = MoveTemp(PreviousPlayerUpgrades);
+		PurchasedTableOffers = MoveTemp(PreviousPurchasedTableOffers);
+		return false;
+	}
+	UPlayerUpgradesComponent::RestoreForWorld(*this);
+	for (TActorIterator<AColaFlowController> It(GetWorld()); It; ++It)
+	{
+		if (!It->HasActorBegunPlay()) continue;
+		const auto* Saved = FindFlowControllerUpgrades(**It);
+		It->RestoreUpgradeState(Saved ? *Saved : FFlowControllerUpgradeState{});
+	}
 	if (ShopCheckout && !ShopCheckout->RestoreCommittedState(WorldSaveData.ShopCheckout)) return false;
 
 	// Deserialize each saved logical prop by ISID (reusing EmptyInstances or creating ISM instances via RepairLoadedISMI)
@@ -8175,6 +8276,9 @@ int32 APropManager::SaveDirtyInstances(const FString& SlotName, int32 UserIndex)
 	WorldSaveData.SchemaVersion = SchemaVersion;
 	WorldSaveData.WorldElapsedSeconds = WorldElapsedSeconds;
 	WorldSaveData.SharedWallet = SharedWallet ? SharedWallet->ExportCommittedState() : FSharedWalletSaveData();
+	WorldSaveData.FlowControllerUpgrades = FlowControllerUpgrades;
+	WorldSaveData.PlayerUpgrades = PlayerUpgrades;
+	WorldSaveData.PurchasedTableOffers = PurchasedTableOffers;
 	WorldSaveData.ReleasedLiquids = ReleasedLiquids;
 	WorldSaveData.ShopCheckout = ShopCheckout ? ShopCheckout->ExportCommittedState() : FShopCheckoutSaveData();
 	ProductDefinitions.GenerateValueArray(WorldSaveData.ProductDefinitions);
